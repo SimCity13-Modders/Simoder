@@ -71,11 +71,21 @@ struct ResourcePatchDefinition final {
     std::string source;
 };
 
+/** @summary Preserves a full-width raw resource contract independently from legacy 32-bit PROP targets. */
+struct BinaryResourceDefinition final {
+    std::string id;
+    std::string operation;
+    std::string payload;
+    std::string sha256;
+    std::uint64_t size{};
+};
+
 /** Owns one validated mod's metadata and declarative patches. */
 struct ModDefinition final {
     ModManifest manifest;
     std::filesystem::path directory;
     std::vector<ResourcePatchDefinition> patches;
+    std::vector<BinaryResourceDefinition> resources;
 };
 
 /** Associates a registered patch with its stable owner and activation sequence. */

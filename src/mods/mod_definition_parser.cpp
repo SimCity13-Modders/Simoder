@@ -1,4 +1,5 @@
 #include "mods/mod_definition_parser.hpp"
+#include "mods/resource_project.hpp"
 
 #include "formats/toon/toon_document.hpp"
 #include "core/json.hpp"
@@ -449,6 +450,13 @@ bool LoadModDefinition(
     try {
         definition = {};
         error.clear();
+        if (std::filesystem::exists(directory / L"project.toml")) {
+            if (std::filesystem::exists(directory / L"mod.toon")) {
+                error = "Ambiguous directory: project.toml and mod.toon cannot coexist";
+                return false;
+            }
+            return LoadResourceProject(directory, definition, error);
+        }
         formats::toon::Document manifestDocument;
         formats::toon::ParseError parseError;
         const std::filesystem::path manifestPath = directory / L"mod.toon";

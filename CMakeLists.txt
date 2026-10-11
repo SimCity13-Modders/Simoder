@@ -48,6 +48,7 @@ add_library(sc13_core STATIC
     src/mods/mod_manager.cpp
     src/mods/mod_state_store.cpp
     src/mods/mod_types.cpp
+    src/mods/resource_project.cpp
     src/mods/patch_registry.cpp
     src/reverse/pe_file.cpp
     src/runtime/runtime_resource_cache.cpp
@@ -64,6 +65,7 @@ if(SC13_CORE_ONLY)
     return()
 endif()
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION simoder/licenses)
+install(FILES third_party/tomlplusplus/LICENSE DESTINATION simoder/licenses RENAME tomlplusplus-LICENSE.txt)
 
 if(SC13_BUILD_RUNTIME)
     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)

@@ -22,3 +22,8 @@ not a bundled third-party parser dependency.
 
 EA game binaries, package files, and game assets are excluded from the repository
 and are not covered by Simoder's MIT license. Tests use synthetic fixtures.
+# toml++
+
+The schema-three TOML parser includes the unmodified single-header toml++ v3.4.0
+from https://github.com/marzer/tomlplusplus/tree/v3.4.0, under MIT.
+Its license is preserved in `third_party/tomlplusplus/LICENSE` and installed with the runtime.

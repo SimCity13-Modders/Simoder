@@ -1,6 +1,7 @@
 #include "mods/mod_manager.hpp"
 
 #include "mods/mod_definition_parser.hpp"
+#include "mods/resource_project.hpp"
 #include "mods/mod_state_store.hpp"
 #include "mods/patch_registry.hpp"
 #include "runtime/runtime_resource_cache.hpp"
@@ -37,6 +38,16 @@ void AppendError(std::string& destination, std::string_view message) {
     const std::filesystem::path& directory,
     ModDefinitionFingerprint& fingerprint,
     std::string& error) noexcept {
+    std::error_code projectStatusError;
+    const bool hasProject = std::filesystem::exists(directory / L"project.toml", projectStatusError);
+    if (projectStatusError) { error = projectStatusError.message(); return false; }
+    if (hasProject) {
+        ModDefinition imported;
+        if (!LoadResourceProject(directory, imported, error)) return false;
+        if (!core::Sha256File(directory / L"project.toml", fingerprint.manifest, error)) return false;
+        fingerprint.overrides = fingerprint.manifest;
+        return true;
+    }
     if (!core::Sha256File(directory / L"mod.toon", fingerprint.manifest, error)) {
         error = "mod.toon fingerprint: " + error;
         return false;
@@ -225,6 +236,13 @@ bool ModManager::RefreshLocked(std::string& error) {
             failedDiscoveries_.push_back(ModUiEntry{
                 {}, DisplayPath(directory), {}, {}, ModState::Failed,
                 false, false, false, std::move(candidateError)});
+            continue;
+        }
+        const auto resourceDiagnostic = ResourceRuntimeDiagnostic(candidate.definition);
+        if (!resourceDiagnostic.empty()) {
+            const auto& manifest = candidate.definition.manifest;
+            failedDiscoveries_.push_back(ModUiEntry{manifest.id, manifest.name, manifest.version,
+                manifest.author, ModState::Failed, false, false, false, resourceDiagnostic});
             continue;
         }
         grouped[candidate.definition.manifest.id].push_back(std::move(candidate));

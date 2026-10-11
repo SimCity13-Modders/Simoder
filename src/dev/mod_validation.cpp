@@ -5,6 +5,7 @@
 #include "formats/dbpf/dbpf_reader.hpp"
 #include "formats/prop/prop_document.hpp"
 #include "mods/patch_registry.hpp"
+#include "mods/resource_project.hpp"
 #include <algorithm>
 #include <bit>
 #include <set>
@@ -18,6 +19,12 @@ ValidationReport ValidateMods(std::span<const mods::ModDefinition> definitions,
     mods::PatchRegistry registry;
     std::set<core::Tgi> targets;
     for (const auto& definition : definitions) {
+        const auto diagnostic = mods::ResourceRuntimeDiagnostic(definition);
+        if (!diagnostic.empty()) {
+            report.errors.push_back(diagnostic);
+            report.valid = false;
+            continue;
+        }
         std::set<core::Tgi> affected;
         std::string error;
         if (!registry.Activate(definition.manifest.id, definition.patches, affected, error)) {

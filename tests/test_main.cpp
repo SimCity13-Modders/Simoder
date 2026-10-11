@@ -14,6 +14,7 @@
 #include "logging/log_event.hpp"
 #include "mods/mod_definition_parser.hpp"
 #include "mods/mod_manager.hpp"
+#include "mods/resource_project.hpp"
 #include "mods/mod_state_store.hpp"
 #include "mods/patch_registry.hpp"
 #include "reverse/pe_file.hpp"
@@ -1106,6 +1107,47 @@ void TestDbpf() {
     SC13_EXPECT(DeleteFileW(temporaryFile) != FALSE);
 }
 
+/** @summary TOML import preserves wide IDs, validates payload hashes and blocks unsupported runtime activation. */
+void TestResourceProject() {
+    const auto root = CreateTemporaryDirectory();
+    const auto directory = root / "mods" / "raw";
+    std::filesystem::create_directories(directory / "assets");
+    const std::string hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const auto payload = directory / "assets" / (hash+".bin");
+    WriteTextFile(payload,"abc");
+    const std::string manifest = "schemaVersion = 3\ncontract = \"simoder.raw-resources\"\nrequiredCapabilities = [\"resource.register\"]\n[metadata]\nid = \"raw\"\nname = \"Raw test\"\nversion = \"1.0\"\nauthor = \"CI\"\n[[resources]]\nid = \"00B1B104:00000001:1234567800000001\"\noperation = \"add\"\npayload = \"assets/"+hash+".bin\"\nsha256 = \""+hash+"\"\nsize = 3\n";
+    WriteTextFile(directory / "project.toml", manifest);
+    sc13::mods::ModDefinition definition;
+    std::string error;
+    SC13_EXPECT(sc13::mods::LoadModDefinition(directory,definition,error));
+    SC13_EXPECT(definition.resources.size()==1U);
+    if (!definition.resources.empty()) SC13_EXPECT(definition.resources[0].id=="00B1B104:00000001:1234567800000001");
+    SC13_EXPECT(!sc13::dev::ValidateMods(std::span(&definition,1U),{}).valid);
+    sc13::mods::PatchRegistry registry;
+    sc13::runtime::RuntimeResourceCache cache;
+    sc13::mods::ModManager manager(root/"mods",root/"state.toon",registry,cache);
+    SC13_EXPECT(manager.Initialize(error));
+    const auto entries = manager.Snapshot();
+    SC13_EXPECT(entries.size()==1U);
+    if (!entries.empty()) {
+        SC13_EXPECT(entries[0].name=="Raw test");
+        SC13_EXPECT(!entries[0].canEnable);
+        SC13_EXPECT(entries[0].diagnostic.find("resource.register")!=std::string::npos);
+    }
+    SC13_EXPECT(!registry.IsActive("raw"));
+    WriteTextFile(payload,"bad");
+    SC13_EXPECT(!sc13::mods::LoadModDefinition(directory,definition,error));
+    SC13_EXPECT(error.find("SHA-256")!=std::string::npos);
+    WriteTextFile(payload,"abc");
+    WriteTextFile(directory/"project.toml",manifest+"\n[[resources]]\nid = \"00B1B104:00000001:1234567800000001\"\noperation=\"add\"\npayload=\"../outside.bin\"\nsha256=\""+hash+"\"\nsize=3\n");
+    SC13_EXPECT(!sc13::mods::LoadModDefinition(directory,definition,error));
+    WriteTextFile(directory/"project.toml",manifest);
+    WriteTextFile(directory/"mod.toon","id: duplicate\n");
+    SC13_EXPECT(!sc13::mods::LoadModDefinition(directory,definition,error));
+    SC13_EXPECT(error.find("Ambiguous")!=std::string::npos);
+    std::filesystem::remove_all(root);
+}
+
 /** Validates PE32 parsing against the currently executing x86 test image. */
 void TestPeFile() {
     wchar_t executablePath[32768]{};
@@ -1137,7 +1179,19 @@ void TestPeFile() {
 }  // namespace
 
 /** Executes deterministic unit tests without a third-party framework. */
-int main() {
+int main(int argc, char** argv) {
+    /** @summary Validate an explicitly supplied private fixture with the production parser without running it in game. */
+    if (argc == 3 && std::string_view(argv[1]) == "--validate-project") {
+        sc13::mods::ModDefinition imported;
+        std::string error;
+        if (!sc13::mods::LoadModDefinition(std::filesystem::path(argv[2]), imported, error)) {
+            std::cerr << error << '\n';
+            return 1;
+        }
+        std::cout << imported.manifest.name << ": " << imported.resources.size()
+                  << " verified resources\n" << sc13::mods::ResourceRuntimeDiagnostic(imported) << '\n';
+        return 0;
+    }
     /** @summary Verifies the shipped named mod using the same production parser. */
     sc13::mods::ModDefinition packagedDefinition;
     std::string packagedError;
@@ -1161,6 +1215,7 @@ int main() {
     TestModManager();
     TestDbpf();
     TestDeveloperWorkflow();
+    TestResourceProject();
     TestPeFile();
     if (g_failures == 0) {
         std::cout << "All SC13 tests passed.\n";
