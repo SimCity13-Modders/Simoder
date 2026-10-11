@@ -8,6 +8,8 @@
 **/.ruff_cache/
 **/.venv/
 **/node_modules/
+tools/reverse/evidence/
+tools/reverse/reports/
 /logs/
 /captures/
 /mods/

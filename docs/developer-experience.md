@@ -136,3 +136,25 @@ A read-only dry-run against the installed `SimCityUserData/Packages` found a uni
 `SimCityDLCEP1-Scripts_287520926.package` match, resource SHA-256
 `49E10D6E3512E34821B54C75DE978D398E23347695442A9F1C077B37AF65886B`, and computed
 `sanitizerOperatingCost: 300 -> set 345 -> 345`. No deployed game files were changed.
+# Updating the installed loader
+
+The repository `Start-Simoder.bat` checks the local `build/vs2026/bin/Release`
+loader and launcher against the default installed game before launching.
+Differences trigger the CMake install with a manual UAC prompt and verification
+of the installed hashes. Close SimCity and the watcher first; the updater refuses
+to replace binaries while either process runs. It never stops them automatically.
+`--check` remains read-only. Build Release before starting; startup does not compile.
+
+Installed development distributions record their checkout in
+`simoder/developer-source.txt` and include `Update-Simoder.ps1` for the same check.
+Without that marker, a standalone distribution uses its installed binaries.
+For a custom game installation, run the updater with `-Root <checkout>` and
+`-GameRoot <installation>`, then use that installation's start script.
+
+## REA reverse-engineering assistant
+
+The workspace includes an optional wrapper at `tools/reverse/rea.ps1`. It runs
+REA through `npx` for native, .NET, JavaScript, and readiness analysis. REA is
+not a loader dependency and is not installed into the game directory. Use the
+guide in `tools/reverse/README.md`; review `setup` changes before accepting them.
+Raw evidence belongs under the ignored `tools/reverse/evidence/` directory.

@@ -46,6 +46,8 @@ WNDPROC g_originalWindowProcedure = nullptr;
 std::atomic_bool g_initialized = false;
 std::atomic_bool g_initializationAttempted = false;
 bool g_panelOpen = false;
+unsigned int g_uiMouseButtons = 0U;
+unsigned int g_gameMouseButtons = 0U;
 std::string g_feedback;
 
 /** Stores the last sampled presentation state so steady frames do not flood the log. */
@@ -302,20 +304,60 @@ public:
     return true;
 }
 
-/** Routes captured input to ImGui while preserving untouched game window behavior. */
+/** @summary Routes UI-owned mouse gestures to ImGui, preserving complete gestures begun in the game. */
 LRESULT CALLBACK HookWindowProcedure(
     HWND window,
     UINT message,
     WPARAM word,
     LPARAM value) noexcept {
+    const unsigned int uiButtonsBeforeDispatch = g_uiMouseButtons;
     const bool imguiHandled = g_initialized.load(std::memory_order_acquire) &&
         ImGui_ImplWin32_WndProcHandler(window, message, word, value) != 0;
-    const LRESULT result = imguiHandled
+    bool captured = imguiHandled;
+    if (g_initialized.load(std::memory_order_acquire)) {
+        const auto& io = ImGui::GetIO();
+        unsigned int button = 0U;
+        bool down = false;
+        switch (message) {
+            case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: button = 1U; down = true; break;
+            case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: button = 2U; down = true; break;
+            case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: button = 4U; down = true; break;
+            case WM_XBUTTONDOWN: case WM_XBUTTONDBLCLK:
+                button = HIWORD(word) == XBUTTON1 ? 8U : 16U; down = true; break;
+            case WM_LBUTTONUP: button = 1U; break;
+            case WM_RBUTTONUP: button = 2U; break;
+            case WM_MBUTTONUP: button = 4U; break;
+            case WM_XBUTTONUP: button = HIWORD(word) == XBUTTON1 ? 8U : 16U; break;
+            default: break;
+        }
+        const bool mouseOwned = g_uiMouseButtons != 0U ||
+            (io.WantCaptureMouse && g_gameMouseButtons == 0U);
+        if (button != 0U) {
+            captured = down ? mouseOwned : (uiButtonsBeforeDispatch & button) != 0U;
+            if (down) {
+                if (captured) g_uiMouseButtons |= button;
+                else g_gameMouseButtons |= button;
+            } else {
+                g_uiMouseButtons &= ~button;
+                g_gameMouseButtons &= ~button;
+            }
+        } else if (message == WM_MOUSEMOVE || message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+            captured = mouseOwned;
+        } else if (message == WM_KEYDOWN || message == WM_KEYUP ||
+                   message == WM_SYSKEYDOWN || message == WM_SYSKEYUP || message == WM_CHAR) {
+            captured = io.WantCaptureKeyboard;
+        }
+        if (message == WM_KILLFOCUS || message == WM_CAPTURECHANGED) {
+            g_uiMouseButtons = 0U;
+            g_gameMouseButtons = 0U;
+        }
+    }
+    const LRESULT result = captured
         ? 1
         : (g_originalWindowProcedure != nullptr
                ? CallWindowProcW(g_originalWindowProcedure, window, message, word, value)
                : DefWindowProcW(window, message, word, value));
-    LogWindowTransition(message, word, value, result, imguiHandled);
+    LogWindowTransition(message, word, value, result, captured);
     return result;
 }
 
@@ -374,7 +416,7 @@ void RenderSimoder() {
     ImGui::End();
 
     if (g_panelOpen) {
-        ImGui::SetNextWindowSize(ImVec2(720.0F, 420.0F), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(960.0F, 640.0F), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Simoder", &g_panelOpen)) {
             if (ImGui::Button("Refresh") && g_manager != nullptr) {
                 std::string error;
@@ -415,56 +457,6 @@ void RenderSimoder() {
                     if (!entry.diagnostic.empty() && ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("%s", entry.diagnostic.c_str());
                     }
-                    if (ImGui::TreeNode("Resolved overrides")) {
-                        for (const auto& patch : entry.patches) {
-                            ImGui::TextWrapped("%s TGI=%s", patch.name.c_str(),
-                                core::ToString(patch.target).c_str());
-                            if (!patch.source.empty()) ImGui::TextWrapped("Source: %s", patch.source.c_str());
-                            const auto observedCount = std::count_if(runtimeObservations.begin(), runtimeObservations.end(),
-                                [&patch](const auto& observation) { return observation.key.target == patch.target; });
-                            const auto appliedCount = std::count_if(runtimeObservations.begin(), runtimeObservations.end(),
-                                [&patch](const auto& observation) { return observation.key.target == patch.target && observation.status == "applied"; });
-                            ImGui::Text("Retained observations: %llu; applied: %llu (historical)",
-                                static_cast<unsigned long long>(observedCount), static_cast<unsigned long long>(appliedCount));
-                            for (const auto& property : patch.properties) {
-                                ImGui::TextWrapped("%s [0x%08X] %s %.9g", property.name.c_str(),
-                                    property.propertyId, mods::PatchOperationName(property.operation), property.value);
-                                if (!property.source.empty()) ImGui::TextWrapped("Source: %s", property.source.c_str());
-                                if (!property.description.empty()) ImGui::TextWrapped("%s", property.description.c_str());
-                                if (!property.unit.empty()) ImGui::TextWrapped("Unit: %s", property.unit.c_str());
-                                if (!property.origin.empty()) ImGui::TextWrapped("Origin: %s", property.origin.c_str());
-                                for (const auto& observation : runtimeObservations) {
-                                    if (observation.key.target != patch.target) continue;
-                                    const auto vanilla = core::ReadRuntimeFloat(observation.vanilla, property.propertyId);
-                                    const auto applied = core::ReadRuntimeFloat(observation.applied, property.propertyId);
-                                    ImGui::TextWrapped("Observed instance=%llu generation=%llu %s: %s",
-                                        static_cast<unsigned long long>(observation.key.resourceAddress),
-                                        static_cast<unsigned long long>(observation.generation),
-                                        observation.status.c_str(), observation.diagnostic.c_str());
-                                    if (vanilla && applied) ImGui::Text("Historical vanilla %.9g -> committed %.9g", *vanilla, *applied);
-                                }
-                            }
-                            if (std::none_of(runtimeObservations.begin(), runtimeObservations.end(),
-                                [&patch](const auto& observation) { return observation.key.target == patch.target; }))
-                                ImGui::TextUnformatted("No retained observation for this resource.");
-                        }
-                        ImGui::TreePop();
-                    }
-                    if (entry.canReload && ImGui::TreeNode("Pending changes (current -> pending)")) {
-                        ImGui::TextUnformatted("Current operations:");
-                        for (const auto& patch : entry.patches) for (const auto& property : patch.properties)
-                            ImGui::TextWrapped("%s %s [0x%08X] %s %.9g", core::ToString(patch.target).c_str(),
-                                property.name.c_str(), property.propertyId, mods::PatchOperationName(property.operation), property.value);
-                        ImGui::TextUnformatted("Pending operations:");
-                        for (const auto& patch : entry.pendingPatches) for (const auto& property : patch.properties)
-                            ImGui::TextWrapped("%s %s [0x%08X] %s %.9g", core::ToString(patch.target).c_str(),
-                                property.name.c_str(), property.propertyId, mods::PatchOperationName(property.operation), property.value);
-                        if (ImGui::Button("Apply validated reload")) {
-                            std::string error;
-                            g_feedback = g_manager->Reload(entry.id, error, entry.pendingRevision) ? "Reload published; inspect resource outcomes." : "Reload rejected: " + error;
-                        }
-                        ImGui::TreePop();
-                    }
                     ImGui::TableSetColumnIndex(1);
                     ImGui::TextUnformatted(entry.version.c_str());
                     ImGui::TableSetColumnIndex(2);
@@ -500,6 +492,66 @@ void RenderSimoder() {
                     ImGui::PopID();
                 }
                 ImGui::EndTable();
+            }
+            /** @summary Displays inspection and reload controls at the full panel width. */
+            ImGui::SeparatorText("Mod details");
+            for (const auto& entry : entries) {
+                ImGui::PushID(entry.id.empty() ? entry.name.c_str() : entry.id.c_str());
+                if (ImGui::CollapsingHeader(entry.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::TextWrapped("ID: %s", entry.id.c_str());
+                    if (!entry.diagnostic.empty()) ImGui::TextWrapped("%s", entry.diagnostic.c_str());
+                    if (ImGui::TreeNode("Resolved overrides")) {
+                        for (const auto& patch : entry.patches) {
+                            ImGui::TextWrapped("%s TGI=%s", patch.name.c_str(),
+                                core::ToString(patch.target).c_str());
+                            if (!patch.source.empty()) ImGui::TextWrapped("Source: %s", patch.source.c_str());
+                            const auto observedCount = std::count_if(runtimeObservations.begin(), runtimeObservations.end(),
+                                [&patch](const auto& observation) { return observation.key.target == patch.target; });
+                            const auto appliedCount = std::count_if(runtimeObservations.begin(), runtimeObservations.end(),
+                                [&patch](const auto& observation) { return observation.key.target == patch.target && observation.status == "applied"; });
+                            ImGui::TextWrapped("Retained observations: %llu; applied: %llu (historical)",
+                                static_cast<unsigned long long>(observedCount), static_cast<unsigned long long>(appliedCount));
+                            for (const auto& property : patch.properties) {
+                                ImGui::TextWrapped("%s [0x%08X] %s %.9g", property.name.c_str(),
+                                    property.propertyId, mods::PatchOperationName(property.operation), property.value);
+                                if (!property.source.empty()) ImGui::TextWrapped("Source: %s", property.source.c_str());
+                                if (!property.description.empty()) ImGui::TextWrapped("%s", property.description.c_str());
+                                if (!property.unit.empty()) ImGui::TextWrapped("Unit: %s", property.unit.c_str());
+                                if (!property.origin.empty()) ImGui::TextWrapped("Origin: %s", property.origin.c_str());
+                                for (const auto& observation : runtimeObservations) {
+                                    if (observation.key.target != patch.target) continue;
+                                    const auto vanilla = core::ReadRuntimeFloat(observation.vanilla, property.propertyId);
+                                    const auto applied = core::ReadRuntimeFloat(observation.applied, property.propertyId);
+                                    ImGui::TextWrapped("Observed instance=%llu generation=%llu %s: %s",
+                                        static_cast<unsigned long long>(observation.key.resourceAddress),
+                                        static_cast<unsigned long long>(observation.generation),
+                                        observation.status.c_str(), observation.diagnostic.c_str());
+                                    if (vanilla && applied) ImGui::TextWrapped("Historical vanilla %.9g -> committed %.9g", *vanilla, *applied);
+                                }
+                            }
+                            if (std::none_of(runtimeObservations.begin(), runtimeObservations.end(),
+                                [&patch](const auto& observation) { return observation.key.target == patch.target; }))
+                                ImGui::TextUnformatted("No retained observation for this resource.");
+                        }
+                        ImGui::TreePop();
+                    }
+                    if (entry.canReload && ImGui::TreeNode("Pending changes (current -> pending)")) {
+                        ImGui::TextUnformatted("Current operations:");
+                        for (const auto& patch : entry.patches) for (const auto& property : patch.properties)
+                            ImGui::TextWrapped("%s %s [0x%08X] %s %.9g", core::ToString(patch.target).c_str(),
+                                property.name.c_str(), property.propertyId, mods::PatchOperationName(property.operation), property.value);
+                        ImGui::TextUnformatted("Pending operations:");
+                        for (const auto& patch : entry.pendingPatches) for (const auto& property : patch.properties)
+                            ImGui::TextWrapped("%s %s [0x%08X] %s %.9g", core::ToString(patch.target).c_str(),
+                                property.name.c_str(), property.propertyId, mods::PatchOperationName(property.operation), property.value);
+                        if (ImGui::Button("Apply validated reload")) {
+                            std::string error;
+                            g_feedback = g_manager->Reload(entry.id, error, entry.pendingRevision) ? "Reload published; inspect resource outcomes." : "Reload rejected: " + error;
+                        }
+                        ImGui::TreePop();
+                    }
+                }
+                ImGui::PopID();
             }
         }
         ImGui::End();

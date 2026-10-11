@@ -3,6 +3,20 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 rem /** Resolves the installed Simoder runtime relative to the game root. */
 set "SIMODER_ROOT=%~dp0"
+rem /** @summary Updates installed binaries from the recorded local build before launching. */
+if /I "%~1"=="--check" goto resolve_runtime
+set "SIMODER_UPDATER=%~dp0simoder\Update-Simoder.ps1"
+if exist "%~dp0packaging\Update-Simoder.ps1" set "SIMODER_UPDATER=%~dp0packaging\Update-Simoder.ps1"
+if exist "%SIMODER_UPDATER%" (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SIMODER_UPDATER%" -Root "%~dp0."
+    if errorlevel 1 (
+        echo [BLAD] Aktualizacja nie powiodla sie. Uruchomienie gry anulowane.
+        pause
+        exit /b 1
+    )
+)
+:resolve_runtime
+if exist "%~dp0CMakeLists.txt" set "SIMODER_ROOT=C:\Program Files\EA Games\SimCity\"
 set "SIMODER_RUNTIME=%SIMODER_ROOT%simoder"
 set "SIMODER_EXE=%SIMODER_RUNTIME%\simoder.exe"
 set "SIMODER_DLL=%SIMODER_RUNTIME%\sc13modloader.dll"

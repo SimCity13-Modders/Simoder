@@ -182,7 +182,7 @@ internal sealed class BrokerService
         return new DiagnosticSnapshot(
             state,
             ReadOverlayModules(state.Processes),
-            ReadRecentLogs(),
+            ReadRecentLogs().Concat(LoaderDiagnostics.Read(gameRoot_)).TakeLast(320).ToArray(),
             captures_.GetLastCapture(),
             DateTimeOffset.UtcNow);
     }
@@ -204,7 +204,8 @@ internal sealed class BrokerService
             foreach (ProcessModule module in process.Modules)
             {
                 var name = module.ModuleName;
-                if (name.Contains("overlay", StringComparison.OrdinalIgnoreCase) ||
+                if (name.Equals("sc13modloader.dll", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("overlay", StringComparison.OrdinalIgnoreCase) ||
                     name.Contains("discord", StringComparison.OrdinalIgnoreCase) ||
                     name.Contains("nv", StringComparison.OrdinalIgnoreCase) ||
                     name.Contains("igo", StringComparison.OrdinalIgnoreCase) ||

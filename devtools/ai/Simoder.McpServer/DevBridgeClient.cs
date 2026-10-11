@@ -54,9 +54,23 @@ public sealed class DevBridgeClient
         CallAsync<WaitForStageRequest, SessionState>(BrokerCommand.WaitForStage, request,
             TimeSpan.FromSeconds(Math.Clamp(request.TimeoutSeconds + 5, 6, 305)), cancellationToken);
 
-    /// <summary>Reads a bounded diagnostic bundle without restarting or terminating anything.</summary>
-    public Task<DiagnosticSnapshot> GetDiagnosticsAsync(CancellationToken cancellationToken) =>
-        CallAsync<object, DiagnosticSnapshot>(BrokerCommand.GetDiagnostics, new { }, TimeSpan.FromSeconds(15), cancellationToken);
+    /// <summary>@summary Reads broker evidence or explicitly limited local evidence when the broker is disconnected.</summary>
+    public async Task<DiagnosticSnapshot> GetDiagnosticsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await CallAsync<object, DiagnosticSnapshot>(BrokerCommand.GetDiagnostics, new { },
+                TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException exception) when (exception.InnerException is TimeoutException or IOException)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var state = new SessionState(null, null, StartupStage.Idle, StageSource.Internal, 0,
+                "DevBridge disconnected: only installed files and historical logs are available; live process/window state is unknown.",
+                now, [], [], []);
+            return new DiagnosticSnapshot(state, [], LoaderDiagnostics.Read(gameRoot_), null, now);
+        }
+    }
     /// <summary>@summary Reads current or explicitly stale cached loader evidence without causing UAC.</summary>
     public Task<JsonElement> GetRuntimeEvidenceAsync(CancellationToken cancellationToken) =>
         CallAsync<object, JsonElement>(BrokerCommand.GetRuntimeEvidence, new { }, TimeSpan.FromSeconds(5), cancellationToken);

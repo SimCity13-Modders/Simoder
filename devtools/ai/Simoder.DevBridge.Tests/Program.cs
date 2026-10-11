@@ -34,6 +34,7 @@ internal static class Program
         Run("capture result contains native MCP image", TestCaptureImageResult);
         Run("diagnostics preserve the last capture as a native MCP image", TestDiagnosticImageResult);
         Run("runtime evidence marks stale and unverified snapshots and bounds logs", TestRuntimeEvidence);
+        Run("local loader diagnostics report missing binaries without requiring a broker", TestLocalLoaderDiagnostics);
         await RunAsync("MCP stdio handshake advertises exact tools", TestMcpToolDiscoveryAsync).ConfigureAwait(false);
         await RunAsync("Codex registration is idempotent and reversible", TestCodexRegistrationAsync).ConfigureAwait(false);
 
@@ -41,6 +42,22 @@ internal static class Program
             ? "All Simoder DevBridge tests passed."
             : $"{failures_} Simoder DevBridge test(s) failed.");
         return failures_ == 0 ? 0 : 1;
+    }
+
+    /// <summary>@summary Verifies disconnected installation evidence and exact disk identities.</summary>
+    private static void TestLocalLoaderDiagnostics()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "SimoderDiagnostics", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, "simoder"));
+        try
+        {
+            Assert(LoaderDiagnostics.Read(root).Any(line => line.Contains("sc13modloader.dll: missing")), "Missing DLL was not reported");
+            var bytes = new byte[] { 1, 2, 3 };
+            File.WriteAllBytes(Path.Combine(root, "simoder", "sc13modloader.dll"), bytes);
+            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+            Assert(LoaderDiagnostics.Read(root).Any(line => line.Contains(hash)), "Disk DLL hash was not reported");
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     /// <summary>@summary Verifies cached evidence freshness, malformed data and exact mod-log filtering.</summary>

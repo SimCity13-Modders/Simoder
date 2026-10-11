@@ -64,3 +64,11 @@ A fresh snapshot requires the verified SimCity PID, consistent generation and ag
 it does not establish consumer/gameplay acceptance. `simoder_get_logs` reads at most 200 lines
 from the fixed loader log's last 64 KiB and can filter one exact mod ID. Both tools are read-only,
 cause no UAC prompt, and require the existing broker. See `docs/developer-experience.md` in source.
+# Loader diagnostics without a broker
+
+`simcity_get_diagnostics` falls back to fixed installation paths when DevBridge
+is disconnected. It returns loader, watcher and game EXE disk hashes plus a
+bounded historical loader log tail. Its state explicitly reports that live
+process/window/hook state is unknown. With the broker connected, module evidence
+also includes `sc13modloader.dll`. Read-only diagnostics do not launch the broker,
+request UAC, restart the game, or accept arbitrary memory addresses or paths.

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Simoder reviewed REA evidence reference",
+  "type": "object",
+  "required": ["schemaVersion", "target", "targetSha256", "buildFileSha256", "buildTextSha256", "findings"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "target": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "targetSha256": { "type": "string", "pattern": "^[0-9A-Fa-f]{64}$" },
+    "buildFileSha256": { "type": "string", "pattern": "^[0-9A-Fa-f]{64}$" },
+    "buildTextSha256": { "type": "string", "pattern": "^[0-9A-Fa-f]{64}$" },
+    "provider": { "type": "string", "maxLength": 64 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "summary", "confidence", "evidence"],
+        "properties": {
+          "kind": { "enum": ["symbol", "property", "call", "string", "behavior"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "confidence": { "enum": ["candidate", "reviewed", "runtime_verified"] },
+          "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "maxLength": 4096 } },
+          "tgi": { "type": "string", "pattern": "^[0-9A-Fa-f]{8}:[0-9A-Fa-f]{8}:[0-9A-Fa-f]{8}$" },
+          "propertyId": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{8}$" },
+          "name": { "type": "string", "maxLength": 128 },
+          "type": { "type": "string", "maxLength": 64 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

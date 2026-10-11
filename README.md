@@ -193,7 +193,8 @@ cause, and is unrelated to Simoder's in-game ImGui overlay.
 
 Detailed behavior is documented in [architecture](docs/architecture.md),
 [mod lifecycle](docs/mod-lifecycle.md), [logging](docs/logging.md), and the
-[manual M3 test](docs/first-test.md).
+[manual M3 test](docs/first-test.md). Optional REA reverse-engineering workflows
+are documented in [tools/reverse/README.md](tools/reverse/README.md).
 
 ## Repository policy
 

@@ -153,6 +153,9 @@ if(SC13_BUILD_RUNTIME)
     install(FILES Start-Simoder.bat DESTINATION .)
     install(PROGRAMS Start-Simoder.sh DESTINATION .)
     install(FILES packaging/Uninstall-Simoder.bat DESTINATION simoder)
+    install(FILES packaging/Update-Simoder.ps1 DESTINATION simoder)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/developer-source.txt" "${CMAKE_CURRENT_SOURCE_DIR}\n")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/developer-source.txt" DESTINATION simoder)
     install(
         FILES "${minhook_SOURCE_DIR}/LICENSE.txt"
         DESTINATION simoder/licenses
