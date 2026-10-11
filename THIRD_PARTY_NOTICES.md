@@ -7,14 +7,9 @@ does not replace the licenses or copyright notices of external components.
 | --- | --- | --- |
 | MinHook v1.3.4, including Hacker Disassembler Engine | Downloaded by CMake and linked into the loader | BSD-2-Clause; retain the complete upstream LICENSE.txt, including HDE notices. https://github.com/TsudaKageyu/minhook |
 | Dear ImGui v1.92.9 and Win32/DX9 backends | Downloaded by CMake and linked into the overlay | MIT, copyright Omar Cornut. https://github.com/ocornut/imgui |
-| ModelContextProtocol 2.0.0 and ModelContextProtocol.Core | NuGet dependencies of optional AI DevTools | Apache-2.0, as declared by the installed package metadata. https://github.com/modelcontextprotocol/csharp-sdk |
-| Microsoft.Extensions.Hosting 10.0.10 and its dependencies | NuGet dependency of optional AI DevTools | Hosting declares MIT; transitive packages retain their individual terms. https://github.com/dotnet/dotnet |
-| .NET / Windows SDK runtime components | Optional self-contained AI DevTools and Windows API projection | Retain the applicable Microsoft runtime and package notices; these components are not relicensed by Simoder. |
 
 The native installer copies the full MinHook and Dear ImGui licenses into
-`simoder/licenses`. Self-contained .NET distribution contains additional runtime
-and transitive package components: this table identifies direct dependencies,
-and is not an exhaustive binary-distribution license inventory.
+`simoder/licenses`. Developer tooling dependencies and external catalog importer notices are maintained in Simoder-DevTools.
 
 The OpenSC5 and OpenSCP integrations are independently implemented importers
 for external catalogs and JSON exports. Their source trees and catalogs are

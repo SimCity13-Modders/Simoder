@@ -29,25 +29,13 @@ SimCity/
 |   |-- cache/                  # metadata only; never packages
 |   |-- simoder.exe
 |   |-- sc13modloader.dll
-|   |-- DevTools/                # optional; SC13_INSTALL_DEVTOOLS=ON
-|   |   `-- AI/
-|   |       |-- Simoder.DevBridge.exe
-|   |       |-- Simoder.McpServer.exe
-|   |       |-- Register-Simoder-MCP.ps1
-|   |       `-- Unregister-Simoder-MCP.ps1
 |   `-- Uninstall-Simoder.bat
 |-- Start-Simoder.bat
 `-- Start-Simoder.sh            # experimental Wine/Proton wrapper
 ```
 
 `mods/` belongs to the user. The uninstaller preserves mods, `config.toon`, and `state.toon` by
-default. Optional reverse-engineering utilities install under `simoder/DevTools` only when the
-`SC13_INSTALL_DEVTOOLS` CMake option is enabled.
-
-When enabled, DevTools also include the Windows-only AI DevBridge. Its non-elevated stdio MCP
-server can inspect and operate only signed/allowlisted EA and SimCity windows through a separately
-elevated broker. Registration is always explicit; see `simoder/DevTools/AI/README.md` after
-installation. Normal builds, `Start-Simoder.bat`, and end-user runtime behavior do not load it.
+default. Developer tools are distributed separately from the loader; see [repository boundary](docs/developer-experience.md).
 
 The source repository intentionally does not contain root-level `mods/` or `simoder/` runtime
 directories. Read-only distribution defaults live under `packaging/`; `cmake --install` places
@@ -60,15 +48,6 @@ Studio 2026:
 
 ```powershell
 cmake --preset vs2026-x86
-cmake --build --preset vs2026-release --parallel
-ctest --preset vs2026-release
-cmake --install build/vs2026 --config Release --prefix '<SimCity-install>'
-```
-
-Build and install the optional developer payload with:
-
-```powershell
-cmake --preset vs2026-x86 -DSC13_INSTALL_DEVTOOLS=ON
 cmake --build --preset vs2026-release --parallel
 ctest --preset vs2026-release
 cmake --install build/vs2026 --config Release --prefix '<SimCity-install>'
@@ -136,27 +115,7 @@ overlay's Resolved overrides inspector shows names, IDs, operations and sources.
 runtime patch logs additionally show vanilla and final resource values (the final value may
 include operations from several mods).
 
-Convert local dictionaries with Python 3 (standard library only):
-
-```powershell
-python tools/symbols/import_symbols.py opensc5 Properties.txt path/to/mod/symbols.toon
-python tools/symbols/import_symbols.py s3db database_main.s3db path/to/mod/symbols.toon
-build/vs2026/bin/Release/sc13-inspect.exe mod path/to/mod
-```
-
-The OpenSC5 adapter accepts explicit hexadecimal/decimal property declarations. Hash expressions
-are reported as skipped; inspect the report and add `--allow-skipped` to accept a partial catalog.
-The s3db adapter reads the same SQLite `Properties(id,name,comments)` table as OpenSCP's
-`sc-registry`, read-only. It imports property descriptors only; group/instance descriptors cannot
-identify a complete resource TGI. Empty names are reported, ambiguous names fail, and output is
-sorted with source SHA-256 provenance. Existing outputs are never overwritten. Catalogs are pinned
-per mod rather than a mutable global database. This is dictionary interoperability, not support
-for arbitrary OpenSCP packages or its planned mod-project format. Imported names do not expand
-the loader's supported scalar-float patch types.
-
-External dictionaries are not bundled. Adapter formats were checked against
-[OpenSC5 Properties.txt](https://github.com/TornadoCookie/OpenSC5/blob/main/Properties.txt) and
-[OpenSCP sc-registry](https://github.com/FluffyChi-Xing/fluffy-open-scp/blob/master/crates/sc-registry/src/lib.rs).
+Catalog importers for OpenSC5 and OpenSCP, CLI validation and REA live in the separate Simoder-DevTools repository. The runtime continues to load the resulting symbols.toon catalogs. See [developer integration](docs/developer-experience.md).
 
 ## Logging and DeveloperConsole
 
@@ -194,7 +153,7 @@ cause, and is unrelated to Simoder's in-game ImGui overlay.
 Detailed behavior is documented in [architecture](docs/architecture.md),
 [mod lifecycle](docs/mod-lifecycle.md), [logging](docs/logging.md), and the
 [manual M3 test](docs/first-test.md). Optional REA reverse-engineering workflows
-are documented in [tools/reverse/README.md](tools/reverse/README.md).
+are documented in [the DevTools integration guide](docs/developer-experience.md).
 
 ## Repository policy
 

@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.24)
 
 project(SC13ModLoader VERSION 0.1.0 LANGUAGES C CXX)
 
-install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION simoder/licenses)
 
 if(NOT WIN32)
     message(FATAL_ERROR "SC13 Mod Loader currently targets Windows only.")
@@ -10,7 +9,7 @@ endif()
 
 option(SC13_BUILD_RUNTIME "Build the injected DLL and launcher." ON)
 option(SC13_BUILD_TESTS "Build unit tests." ON)
-option(SC13_INSTALL_DEVTOOLS "Build and install reverse-engineering and optional AI tools under simoder/DevTools." OFF)
+option(SC13_CORE_ONLY "Expose only the shared Simoder core library." OFF)
 option(
     SC13_ENABLE_DISCOVERY_TRACE
     "Enable the retired package-I/O and executable-image discovery instrumentation."
@@ -58,20 +57,13 @@ target_compile_definitions(sc13_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN
 target_link_libraries(sc13_core PUBLIC bcrypt)
 sc13_enable_warnings(sc13_core)
 
-add_executable(sc13-inspect tools/inspect/main.cpp)
-target_link_libraries(sc13-inspect PRIVATE sc13_core)
-sc13_enable_warnings(sc13-inspect)
-add_executable(simoder-dev tools/dev/main.cpp)
-target_link_libraries(simoder-dev PRIVATE sc13_core)
-sc13_enable_warnings(simoder-dev)
-
-add_executable(sc13-pe-probe tools/pe_probe/main.cpp)
-target_link_libraries(sc13-pe-probe PRIVATE sc13_core)
-sc13_enable_warnings(sc13-pe-probe)
-
-add_executable(sc13-memory-probe tools/memory_probe/main.cpp)
-target_link_libraries(sc13-memory-probe PRIVATE sc13_core)
-sc13_enable_warnings(sc13-memory-probe)
+# @summary Stable source SDK consumed by the separately versioned DevTools repository.
+set(SC13_CORE_API_VERSION 1 CACHE INTERNAL "Simoder source SDK API version")
+add_library(Simoder::Core ALIAS sc13_core)
+if(SC13_CORE_ONLY)
+    return()
+endif()
+install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION simoder/licenses)
 
 if(SC13_BUILD_RUNTIME)
     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
@@ -172,63 +164,7 @@ if(SC13_BUILD_RUNTIME)
         @ONLY
     )
     install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/InstallRuntimeData.cmake")
-    if(SC13_INSTALL_DEVTOOLS)
-        find_program(SC13_DOTNET_EXECUTABLE dotnet REQUIRED)
-        set(SC13_AI_DEVTOOLS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/devtools/ai")
-        set(SC13_AI_DEVTOOLS_PUBLISH_ROOT "${CMAKE_CURRENT_BINARY_DIR}/ai-devtools")
-        add_custom_target(sc13-ai-devtools ALL
-            COMMAND
-                "${SC13_DOTNET_EXECUTABLE}" build
-                "${SC13_AI_DEVTOOLS_SOURCE_DIR}/Simoder.DevBridge.Tests/Simoder.DevBridge.Tests.csproj"
-                --configuration "$<CONFIG>"
-            COMMAND
-                "${SC13_DOTNET_EXECUTABLE}" publish
-                "${SC13_AI_DEVTOOLS_SOURCE_DIR}/Simoder.DevBridge/Simoder.DevBridge.csproj"
-                --configuration "$<CONFIG>"
-                --runtime win-x64
-                --self-contained true
-                --output "${SC13_AI_DEVTOOLS_PUBLISH_ROOT}/$<CONFIG>"
-                -p:PublishSingleFile=false
-                -p:DebugType=None
-                -p:DebugSymbols=false
-            COMMAND
-                "${SC13_DOTNET_EXECUTABLE}" publish
-                "${SC13_AI_DEVTOOLS_SOURCE_DIR}/Simoder.McpServer/Simoder.McpServer.csproj"
-                --configuration "$<CONFIG>"
-                --runtime win-x64
-                --self-contained true
-                --output "${SC13_AI_DEVTOOLS_PUBLISH_ROOT}/$<CONFIG>"
-                -p:PublishSingleFile=false
-                -p:DebugType=None
-                -p:DebugSymbols=false
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            COMMENT "Building optional self-contained Simoder AI DevTools"
-            VERBATIM
-        )
-        install(
-            TARGETS sc13-inspect sc13-pe-probe sc13-memory-probe simoder-dev
-            RUNTIME DESTINATION simoder/DevTools
-        )
-        install(FILES tools/symbols/import_symbols.py DESTINATION simoder/DevTools/Symbols)
-        install(FILES tools/symbols/openscp_diff.py DESTINATION simoder/DevTools/Symbols)
-        install(FILES devtools/vscode/package.json devtools/vscode/extension.js
-            devtools/vscode/helpers.js devtools/vscode/snippets.json devtools/vscode/README.md
-            DESTINATION simoder/DevTools/VSCode)
-        install(FILES LICENSE DESTINATION simoder/DevTools/VSCode)
-        configure_file(
-            cmake/InstallAiDevTools.cmake.in
-            "${CMAKE_CURRENT_BINARY_DIR}/InstallAiDevTools.cmake"
-            @ONLY
-        )
-        install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/InstallAiDevTools.cmake")
-        install(
-            FILES
-                devtools/ai/scripts/Register-Simoder-MCP.ps1
-                devtools/ai/scripts/Unregister-Simoder-MCP.ps1
-                devtools/ai/README.md
-            DESTINATION simoder/DevTools/AI
-        )
-    endif()
+
 endif()
 
 if(SC13_BUILD_TESTS)
@@ -238,34 +174,10 @@ if(SC13_BUILD_TESTS)
     sc13_enable_warnings(sc13-tests)
     add_test(NAME sc13-tests COMMAND sc13-tests)
     target_compile_definitions(sc13-tests PRIVATE SC13_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_Interpreter_FOUND)
-        add_test(NAME sc13-symbol-import-tests COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/symbols/test_import_symbols.py")
-        set_tests_properties(sc13-symbol-import-tests PROPERTIES
-            ENVIRONMENT "SC13_MOD_INSPECTOR=$<TARGET_FILE:sc13-inspect>")
-    endif()
-    find_program(SC13_NODE_EXECUTABLE node)
-    if(SC13_NODE_EXECUTABLE)
-        add_test(NAME sc13-editor-tests COMMAND "${SC13_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/devtools/vscode/helpers.test.js")
-    endif()
-    if(SC13_INSTALL_DEVTOOLS)
-        add_test(
-            NAME simoder-devbridge-tests
-            COMMAND
-                "${SC13_DOTNET_EXECUTABLE}" run
-                --project "${CMAKE_CURRENT_SOURCE_DIR}/devtools/ai/Simoder.DevBridge.Tests/Simoder.DevBridge.Tests.csproj"
-                --configuration "$<CONFIG>"
-                --no-build
-        )
-        set_tests_properties(simoder-devbridge-tests PROPERTIES
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            TIMEOUT 45
-        )
-    endif()
+
 endif()
 
-foreach(target sc13-inspect sc13-pe-probe sc13-memory-probe simoder-dev sc13modloader sc13-launcher sc13-tests)
+foreach(target sc13_core sc13modloader sc13-launcher sc13-tests)
     if(TARGET ${target})
         set_target_properties(${target} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
