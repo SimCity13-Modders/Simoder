@@ -1,0 +1,49 @@
+name: Release Simoder runtime
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+      - name: Validate version tag
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
+            throw 'Release tag must be vMAJOR.MINOR.PATCH with an optional prerelease suffix'
+          }
+      - name: Download this run's tested runtime
+        shell: pwsh
+        run: |
+          gh run download $env:RUN_ID --name simoder-windows-x86 --dir release-assets
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact download failed' }
+      - name: Revalidate downloaded distribution
+        run: python tools/distribution/check_runtime.py release-assets
+      - name: Package legal notices
+        shell: pwsh
+        run: Compress-Archive -LiteralPath release-assets/licenses -DestinationPath release-assets/licenses.zip
+      - name: Publish tested assets
+        shell: pwsh
+        run: |
+          $releaseOptions = @('--verify-tag', '--generate-notes', '--title', "Simoder $env:RELEASE_TAG")
+          if ($env:RELEASE_TAG.Contains('-')) { $releaseOptions += '--prerelease' }
+          gh release create $env:RELEASE_TAG release-assets/d3d9.dll release-assets/SHA256SUMS.txt release-assets/licenses.zip @releaseOptions
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed; inspect any draft before retrying' }

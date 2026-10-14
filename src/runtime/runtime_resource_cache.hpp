@@ -12,8 +12,18 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace sc13::runtime {
+/** @summary Returns copied historical float evidence without exposing native instance addresses. */
+struct RuntimeFloatObservation final {
+    float value{};
+    float vanilla{};
+    std::uint64_t observedAtUnixMs{};
+    mods::PatchGeneration generation{};
+    std::string status;
+    std::size_t instances{};
+};
 
 /** Uniquely identifies one game-owned runtime resource instance. */
 struct RuntimeResourceKey final {
@@ -91,11 +101,16 @@ public:
 
     /** Returns owned restoration snapshots without exposing internal cache storage. */
     [[nodiscard]] std::vector<RuntimeResourceRestoreEntry> SnapshotForRestore() const;
+    /** @summary Copies only affected vanilla tables so script updates avoid scanning/copying unrelated payloads. */
+    [[nodiscard]] std::vector<RuntimeResourceRestoreEntry> SnapshotForTargets(const std::set<core::Tgi>& targets) const;
     /** @summary Records an observed rejection without retaining a dereferenceable game pointer. */
     void RecordFailure(const RuntimeResourceKey& key, mods::PatchGeneration generation,
         std::string_view reason) noexcept;
     /** @summary Returns bounded historical evidence for UI and external tools. */
     [[nodiscard]] std::vector<RuntimeResourceObservation> Observations() const;
+    /** @summary Reads one bounded historical field and rejects inconsistent values across observed instances. */
+    [[nodiscard]] std::optional<RuntimeFloatObservation> ReadObservedFloat(
+        const core::Tgi& target, std::uint32_t property) const;
 
     /** Releases loader-owned snapshots during controlled shutdown. */
     void Clear() noexcept;

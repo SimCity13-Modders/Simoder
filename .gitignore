@@ -1,4 +1,5 @@
 /build/
+/.analysis/
 **/bin/
 **/obj/
 **/__pycache__/

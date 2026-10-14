@@ -1,8 +1,11 @@
 #include "mods/mod_definition_parser.hpp"
 #include "mods/resource_project.hpp"
+#include "scripting/source_project.hpp"
+#include "scripting/script_runtime.hpp"
 
 #include "formats/toon/toon_document.hpp"
 #include "core/json.hpp"
+#include "formats/toml/value_conversion.hpp"
 
 #include <charconv>
 #include <cmath>
@@ -26,21 +29,6 @@ struct NameCatalog final {
     std::map<std::string, PropertyPatch, std::less<>> metadata;
     std::map<std::string, std::string, std::less<>> declaredTypes;
 };
-
-/** Formats a bounded TOON parser diagnostic for one named mod file. */
-[[nodiscard]] std::string FormatParseError(
-    const std::filesystem::path& path,
-    const formats::toon::ParseError& error) {
-    std::string message = path.filename().string();
-    if (error.line != 0U) {
-        message += ":" + std::to_string(error.line);
-        if (error.column != 0U) {
-            message += ":" + std::to_string(error.column);
-        }
-    }
-    message += ": " + error.message;
-    return message;
-}
 
 /** Finds one root object member. */
 [[nodiscard]] const formats::toon::Value* Find(
@@ -190,28 +178,6 @@ struct NameCatalog final {
         error = "Divide patch cannot use zero";
         return false;
     }
-    return true;
-}
-
-/** Maps one parsed manifest into its validated typed model. */
-[[nodiscard]] bool ParseManifest(
-    const formats::toon::Document& document,
-    ModManifest& manifest,
-    std::string& error) {
-    ModManifest parsed;
-    if (!ReadRequiredString(document.root(), "id", 128U, parsed.id, error) ||
-        !ReadRequiredString(document.root(), "name", 128U, parsed.name, error) ||
-        !ReadRequiredString(document.root(), "version", 64U, parsed.version, error) ||
-        !ReadOptionalString(document.root(), "author", 128U, parsed.author, error) ||
-        !ReadOptionalString(
-            document.root(), "description", 1024U, parsed.description, error)) {
-        return false;
-    }
-    if (!IsValidModId(parsed.id)) {
-        error = "Manifest id '" + parsed.id + "' is not a valid stable mod identity";
-        return false;
-    }
-    manifest = std::move(parsed);
     return true;
 }
 
@@ -384,19 +350,19 @@ struct NameCatalog final {
 
 /** Maps and validates the root patch list. */
 [[nodiscard]] bool ParseOverrides(
-    const formats::toon::Document& document,
+    const ToonObject& root,
     NameCatalog catalog,
     std::vector<ResourcePatchDefinition>& patches,
     std::string& error) {
-    const formats::toon::Value* const patchesValue = Find(document.root(), "patches");
+    const formats::toon::Value* const patchesValue = Find(root, "patches");
     const formats::toon::Value::Array* const patchArray =
         patchesValue == nullptr ? nullptr : patchesValue->AsArray();
     if (patchArray == nullptr || patchArray->empty()) {
-        error = "overrides.toon requires a non-empty patches array";
+        error = "Patch configuration requires a non-empty patches array";
         return false;
     }
     std::set<std::pair<core::Tgi, std::uint32_t>> uniqueProperties;
-    if (!ParseNames(document.root(), catalog, error)) return false;
+    if (!ParseNames(root, catalog, error)) return false;
     std::vector<ResourcePatchDefinition> parsed;
     for (const formats::toon::Value& value : *patchArray) {
         const ToonObject* const object = value.AsObject();
@@ -418,6 +384,17 @@ struct NameCatalog final {
     }
     patches = std::move(parsed);
     return true;
+}
+
+/** @summary Read the current authoring catalog without requiring a patch or script to be valid. */
+bool ReadAuthoringCatalog(const std::filesystem::path& directory, NameCatalog& catalog, std::string& error) {
+    const auto path = directory / "mod.toml";
+    if (!std::filesystem::exists(path)) return true;
+    const auto document = toml::parse(scripting::ReadBounded(scripting::SourcePath(directory, "mod.toml"), 8U * 1024U * 1024U));
+    if (!document.contains("symbols")) return true;
+    ToonObject root;
+    root.emplace("symbols", formats::toml_value::Convert(*document.get("symbols")));
+    return ParseNames(root, catalog, error);
 }
 
 }  // namespace
@@ -443,65 +420,48 @@ bool IsValidModId(std::string_view id) noexcept {
     return !previousSeparator;
 }
 
+bool ValidatePatchConfiguration(const formats::toon::Value::Object& root,
+    std::vector<ResourcePatchDefinition>& patches, std::string& error) noexcept {
+    try {
+        patches.clear(); error.clear();
+        return ParseOverrides(root, {}, patches, error);
+    } catch (...) { patches.clear(); error = "Patch configuration validation failed"; return false; }
+}
+
+bool LoadAuthoringPatches(const std::filesystem::path& directory,
+    std::vector<ResourcePatchDefinition>& patches, std::string& error) noexcept {
+    try {
+        patches.clear(); error.clear();
+        const auto document = toml::parse(scripting::ReadBounded(scripting::SourcePath(directory, "mod.toml"), 8U * 1024U * 1024U));
+        if (!document.contains("patches")) return true;
+        formats::toon::Value::Object root;
+        root.emplace("patches", formats::toml_value::Convert(*document.get("patches")));
+        if (document.contains("symbols")) root.emplace("symbols", formats::toml_value::Convert(*document.get("symbols")));
+        return ValidatePatchConfiguration(root, patches, error);
+    } catch (const std::exception& exception) { patches.clear(); error = "mod.toml: " + std::string(exception.what()); return false; }
+    catch (...) { patches.clear(); error = "Authoring patches validation failed"; return false; }
+}
+
 bool LoadModDefinition(
     const std::filesystem::path& directory,
     ModDefinition& definition,
     std::string& error) noexcept {
     try {
+        if (std::filesystem::exists(directory / L"mod.toml")) {
+            if (std::filesystem::exists(directory / L"project.toml") || std::filesystem::exists(directory / L"mod.toon")) {
+                error = "Ambiguous source project: mod.toml cannot coexist with a runtime manifest";
+                definition = {}; return false;
+            }
+            const auto document = toml::parse(scripting::ReadBounded(
+                scripting::SourcePath(directory, "mod.toml"), 8U * 1024U * 1024U));
+            if (document["contract"].value<std::string>() == "simoder.raw-resources")
+                return LoadResourceProject(directory, definition, error);
+            return scripting::LoadSourceProject(directory, definition, error);
+        }
         definition = {};
         error.clear();
-        if (std::filesystem::exists(directory / L"project.toml")) {
-            if (std::filesystem::exists(directory / L"mod.toon")) {
-                error = "Ambiguous directory: project.toml and mod.toon cannot coexist";
-                return false;
-            }
-            return LoadResourceProject(directory, definition, error);
-        }
-        formats::toon::Document manifestDocument;
-        formats::toon::ParseError parseError;
-        const std::filesystem::path manifestPath = directory / L"mod.toon";
-        if (!formats::toon::LoadFile(manifestPath, manifestDocument, parseError)) {
-            error = FormatParseError(manifestPath, parseError);
-            return false;
-        }
-        ModManifest manifest;
-        if (!ParseManifest(manifestDocument, manifest, error)) {
-            error = "mod.toon: " + error;
-            return false;
-        }
-
-        formats::toon::Document overridesDocument;
-        const std::filesystem::path overridesPath = directory / L"overrides.toon";
-        if (!formats::toon::LoadFile(overridesPath, overridesDocument, parseError)) {
-            error = FormatParseError(overridesPath, parseError);
-            return false;
-        }
-        std::vector<ResourcePatchDefinition> patches;
-        NameCatalog catalog;
-        const auto symbolsPath = directory / L"symbols.toon";
-        std::error_code statusError;
-        const bool hasSymbols = std::filesystem::exists(symbolsPath, statusError);
-        if (statusError) { error = "symbols.toon: " + statusError.message(); return false; }
-        if (hasSymbols) {
-            formats::toon::Document symbolsDocument;
-            if (!formats::toon::LoadFile(symbolsPath, symbolsDocument, parseError)) {
-                error = FormatParseError(symbolsPath, parseError);
-                return false;
-            }
-            if (Find(symbolsDocument.root(), "symbols") == nullptr) {
-                error = "symbols.toon requires a symbols object";
-                return false;
-            }
-            if (!ParseNames(symbolsDocument.root(), catalog, error)) return false;
-        }
-        if (!ParseOverrides(overridesDocument, std::move(catalog), patches, error)) {
-            error = "overrides.toon: " + error;
-            return false;
-        }
-
-        definition =
-            ModDefinition{std::move(manifest), directory, std::move(patches)};
-        return true;
+        error = "Missing mod.toml; migrate retired TOON mods using Simoder-DevTools migrate-toon, or migrate the project.toml resource manifest";
+        return false;
     } catch (...) {
         definition = {};
         error = "Mod definition load failed due to an allocation exception";
@@ -509,21 +469,30 @@ bool LoadModDefinition(
     }
 }
 
+bool LoadScriptSymbols(const std::filesystem::path& directory,
+    scripting::ScriptDefinition& definition, std::string& error) noexcept {
+    try {
+        NameCatalog catalog;
+        if (!ReadAuthoringCatalog(directory, catalog, error)) return false;
+        if (catalog.resources.size() > 4096 || catalog.properties.size() > 4096) { error = "Script catalog exceeds 4096 entries per category"; return false; }
+        definition.resourceAliases = std::move(catalog.resources);
+        for (const auto& [name, id] : catalog.properties) {
+            const auto& type = catalog.declaredTypes.at(name);
+            if (!type.empty() && type != "float" && type != "float32") continue;
+            auto property = catalog.metadata.at(name); property.propertyId = id;
+            property.name = name; property.source = catalog.propertySources.at(name);
+            definition.propertyAliases.emplace(name, std::move(property));
+        }
+        return true;
+    } catch (const std::exception& exception) { error = exception.what(); return false; }
+    catch (...) { error = "Script symbols failed validation"; return false; }
+}
+
 bool ListSymbolsJson(const std::filesystem::path& directory, std::string_view query,
     std::string& json, std::string& error) noexcept {
     try {
         error.clear(); json.clear(); NameCatalog catalog;
-        for (const auto* filename : {L"symbols.toon", L"overrides.toon"}) {
-            std::error_code statusError;
-            const auto path = directory / filename;
-            const bool exists = std::filesystem::exists(path, statusError);
-            if (statusError) { error = statusError.message(); return false; }
-            if (!exists) continue;
-            formats::toon::Document document;
-            formats::toon::ParseError parseError;
-            if (!formats::toon::LoadFile(path, document, parseError)) { error = FormatParseError(path, parseError); return false; }
-            if (!ParseNames(document.root(), catalog, error)) return false;
-        }
+        if (!ReadAuthoringCatalog(directory, catalog, error)) return false;
         json = "{\"schemaVersion\":1,\"symbols\":[";
         bool comma = false;
         for (const auto& [name, id] : catalog.properties) {

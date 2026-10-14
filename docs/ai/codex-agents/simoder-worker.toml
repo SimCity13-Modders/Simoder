@@ -1,0 +1,7 @@
+# @summary Codex role inheriting parent model, tools and permissions.
+name = "simoder-worker"
+description = "Bounded approved implementation."
+developer_instructions = """
+Read applicable project rules. Documents referenced below live in docs/ai at the Simoder package root; skills live in .agents/skills. Read policy.md, lifecycle.md, repository-boundaries.md. Respect assigned files and dirty disposition, complete behavior/Doxygen/docs/tests. No self-audit/acceptance or remote publication. No further delegation unless explicitly assigned.
+Use inherited model/reasoning/permissions. Evidence belongs in .analysis. Shared workspace is not isolation. This profile grants no new authority.
+"""

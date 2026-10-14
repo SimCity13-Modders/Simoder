@@ -1,12 +1,78 @@
 #include "dev/runtime_diagnostics.hpp"
+#include "dev/runtime_control.hpp"
+#include "dev/session/session_transport.hpp"
 #include "core/json.hpp"
 #include "runtime/runtime_resource_cache.hpp"
 #include <Windows.h>
 #include <chrono>
 #include <fstream>
+#include <array>
 
 namespace sc13::dev {
 namespace {
+/** @summary Observes filesystem events without polling asset contents or reacting to generated cache writes. */
+class SourceWatch final {
+public:
+    /** @summary Arms one overlapped recursive watch after mod discovery creates the root. */
+    explicit SourceWatch(const std::filesystem::path& root) {
+        directory_ = CreateFileW(root.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+        event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        overlapped_.hEvent = event_;
+        Arm();
+    }
+    /** @summary Cancels and drains the outstanding operation before releasing its buffer. */
+    ~SourceWatch() {
+        if (directory_ != INVALID_HANDLE_VALUE) {
+            if (pending_) {
+                CancelIoEx(directory_, &overlapped_);
+                DWORD ignored{}; GetOverlappedResult(directory_, &overlapped_, &ignored, TRUE);
+            }
+            CloseHandle(directory_);
+        }
+        if (event_) CloseHandle(event_);
+    }
+    /** @summary Consumes only completed events; a failed native watch uses a bounded five-second fallback. */
+    bool Changed() {
+        if (!pending_) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - fallback_ < std::chrono::seconds(5)) return false;
+            fallback_ = now; return true;
+        }
+        if (WaitForSingleObject(event_, 0) != WAIT_OBJECT_0) return false;
+        DWORD bytes{};
+        bool changed = !GetOverlappedResult(directory_, &overlapped_, &bytes, FALSE) || bytes == 0;
+        pending_ = false;
+        std::size_t offset{};
+        while (offset + offsetof(FILE_NOTIFY_INFORMATION, FileName) <= bytes) {
+            const auto* item = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(buffer_.data() + offset);
+            if (item->FileNameLength % sizeof(wchar_t) || offset + offsetof(FILE_NOTIFY_INFORMATION, FileName) + item->FileNameLength > bytes) { changed = true; break; }
+            const std::wstring_view name(item->FileName, item->FileNameLength / sizeof(wchar_t));
+            const auto separator = name.find(L'\\');
+            const auto first = name.substr(0, separator);
+            if (CompareStringOrdinal(first.data(), static_cast<int>(first.size()), L"cache", 5, TRUE) != CSTR_EQUAL) changed = true;
+            if (!item->NextEntryOffset) break;
+            if (item->NextEntryOffset < offsetof(FILE_NOTIFY_INFORMATION, FileName) || item->NextEntryOffset > bytes - offset) { changed = true; break; }
+            offset += item->NextEntryOffset;
+        }
+        Arm(); return changed;
+    }
+private:
+    /** @summary Reuses a fixed buffer and event, avoiding one allocation per changed file. */
+    void Arm() {
+        if (directory_ == INVALID_HANDLE_VALUE || !event_) return;
+        ResetEvent(event_);
+        pending_ = ReadDirectoryChangesW(directory_, buffer_.data(), static_cast<DWORD>(buffer_.size()), TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
+            nullptr, &overlapped_, nullptr) != FALSE;
+    }
+    HANDLE directory_{INVALID_HANDLE_VALUE};
+    HANDLE event_{};
+    OVERLAPPED overlapped_{};
+    alignas(FILE_NOTIFY_INFORMATION) std::array<std::byte, 65536> buffer_{};
+    bool pending_{};
+    std::chrono::steady_clock::time_point fallback_{std::chrono::steady_clock::now()};
+};
 /** @summary Serializes resolved operations and optional pending definitions with bounded provenance. */
 std::string PatchesJson(std::span<const mods::ResourcePatchDefinition> patches) {
     std::string json = "["; bool comma = false;
@@ -28,7 +94,7 @@ std::string PatchesJson(std::span<const mods::ResourcePatchDefinition> patches) 
 }
 }
 
-std::string RuntimeDiagnosticsJson(const mods::ModManager& manager, std::uint32_t processId) {
+std::string RuntimeDiagnosticsJson(const mods::ModManager& manager, std::uint32_t processId, bool controlAvailable) {
     const auto generation = manager.Generation();
     const auto mods = manager.Snapshot();
     const auto observations = manager.RuntimeObservations();
@@ -43,6 +109,12 @@ std::string RuntimeDiagnosticsJson(const mods::ModManager& manager, std::uint32_
         json += "{\"id\":" + core::JsonString(mod.id) + ",\"name\":" + core::JsonString(mod.name) + ",\"state\":" + core::JsonString(mods::ModStateName(mod.state)) +
             ",\"diagnostic\":" + core::JsonString(mod.diagnostic) + ",\"canReload\":" + (mod.canReload ? "true" : "false") +
             ",\"pendingRevision\":" + core::JsonString(mod.pendingRevision) +
+            ",\"script\":{\"language\":" + core::JsonString(mod.scriptLanguage) +
+            ",\"revision\":" + core::JsonString(mod.scriptRevision) +
+            ",\"pendingRevision\":" + core::JsonString(mod.pendingScriptRevision) +
+            ",\"running\":" + (mod.scriptRunning ? "true" : "false") +
+            ",\"memoryBytes\":" + std::to_string(mod.scriptMemoryBytes) +
+            ",\"diagnostic\":" + core::JsonString(mod.scriptDiagnostic) + "}" +
             ",\"patches\":" + PatchesJson(mod.patches) + ",\"pendingPatches\":" + PatchesJson(mod.pendingPatches) + "}";
     }
     json += "],\"resources\":["; comma = false;
@@ -65,7 +137,8 @@ std::string RuntimeDiagnosticsJson(const mods::ModManager& manager, std::uint32_
         }
         json += "]}";
     }
-    json += "],\"conflicts\":["; comma = false;
+    json += "],\"controlAvailable\":" + std::string(controlAvailable ? "true" : "false") +
+        ",\"nativeSession\":" + session::SessionTransportJson() + ",\"conflicts\":["; comma = false;
     for (const auto& conflict : conflicts) {
         if (comma) json += ','; comma = true;
         json += "{\"tgi\":" + core::JsonString(core::ToString(conflict.target)) + ",\"propertyId\":" + std::to_string(conflict.propertyId) +
@@ -76,11 +149,17 @@ std::string RuntimeDiagnosticsJson(const mods::ModManager& manager, std::uint32_
 
 RuntimeDiagnostics::RuntimeDiagnostics(mods::ModManager& manager, std::filesystem::path destination)
     : worker_([this, &manager, destination = std::move(destination)](std::stop_token stop) {
+        SourceWatch watch(manager.ModsDirectory());
+        bool first = true;
         while (!stop.stop_requested()) {
             try {
                 std::string refreshError;
-                static_cast<void>(manager.Refresh(refreshError));
-                const auto json = RuntimeDiagnosticsJson(manager, GetCurrentProcessId());
+                if (first || watch.Changed()) static_cast<void>(manager.Refresh(refreshError));
+                first = false;
+                const bool controlAvailable = manager.DeveloperServicesActive();
+                if (controlAvailable) ProcessRuntimeControl(manager, destination.parent_path());
+                session::PollSessionTransport(destination.parent_path(), controlAvailable);
+                const auto json = RuntimeDiagnosticsJson(manager, GetCurrentProcessId(), controlAvailable);
                 if (json.size() <= 1024U * 1024U) {
                     auto temporary = destination; temporary += L".tmp";
                     std::ofstream file(temporary, std::ios::binary | std::ios::trunc);

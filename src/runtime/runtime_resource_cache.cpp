@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <stdexcept>
+#include <bit>
 
 namespace sc13::runtime {
 namespace {
@@ -25,6 +28,29 @@ namespace {
 }
 
 }  // namespace
+
+std::optional<RuntimeFloatObservation> RuntimeResourceCache::ReadObservedFloat(
+    const core::Tgi& target, std::uint32_t property) const {
+    const std::scoped_lock lock(mutex_);
+    std::optional<RuntimeFloatObservation> result;
+    std::size_t instances{};
+    for (const auto& [key, observation] : observations_) {
+        if (key.target != target || observation.applied.empty()) continue;
+        const auto value = core::ReadRuntimeFloat(observation.applied, property);
+        const auto vanilla = core::ReadRuntimeFloat(observation.vanilla, property);
+        if (!value || !vanilla) throw std::runtime_error("Observed property is missing or is not scalar float32");
+        if (!std::isfinite(*value) || !std::isfinite(*vanilla)) throw std::runtime_error("Observed property is not finite");
+        if (result && (std::bit_cast<std::uint32_t>(result->value) != std::bit_cast<std::uint32_t>(*value) ||
+            std::bit_cast<std::uint32_t>(result->vanilla) != std::bit_cast<std::uint32_t>(*vanilla)))
+            throw std::runtime_error("Observed instances disagree; no unique float value is available");
+        ++instances;
+        if (!result || observation.observedAtUnixMs >= result->observedAtUnixMs)
+            result = RuntimeFloatObservation{*value, *vanilla, observation.observedAtUnixMs,
+                observation.committedGeneration, observation.status, instances};
+    }
+    if (result) result->instances = instances;
+    return result;
+}
 
 bool RuntimeResourceCache::Prepare(
     const RuntimeResourceKey& key,
@@ -184,6 +210,15 @@ RuntimeResourceCache::SnapshotForRestore() const {
     for (const auto& [key, entry] : entries_) {
         result.push_back(RuntimeResourceRestoreEntry{
             key, entry.vanilla, entry.lastApplied});
+    }
+    return result;
+}
+
+std::vector<RuntimeResourceRestoreEntry> RuntimeResourceCache::SnapshotForTargets(const std::set<core::Tgi>& targets) const {
+    const std::scoped_lock lock(mutex_);
+    std::vector<RuntimeResourceRestoreEntry> result;
+    for (const auto& [key, entry] : entries_) {
+        if (targets.contains(key.target)) result.push_back({key, entry.vanilla, entry.lastApplied});
     }
     return result;
 }

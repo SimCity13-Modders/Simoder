@@ -1,164 +1,89 @@
-# Simoder / SC13 Mod Loader
+# Simoder
 
-Simoder is an experimental in-game runtime mod manager for SimCity (2013) and Cities of Tomorrow. `SC13ModLoader` is its low-level x86 injection and resource-interception layer.
-M3 discovers declarative mods, persists explicit ON/OFF state, applies owned patches in memory, and provides an ImGui management panel. It never modifies, merges, or generates game `.package` files.
+Simoder is an experimental in-game mod manager for SimCity (2013) and Cities of
+Tomorrow. Its production runtime is one integrated x86 `d3d9.dll`. It forwards
+Direct3D calls to Windows and initializes Simoder after successful graphics
+creation, outside `DllMain`. Exact game-build validation precedes game hooks.
 
-## Administrator requirement
+## Installation
 
-The current EA App launch path on the validated machine starts SimCity with elevated rights.
-Simoder must run at the same integrity level to open and inject into that process. Consequently:
+Close SimCity and copy `d3d9.dll` beside the actual `SimCity.exe`, usually
+`<installation>/SimCity/SimCity.exe`. Launch normally through EA App. Updates
+replace the same DLL while the game is closed. Remove it to uninstall automatic
+startup; user settings and mods remain. Preserve any existing foreign graphics
+proxy: this runtime does not implement proxy chaining.
 
-- `simoder.exe` contains a Windows `requireAdministrator` manifest;
-- `Start-Simoder.bat` displays a UAC prompt before starting the watcher;
-- cancelling UAC means Simoder cannot attach, although the unmodified game may still be launched
-  separately;
-- this is an expected runtime requirement, not a request to weaken the game directory ACLs.
+There is no launcher, injector, binary extractor or bundled Node.js. The Luau VM
+and compiler are statically linked. Examples, developer executables, optional
+authoring toolchains and IDE support belong to Simoder-DevTools.
 
-## Installed layout
+For the supported EA directory layout:
 
 ```text
-SimCity/
-|-- mods/
-|   `-- BetterSanitizer/
-|       |-- mod.toon
-|       `-- overrides.toon
-|-- simoder/
-|   |-- config.toon
-|   |-- state.toon              # generated user state
-|   |-- logs/                   # generated logs
-|   |-- cache/                  # metadata only; never packages
-|   |-- simoder.exe
-|   |-- sc13modloader.dll
-|   `-- Uninstall-Simoder.bat
-|-- Start-Simoder.bat
-`-- Start-Simoder.sh            # experimental Wine/Proton wrapper
+<installation>/
+  SimCity/SimCity.exe
+  SimCity/d3d9.dll
+  mods/<user-mod>/mod.toml
+  mods/cache/                 # generated immutable source generations
+  simoder/config.toon         # generated settings
+  simoder/state.toon          # generated activation order
+  simoder/logs/               # diagnostics
 ```
 
-`mods/` belongs to the user. The uninstaller preserves mods, `config.toon`, and `state.toon` by
-default. Developer tools are distributed separately from the loader; see [repository boundary](docs/developer-experience.md).
+The runtime creates mutable data; one installation DLL does not mean zero data
+files. Installation in Program Files and writing settings may require appropriate
+permissions. See [installation details](docs/single-file-installation.md).
 
-The source repository intentionally does not contain root-level `mods/` or `simoder/` runtime
-directories. Read-only distribution defaults live under `packaging/`; `cmake --install` places
-them in the game root without overwriting an existing user config or BetterSanitizer definition.
+## Mods
 
-## Build and install
+The overlay manages discovery, explicit enable/disable, changed-on-disk previews
+and transactional reload. Refresh does not enable new mods. Current installed
+manifests use `mod.toml`; retired TOON mod manifests and `project.toml` require
+offline migration in DevTools. Configuration/state TOON remains a separate
+supported format.
 
-The game process is x86, so configure a Win32 build. The verified local generator is Visual
-Studio 2026:
+Declarative patches modify supported scalar floats on existing game resources.
+Catalog aliases retain canonical IDs and explicit provenance; a local alias is
+not a verified original EA name. See [declarative patches](docs/declarative-patches.md)
+and [stable input validation](docs/mod-input-validation.md).
+
+Luau source mods compile in-process into immutable generations. TypeScript and
+native-resource authoring require optional DevTools tooling; their final tool
+registration contract is still being completed. Raw-resource manifests validate
+payloads and full-width IDs, but activation requiring `resource.register` or
+`resource.replace` remains blocked. See [resource contracts](docs/resource-projects.md).
+
+Developer services are explicitly enabled service mods under `mods/`. ModLoader
+owns their process job; disable or game exit terminates owned services. The
+actual MCP/DevBridge package is distributed separately. See
+[developer service mods](docs/developer-service-mods.md).
+
+## Build
+
+Use MSVC, the Windows SDK, CMake and Python. The game is x86:
 
 ```powershell
-cmake --preset vs2026-x86
-cmake --build --preset vs2026-release --parallel
-ctest --preset vs2026-release
-cmake --install build/vs2026 --config Release --prefix '<SimCity-install>'
+cmake --preset vs2022-x86
+cmake --build --preset vs2022-release
+ctest --preset vs2022-release
+cmake --install build/vs2022 --config Release --prefix build/staged
 ```
 
-Visual Studio 2022 presets are also provided. Dear ImGui `v1.92.9` and MinHook `v1.3.4` are
-fetched from their official repositories and pinned by tag.
-
-Run a non-mutating installation check with:
-
-```powershell
-& '<SimCity-install>\Start-Simoder.bat' --check
-```
-
-Then double-click `Start-Simoder.bat`, approve UAC, and let the EA App launch the game. A small
-`Simoder` overlay button opens the mod table. `Refresh` rescans `mods/` but never enables newly
-discovered mods. Active files changed on disk are marked `Changed`; previewed Reload or OFF/ON
-applies the pending definition.
-
-## Better Sanitizer
-
-The included test mod owns one proven runtime patch:
-
-```text
-TGI       00B1B104:61EFC000:719436BD
-Property  0x09AE19D7 (float)
-Operation set 345
-Vanilla   300
-```
-
-It defaults to OFF on first discovery. ON and OFF rebuild retained live PROP resources immediately
-from vanilla plus the current ordered patch set, and future loads use the same generation. Enabling
-also rereads `mod.toon` and `overrides.toon`, so edits made while OFF do not require a separate
-Refresh. A game subsystem that already copied a PROP value may still require its panel or object to
-be recreated. The earlier M2 manual validation confirmed the patched `545 $/h` simulation total
-and vanilla `500 $/h` after controlled detach.
-
-The TOON reader is a strict, bounded subset of the official TOON 4.1 syntax needed by M3. Parsed
-documents are immediately converted into typed C++ models; the runtime hook never receives a
-TOON DOM. See the [official specification](https://github.com/toon-format/spec/blob/main/SPEC.md).
-
-## Named overrides
-
-Named resource and property references are supported in `overrides.toon`. Declare explicit
-aliases in the document's `symbols.resources` and `symbols.properties` arrays; every entry
-requires a non-empty `source` describing its provenance. See the packaged BetterSanitizer
-example. `sanitizerOperatingCost` is a Simoder alias backed by the verified cost effect,
-not a confirmed original EA field name.
-
-Names are case-sensitive and scoped to one mod document. Resource aliases map to exact
-`type/group/instance` values; property aliases map to exact `id` values. No implicit hashing
-is performed. Numeric-only overrides remain supported. A named reference may also carry
-its numeric identity, in which case the identities must agree (a resource must provide all
-three TGI fields). Unknown names, duplicate declarations, missing provenance, mismatches,
-and duplicate resolved patch targets reject the mod before activation. Multiple distinct
-aliases may describe one identity, but cannot bypass same-property conflict validation.
-Resolution runs during definition loading; runtime hooks continue to receive numeric typed
-patches. Editing symbols participates in the existing override fingerprint and OFF/ON reload.
-
-An optional `symbols.toon` beside `overrides.toon` supplies reusable imported aliases. Both
-catalogs are merged; duplicate names are rejected rather than silently overridden. Catalog
-creation, deletion and edits participate in stable-read fingerprint checks and the normal
-Changed/OFF/ON lifecycle. Runtime/UI snapshots retain selected names and provenance; the
-overlay's Resolved overrides inspector shows names, IDs, operations and sources. Committed
-runtime patch logs additionally show vanilla and final resource values (the final value may
-include operations from several mods).
-
-Catalog importers for OpenSC5 and OpenSCP, CLI validation and REA live in the separate Simoder-DevTools repository. The runtime continues to load the resulting symbols.toon catalogs. See [developer integration](docs/developer-experience.md).
-
-## Logging and DeveloperConsole
-
-The developer workflow now includes `simoder-dev` validation/dry-run/scaffolding and JSON symbol
-search, OpenSCP before/after conversion, richer catalog metadata, a runtime inspector, previewed
-reload preserving mod order, bounded MCP evidence and a local VS Code extension. See the
-[developer experience guide](docs/developer-experience.md) for commands, integration contracts
-and verification limits.
-
-File logging is always centralized at `simoder/logs/sc13modloader.log`. Events carry a source:
-`GAME`, `LOADER`, or `MOD`; mod events also carry the stable mod ID. SimCity's verified imported
-`OutputDebugStringA` channel is captured while preserving original debugger behavior. Arbitrary
-C-runtime formatting functions are not hooked.
-
-The external DeveloperConsole is disabled by default. Enable it in `simoder/config.toon`:
-
-```text
-developerConsole:
-  enabled: true
-  captureGameLogs: true
-  captureLoaderLogs: true
-  captureModLogs: true
-  level: info
-```
-
-Console creation failure does not disable file logging, mods, or the game.
-
-## Startup troubleshooting
-
-The base game can intermittently remain after the intro with a permanent loading spinner. On the
-validated machine, disabling **EA App -> Settings -> Application -> In-game overlay** produced
-three consecutive successful starts. This is a practical workaround, not proof of the underlying
-cause, and is unrelated to Simoder's in-game ImGui overlay.
-
-Detailed behavior is documented in [architecture](docs/architecture.md),
-[mod lifecycle](docs/mod-lifecycle.md), [logging](docs/logging.md), and the
-[manual M3 test](docs/first-test.md). Optional REA reverse-engineering workflows
-are documented in [the DevTools integration guide](docs/developer-experience.md).
+VS2026 presets are also available. The runtime target is `simoder-runtime` and
+its Release artifact is `build/<generator>/bin/Release/d3d9.dll`. Installation
+staging includes legal notices separately; only the DLL goes beside the game EXE.
+Runtime scripting tests exercise embedded Luau without authoring helpers.
+TypeScript authoring tests belong to DevTools and require its worker/toolchain.
+A passing incremental build is not proof of clean-checkout or live-game acceptance.
+CI is being updated to reflect the runtime/DevTools boundary.
 
 ## Repository policy
 
-Proprietary EA binaries and package files are excluded. Tests use generated text and synthetic
-binary fixtures. Simoder's original code and documentation are licensed under
-the [MIT License](LICENSE). External components retain their own licenses; see
-[third-party notices](THIRD_PARTY_NOTICES.md). Game files and externally imported
+Examples belong to Simoder-DevTools. Audits, exploratory reports, screenshots and
+raw evidence belong to ignored `.analysis/`; maintained contracts and guides
+belong to `docs/`. Proprietary game binaries, packages, local mods and generated
+outputs are excluded. Tests use synthetic redistributable fixtures.
+
+Authored code uses Doxygen comments. Original source is under the [MIT License](LICENSE);
+dependencies retain their [own notices](THIRD_PARTY_NOTICES.md). Imported game and
 catalog data are not relicensed by Simoder.

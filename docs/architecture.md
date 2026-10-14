@@ -3,11 +3,11 @@
 ## Runtime flow
 
 ```text
-Start-Simoder.bat (UAC)
-    -> simoder/simoder.exe watcher
-    -> EA App launches SimCity.exe
-    -> LoadLibraryW(sc13modloader.dll)
-    -> SC13_Initialize outside DllMain
+EA App launches SimCity.exe
+    -> Windows loads colocated d3d9.dll
+    -> proxy forwards system Direct3D object creation
+    -> owned bootstrap worker calls the integrated runtime
+    -> exact-build validation before game hooks
 
 SimCity PROP deserializer
     -> immutable PatchRegistrySnapshot lookup by exact TGI
@@ -18,13 +18,15 @@ SimCity PROP deserializer
 ```
 
 The normal unpatched hot path loads one atomic shared snapshot, performs one ordered-map TGI
-lookup, and returns. It does not scan mods, parse TOON, access the filesystem, or acquire the
+lookup, and returns. It does not scan mods, parse manifests, access the filesystem, or acquire the
 `ModManager` lock.
 
 ## Component boundaries
 
-- `simoder.exe`: elevated end-user watcher/injector and controlled detach client.
-- `sc13modloader.dll`: process bootstrap, build gate, hooks, logging, and UI lifetime.
+- `d3d9.dll`: system graphics forwarding and integrated process bootstrap, build gate, hooks, logging and UI lifetime.
+- `mod_candidate`: bounded stable input acquisition and fingerprints, separate from lifecycle publication.
+- `script_patch_reducer`: deterministic owner-scoped set/clear reduction with a bounded persistent field set; it does not publish registry state or mutate game memory.
+- `mod_panel`: ImGui mod presentation and view-local state, independent of Win32 hooks and D3D9 device lifecycle.
 - `ModManager`: discovery, typed definitions, lifecycle, persistence, and UI snapshots.
 - `PatchRegistry`: active ownership, activation sequence, conflict metadata, and immutable
   copy-on-write snapshots.
@@ -37,15 +39,14 @@ lookup, and returns. It does not scan mods, parse TOON, access the filesystem, o
 - `Simoder overlay`: rendering and input only; callbacks invoke `ModManager`.
 - `AsyncLogger`: the only file/console sinks. Producers emit semantic events.
 - `sc13_core`: game-independent TGI, hash, DBPF, RefPack, PROP, TOON, patch, and state logic.
-- optional `Simoder.McpServer.exe`: non-elevated stdio MCP surface with read/write annotations.
-- optional `Simoder.DevBridge.exe`: separately elevated, same-user Named Pipe broker restricted to
-  verified EA/SimCity/Simoder processes and capture-bound input.
+- Optional MCP and DevBridge executables belong to explicitly enabled service mods. ModLoader owns their process jobs; they inherit the game process integrity level. DevBridge restricts operations to verified windows and capture-bound input.
+- A client-side MCP stdio adapter is a separate client-owned process; gameplay operations must relay to the game-owned service.
 
 `ModManager` does not parse PROP memory, implement hooks, render ImGui, or own log sinks.
 
 ## Patch and cache invariants
 
-Activation sequence is the deterministic M3 patch order. Every registered resource block carries
+Activation sequence determines deterministic patch order. Every registered resource block carries
 its stable owner ID and sequence. Same-TGI/same-property changes are recorded as conflicts;
 different properties of the same resource are not conflicts.
 
@@ -67,7 +68,7 @@ the live resource still exactly matches the last committed result.
 
 ON/OFF and active-mod removal reuse the same compare/exchange transaction to rebuild retained live
 PROP instances immediately from vanilla plus the newly published registry generation. ON first
-rereads stable source bytes, allowing an OFF-state `overrides.toon` edit to take effect without a
+rereads stable source bytes, allowing an OFF-state `mod.toml` edit to take effect without a
 manual Refresh.
 
 ## Threading and ownership
@@ -79,9 +80,11 @@ manual Refresh.
 - `AsyncLogger` copies events into a bounded queue and drains batches on one worker thread.
 - ImGui state stays on the D3D9/window thread; UI snapshots are copied before rendering.
 
-Shutdown order is: disable hooks, restore the original WndProc and destroy ImGui, remove MinHook
-hooks, restore retained runtime resources, stop log capture, release mod services, then flush the
-logger.
+Explicit runtime shutdown first stops diagnostics, then removes hooks and the
+overlay, stops the patch signal, releases mod services, and flushes the logger.
+Hook rollback is shared with failed initialization. Process exit also releases
+OS job handles; orderly C++ shutdown and abrupt process teardown are distinct
+paths and both need lifecycle coverage.
 
 ## Graceful degradation
 
@@ -92,19 +95,35 @@ logger.
 - unsafe resource layout/type/value: that resource remains unchanged;
 - existing objects that cannot be recreated safely: only future loads receive the new generation.
 
-OpenSCP property-export interchange and registry dictionaries are offline adapters. Native
-SimCity UI integration, Lua, legacy package import, dependencies, online distribution, and
-arbitrary machine-code patching are outside M3.
+OpenSCP property-export interchange and registry dictionaries are offline adapters.
+Package migration also belongs to DevTools. Supported scripts run in the sandboxed
+Luau VM. Arbitrary machine-code patching and unverified resource registration are
+not supported runtime capabilities.
 
 ## Optional AI DevBridge boundary
 
-AI DevBridge is developer tooling and is not linked into `sc13modloader.dll`. The MCP process has
-no direct elevated input capability. Its sibling broker uses `PipeOptions.CurrentUserOnly`, an
-exact MCP executable-path check, a Windows-session check, and no TCP listener. EA/SimCity targets
-must pass process-name, installation-root, and Electronic Arts Authenticode checks. A coordinate
-action additionally requires a fresh image id and unchanged client geometry.
+DevBridge is a separate developer-service process, not linked into d3d9.dll.
+The broker validates same-user pipe access, executable identity and Windows session.
+EA/SimCity targets must pass the configured identity checks. Coordinate actions
+require a fresh capture identity and unchanged client geometry. The service
+inherits the owning game's integrity level; it is not a separately elevated watcher.
 
 UI Automation invocation is preferred when the pointed element exposes `InvokePattern`; CEF and
-DirectX surfaces fall back to foreground `SendInput`. UAC secure-desktop interaction, arbitrary
-text/keys/PIDs, termination, and automatic restart are intentionally absent. Infinite Loading is
-represented as a two-minute diagnostic suspicion after an AI-confirmed `CityLoading` stage.
+DirectX surfaces use foreground input subject to bridge policy. UAC secure-desktop
+interaction and arbitrary process targeting remain unavailable. Game-close actions
+must target the verified game session through the explicit bridge command. Closing
+the game releases ModLoader's job ownership and terminates its developer services.
+Readiness negotiation and graceful service shutdown remain separate acceptance work.
+
+## Deployment and optional authoring
+
+The runtime is one production DLL with statically linked dependencies, including
+Luau compilation. No executable bundle is extracted. Examples and developer
+toolchains belong to DevTools. Optional TypeScript/native-resource authoring tool
+registration is still being completed; it must not introduce required sibling
+executables into an ordinary runtime installation.
+
+Installed current manifests use mod.toml. Retired manifest migration is offline
+DevTools work. Raw-resource integrity validation does not imply registration or
+replacement capability in the game. See [resource contracts](resource-projects.md)
+and [stable input validation](mod-input-validation.md).

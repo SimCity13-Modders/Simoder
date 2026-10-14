@@ -1,9 +1,12 @@
+#include "ui/mod_panel.hpp"
 #include "ui/simoder_overlay.hpp"
+#include "ui/window_message_hook.hpp"
 
 #include "logging/async_logger.hpp"
 #include "mods/mod_manager.hpp"
 #include "runtime/runtime_resource_cache.hpp"
 #include "mods/mod_types.hpp"
+#include "dev/session/session_transport.hpp"
 
 #include <Windows.h>
 #include <d3d9.h>
@@ -45,10 +48,9 @@ HWND g_gameWindow = nullptr;
 WNDPROC g_originalWindowProcedure = nullptr;
 std::atomic_bool g_initialized = false;
 std::atomic_bool g_initializationAttempted = false;
-bool g_panelOpen = false;
+ModPanelState g_view;
 unsigned int g_uiMouseButtons = 0U;
 unsigned int g_gameMouseButtons = 0U;
-std::string g_feedback;
 
 /** Stores the last sampled presentation state so steady frames do not flood the log. */
 struct PresentationHealth final {
@@ -304,8 +306,8 @@ public:
     return true;
 }
 
-/** @summary Routes UI-owned mouse gestures to ImGui, preserving complete gestures begun in the game. */
-LRESULT CALLBACK HookWindowProcedure(
+/** @summary Deliver actual input once, preserving complete gestures begun in the game. */
+bool RouteOverlayInput(
     HWND window,
     UINT message,
     WPARAM word,
@@ -352,6 +354,14 @@ LRESULT CALLBACK HookWindowProcedure(
             g_gameMouseButtons = 0U;
         }
     }
+    return captured;
+}
+
+/** @summary Handle native dispatch and input not already observed in the game window queue. */
+LRESULT CALLBACK HookWindowProcedure(HWND window, UINT message, WPARAM word, LPARAM value) noexcept {
+    if (dev::session::DispatchSessionMessage(window, message)) return 0;
+    const bool captured = !IsObservedWindowInput(window, message) &&
+        RouteUnqueuedWindowInput(window, message, word, value);
     const LRESULT result = captured
         ? 1
         : (g_originalWindowProcedure != nullptr
@@ -393,7 +403,12 @@ LRESULT CALLBACK HookWindowProcedure(
     }
     g_gameWindow = creation.hFocusWindow;
     g_originalWindowProcedure = reinterpret_cast<WNDPROC>(previous);
+    dev::session::BindSessionWindow(g_gameWindow);
     g_initialized.store(true, std::memory_order_release);
+    std::string inputError;
+    if (!InitializeWindowMessageHook(g_gameWindow, &RouteOverlayInput, inputError)) {
+        logging::AsyncLogger::Instance().Write(logging::Level::Warning, inputError.c_str());
+    }
     logging::AsyncLogger::Instance().Write(
         logging::Level::Info, "Simoder ImGui overlay initialized");
     return true;
@@ -405,157 +420,7 @@ void RenderSimoder() {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::SetNextWindowBgAlpha(0.88F);
-    ImGui::Begin(
-        "##SimoderLauncher", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-            ImGuiWindowFlags_NoSavedSettings);
-    if (ImGui::Button("Simoder")) {
-        g_panelOpen = !g_panelOpen;
-    }
-    ImGui::End();
-
-    if (g_panelOpen) {
-        ImGui::SetNextWindowSize(ImVec2(960.0F, 640.0F), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Simoder", &g_panelOpen)) {
-            if (ImGui::Button("Refresh") && g_manager != nullptr) {
-                std::string error;
-                const bool refreshed = g_manager->Refresh(error);
-                g_feedback = refreshed
-                    ? "Mod list refreshed. Existing live objects may require recreation or map reload."
-                    : "Refresh failed: " + error;
-                logging::AsyncLogger::Instance().WriteFormat(
-                    refreshed ? logging::Level::Info : logging::Level::Error,
-                    "Simoder Refresh: %s", g_feedback.c_str());
-            }
-            if (!g_feedback.empty()) {
-                ImGui::SameLine();
-                ImGui::TextWrapped("%s", g_feedback.c_str());
-            }
-            ImGui::Separator();
-
-            const std::vector<mods::ModUiEntry> entries =
-                g_manager == nullptr ? std::vector<mods::ModUiEntry>{}
-                                     : g_manager->Snapshot();
-            const auto runtimeObservations = g_manager == nullptr ? std::vector<runtime::RuntimeResourceObservation>{}
-                : g_manager->RuntimeObservations();
-            if (ImGui::BeginTable(
-                    "ModTable", 5,
-                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                        ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn("Name");
-                ImGui::TableSetupColumn("Version");
-                ImGui::TableSetupColumn("Author");
-                ImGui::TableSetupColumn("State");
-                ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 80.0F);
-                ImGui::TableHeadersRow();
-                for (const mods::ModUiEntry& entry : entries) {
-                    ImGui::PushID(entry.id.empty() ? entry.name.c_str() : entry.id.c_str());
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted(entry.name.c_str());
-                    if (!entry.diagnostic.empty() && ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("%s", entry.diagnostic.c_str());
-                    }
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::TextUnformatted(entry.version.c_str());
-                    ImGui::TableSetColumnIndex(2);
-                    ImGui::TextUnformatted(entry.author.c_str());
-                    ImGui::TableSetColumnIndex(3);
-                    ImGui::TextUnformatted(mods::ModStateName(entry.state));
-                    ImGui::TableSetColumnIndex(4);
-                    bool enabled = entry.canDisable;
-                    const bool interactive = entry.canEnable || entry.canDisable;
-                    ImGui::BeginDisabled(!interactive);
-                    if (ImGui::Checkbox("##Enabled", &enabled) && g_manager != nullptr) {
-                        std::string error;
-                        if (!g_manager->SetEnabled(entry.id, enabled, error)) {
-                            g_feedback = "State change failed for " + entry.name + ": " + error;
-                        } else {
-                            g_feedback = entry.name +
-                                (enabled ? " enabled" : " disabled") +
-                                ". Live resources and future loads use the new state.";
-                            for (const mods::PatchConflict& conflict :
-                                 g_manager->Conflicts()) {
-                                logging::AsyncLogger::Instance().WriteFormat(
-                                    logging::Level::Warning,
-                                    "Property conflict TGI=%s property=0x%08X earlier=%s "
-                                    "later=%s; activation order applies",
-                                    core::ToString(conflict.target).c_str(),
-                                    conflict.propertyId,
-                                    conflict.earlierOwner.c_str(),
-                                    conflict.laterOwner.c_str());
-                            }
-                        }
-                    }
-                    ImGui::EndDisabled();
-                    ImGui::PopID();
-                }
-                ImGui::EndTable();
-            }
-            /** @summary Displays inspection and reload controls at the full panel width. */
-            ImGui::SeparatorText("Mod details");
-            for (const auto& entry : entries) {
-                ImGui::PushID(entry.id.empty() ? entry.name.c_str() : entry.id.c_str());
-                if (ImGui::CollapsingHeader(entry.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-                    ImGui::TextWrapped("ID: %s", entry.id.c_str());
-                    if (!entry.diagnostic.empty()) ImGui::TextWrapped("%s", entry.diagnostic.c_str());
-                    if (ImGui::TreeNode("Resolved overrides")) {
-                        for (const auto& patch : entry.patches) {
-                            ImGui::TextWrapped("%s TGI=%s", patch.name.c_str(),
-                                core::ToString(patch.target).c_str());
-                            if (!patch.source.empty()) ImGui::TextWrapped("Source: %s", patch.source.c_str());
-                            const auto observedCount = std::count_if(runtimeObservations.begin(), runtimeObservations.end(),
-                                [&patch](const auto& observation) { return observation.key.target == patch.target; });
-                            const auto appliedCount = std::count_if(runtimeObservations.begin(), runtimeObservations.end(),
-                                [&patch](const auto& observation) { return observation.key.target == patch.target && observation.status == "applied"; });
-                            ImGui::TextWrapped("Retained observations: %llu; applied: %llu (historical)",
-                                static_cast<unsigned long long>(observedCount), static_cast<unsigned long long>(appliedCount));
-                            for (const auto& property : patch.properties) {
-                                ImGui::TextWrapped("%s [0x%08X] %s %.9g", property.name.c_str(),
-                                    property.propertyId, mods::PatchOperationName(property.operation), property.value);
-                                if (!property.source.empty()) ImGui::TextWrapped("Source: %s", property.source.c_str());
-                                if (!property.description.empty()) ImGui::TextWrapped("%s", property.description.c_str());
-                                if (!property.unit.empty()) ImGui::TextWrapped("Unit: %s", property.unit.c_str());
-                                if (!property.origin.empty()) ImGui::TextWrapped("Origin: %s", property.origin.c_str());
-                                for (const auto& observation : runtimeObservations) {
-                                    if (observation.key.target != patch.target) continue;
-                                    const auto vanilla = core::ReadRuntimeFloat(observation.vanilla, property.propertyId);
-                                    const auto applied = core::ReadRuntimeFloat(observation.applied, property.propertyId);
-                                    ImGui::TextWrapped("Observed instance=%llu generation=%llu %s: %s",
-                                        static_cast<unsigned long long>(observation.key.resourceAddress),
-                                        static_cast<unsigned long long>(observation.generation),
-                                        observation.status.c_str(), observation.diagnostic.c_str());
-                                    if (vanilla && applied) ImGui::TextWrapped("Historical vanilla %.9g -> committed %.9g", *vanilla, *applied);
-                                }
-                            }
-                            if (std::none_of(runtimeObservations.begin(), runtimeObservations.end(),
-                                [&patch](const auto& observation) { return observation.key.target == patch.target; }))
-                                ImGui::TextUnformatted("No retained observation for this resource.");
-                        }
-                        ImGui::TreePop();
-                    }
-                    if (entry.canReload && ImGui::TreeNode("Pending changes (current -> pending)")) {
-                        ImGui::TextUnformatted("Current operations:");
-                        for (const auto& patch : entry.patches) for (const auto& property : patch.properties)
-                            ImGui::TextWrapped("%s %s [0x%08X] %s %.9g", core::ToString(patch.target).c_str(),
-                                property.name.c_str(), property.propertyId, mods::PatchOperationName(property.operation), property.value);
-                        ImGui::TextUnformatted("Pending operations:");
-                        for (const auto& patch : entry.pendingPatches) for (const auto& property : patch.properties)
-                            ImGui::TextWrapped("%s %s [0x%08X] %s %.9g", core::ToString(patch.target).c_str(),
-                                property.name.c_str(), property.propertyId, mods::PatchOperationName(property.operation), property.value);
-                        if (ImGui::Button("Apply validated reload")) {
-                            std::string error;
-                            g_feedback = g_manager->Reload(entry.id, error, entry.pendingRevision) ? "Reload published; inspect resource outcomes." : "Reload rejected: " + error;
-                        }
-                        ImGui::TreePop();
-                    }
-                }
-                ImGui::PopID();
-            }
-        }
-        ImGui::End();
-    }
+    DrawModPanel(g_manager, g_view);
 
     ImGui::EndFrame();
     ImGui::Render();
@@ -651,6 +516,8 @@ bool CreateSimoderOverlayHooks(std::string& error) noexcept {
 }
 
 void ShutdownSimoderOverlay() noexcept {
+    dev::session::BindSessionWindow(nullptr);
+    ShutdownWindowMessageHook();
     try {
         if (g_gameWindow != nullptr && g_originalWindowProcedure != nullptr &&
             IsWindow(g_gameWindow) != FALSE) {
@@ -675,8 +542,7 @@ void ShutdownSimoderOverlay() noexcept {
     g_endSceneAddress = nullptr;
     g_resetAddress = nullptr;
     g_manager = nullptr;
-    g_panelOpen = false;
-    g_feedback.clear();
+    g_view = {};
     g_initializationAttempted.store(false, std::memory_order_release);
     g_lastPresentationHealth = {};
     g_lastHealthSampleTick = 0U;

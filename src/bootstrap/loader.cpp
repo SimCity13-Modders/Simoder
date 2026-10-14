@@ -3,15 +3,15 @@
 #include "config/loader_config.hpp"
 #include "core/sha256.hpp"
 #include "dev/runtime_diagnostics.hpp"
-#include "hooks/file_trace.hpp"
+#include "dev/session/session_transport.hpp"
+#include "hooks/runtime_hooks.hpp"
 #include "hooks/resource_trace.hpp"
 #include "logging/async_logger.hpp"
 #include "mods/mod_manager.hpp"
 #include "mods/patch_registry.hpp"
 #include "reverse/game_build.hpp"
-#if defined(SC13_ENABLE_DISCOVERY_TRACE)
-#include "runtime/image_observer.hpp"
-#endif
+#include "reverse/build_compatibility.hpp"
+#include "reverse/resource_symbols.hpp"
 #include "runtime/patch_signal.hpp"
 #include "runtime/runtime_resource_cache.hpp"
 #include "ui/simoder_overlay.hpp"
@@ -48,7 +48,7 @@ config::LoaderConfig g_loaderConfig;
     return true;
 }
 
-/** Returns true only when initialization is running inside SimCity.exe. */
+/** @summary Verify the executable identity before installing any game hooks. */
 [[nodiscard]] bool IsSimCityProcess(const std::filesystem::path& path) noexcept {
     return _wcsicmp(path.filename().c_str(), L"SimCity.exe") == 0;
 }
@@ -70,7 +70,8 @@ void SetModuleHandle(HMODULE module) noexcept {
 
 }  // namespace sc13::bootstrap
 
-extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
+/** @summary Initialize the integrated runtime with explicit writable roots. */
+static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noexcept {
     using sc13::logging::AsyncLogger;
     using sc13::logging::Level;
 
@@ -85,8 +86,8 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
             sc13::bootstrap::g_initialized.store(false);
             return 10;
         }
-        const std::filesystem::path simoderDirectory = dllPath.parent_path();
-        const std::filesystem::path gameRoot = simoderDirectory.parent_path();
+        const std::filesystem::path simoderDirectory(context.dataRoot);
+        const std::filesystem::path gameRoot(context.gameRoot);
         const std::filesystem::path modsDirectory = gameRoot / L"mods";
         const std::filesystem::path logPath =
             simoderDirectory / L"logs" / L"sc13modloader.log";
@@ -105,7 +106,8 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
             sc13::bootstrap::g_loaderConfig.developerConsole.level,
             console.minimumLevel);
         static_cast<void>(levelValid);
-        if (!AsyncLogger::Instance().Start(logPath, console)) {
+        // @summary Rejected initialization writes only to disk and never creates a transient console.
+        if (!AsyncLogger::Instance().Start(logPath)) {
             sc13::bootstrap::g_initialized.store(false);
             return 11;
         }
@@ -118,11 +120,6 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
             AsyncLogger::Instance().WriteFormat(
                 Level::Warning,
                 "Loader config rejected; safe defaults are active: %s", error.c_str());
-        }
-        if (console.enabled && !AsyncLogger::Instance().IsConsoleActive()) {
-            AsyncLogger::Instance().Write(
-                Level::Warning,
-                "DeveloperConsole was requested but could not be created; file logging continues");
         }
         AsyncLogger::Instance().WriteFormat(
             Level::Info, "Game root: %ls", gameRoot.c_str());
@@ -164,6 +161,25 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
             fingerprint.textRva, fingerprint.textSize,
             sc13::core::ToHex(fingerprint.loadedTextSha256).c_str());
 
+        // @summary Validate the existing exact-build signature before starting any mod or UI service.
+        sc13::reverse::PropDeserializeSymbol propSymbol{};
+        if (!sc13::reverse::ResolvePropDeserializeSymbol(fingerprint, propSymbol, error)) {
+            const bool unverifiedBuild =
+                sc13::core::ToHex(fingerprint.fileSha256) != sc13::reverse::kSupportedGameFileSha256 ||
+                sc13::core::ToHex(fingerprint.loadedTextSha256) != sc13::reverse::kSupportedGameTextSha256;
+            AsyncLogger::Instance().WriteFormat(unverifiedBuild ? Level::Warning : Level::Error,
+                "Resource instrumentation disabled: %s", error.c_str());
+            if (unverifiedBuild) {
+                AsyncLogger::Instance().WriteFormat(Level::Warning,
+                    "Game build differs from verified profile: detected=%s verified=%s; "
+                    "this does not establish that the game was updated. Continuing without mods.",
+                    fingerprint.fileVersion.c_str(), sc13::reverse::kSupportedGameVersion.data());
+            }
+            AsyncLogger::Instance().Write(Level::Warning,
+                "No hooks or mod services started; the game continues unchanged");
+            return 14;
+        }
+
         sc13::bootstrap::g_patchRegistry =
             std::make_unique<sc13::mods::PatchRegistry>();
         sc13::bootstrap::g_resourceCache =
@@ -177,6 +193,10 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
             *sc13::bootstrap::g_resourceCache,
             [](const std::set<sc13::core::Tgi>& affected, std::string& refreshError) {
                 return sc13::hooks::RefreshRuntimeResources(affected, refreshError);
+            },
+            [](const std::string& owner, const std::string& message) {
+                sc13::logging::AsyncLogger::Instance().WriteEventFormat(sc13::logging::Level::Info,
+                    sc13::logging::SourceType::Mod, owner.c_str(), "[Luau] %s", message.c_str());
             });
         error.clear();
         if (!sc13::bootstrap::g_modManager->Initialize(error)) {
@@ -206,19 +226,6 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
         }
         sc13::ui::ConfigureSimoderOverlay(*sc13::bootstrap::g_modManager);
 
-#if defined(SC13_ENABLE_DISCOVERY_TRACE)
-        const std::filesystem::path captureDirectory = dllPath.parent_path() / L"logs" / L"captures";
-        error.clear();
-        if (!sc13::runtime::StartImageObserver(
-                GetModuleHandleW(nullptr), captureDirectory, error)) {
-            AsyncLogger::Instance().WriteFormat(
-                Level::Warning, "Runtime image observer was not started: %s", error.c_str());
-        } else {
-            AsyncLogger::Instance().WriteFormat(
-                Level::Info, "Runtime image observer started; captures: %ls",
-                captureDirectory.c_str());
-        }
-#endif
 
         std::vector<sc13::reverse::ModuleInfo> modules;
         error.clear();
@@ -236,7 +243,7 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
         }
 
         error.clear();
-        if (!sc13::hooks::InstallTraceHooks(fingerprint, error)) {
+        if (!sc13::hooks::InstallRuntimeHooks(fingerprint, error)) {
             AsyncLogger::Instance().WriteFormat(
                 Level::Error, "Resource instrumentation disabled: %s", error.c_str());
             AsyncLogger::Instance().Write(
@@ -244,16 +251,22 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
                 "No hook remains installed; the game continues without SC13 resource patches");
             return 14;
         }
+        std::string nativeSessionError;
+        if (sc13::dev::session::InitializeScriptBridge(fingerprint, nativeSessionError)) {
+            auto* manager = sc13::bootstrap::g_modManager.get();
+            sc13::dev::session::ConfigureSessionTransport(sc13::dev::session::ExecuteScriptPacket,
+                [manager] { return manager->DeveloperServicesActive(); });
+        } else {
+            AsyncLogger::Instance().WriteFormat(Level::Warning, "Native session adapter unavailable: %s", nativeSessionError.c_str());
+        }
         AsyncLogger::Instance().Write(
             Level::Info,
             "Exact-build PROP deserializer hook installed; declarative active mod patches "
             "are enabled at the verified pre-consumer boundary");
-#if defined(SC13_ENABLE_DISCOVERY_TRACE)
-        AsyncLogger::Instance().Write(
-            Level::Warning,
-            "Discovery tracing is enabled for this build; package I/O and auxiliary resource "
-            "hooks are diagnostic-only");
-#endif
+        if (console.enabled && !AsyncLogger::Instance().EnableDeveloperConsole(console)) {
+            AsyncLogger::Instance().Write(Level::Warning,
+                "Nonactivating developer console unavailable; file and in-game logging continue");
+        }
         AsyncLogger::Instance().Write(
             Level::Info,
             "Runtime patches are exact-build/TGI/type gated, rebuild from retained vanilla, "
@@ -273,12 +286,18 @@ extern "C" DWORD WINAPI SC13_Initialize(void*) noexcept {
     }
 }
 
-extern "C" DWORD WINAPI SC13_Shutdown(void*) noexcept {
+namespace sc13::bootstrap {
+/** @summary Validate explicit installation roots before starting the integrated runtime. */
+DWORD Initialize(const InstallContext& context) noexcept {
+    if (context.size != sizeof(context) || context.version != 1 ||
+        !context.gameRoot || !context.dataRoot) return ERROR_INVALID_PARAMETER;
+    return InitializeImpl(context);
+}
+
+/** @summary Release runtime services outside loader lock; the process owns final teardown. */
+DWORD Shutdown() noexcept {
     sc13::bootstrap::g_runtimeDiagnostics.reset();
-    sc13::hooks::UninstallTraceHooks();
-#if defined(SC13_ENABLE_DISCOVERY_TRACE)
-    sc13::runtime::StopImageObserver();
-#endif
+    sc13::hooks::UninstallRuntimeHooks();
     sc13::runtime::StopPatchAppliedSignal();
     sc13::bootstrap::ResetModServices();
     sc13::logging::AsyncLogger::Instance().Write(
@@ -287,3 +306,5 @@ extern "C" DWORD WINAPI SC13_Shutdown(void*) noexcept {
     sc13::bootstrap::g_initialized.store(false);
     return 0;
 }
+
+} // namespace sc13::bootstrap

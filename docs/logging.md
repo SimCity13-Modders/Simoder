@@ -1,5 +1,17 @@
 # Logging
 
+The external developer console opens only after the exact-build PROP checks and hook installation
+succeed. On Windows 11 24H2 and later, Simoder dynamically uses `AllocConsoleWithOptions` with
+`SW_SHOWNOACTIVATE`. If this API is unavailable, logging stays in the file and the in-game UI;
+Simoder does not fall back to a console allocation that steals focus. Rejected
+initialization never opens a console or starts mods. Bootstrap records its result
+in the proxy log; there is no watcher, reinjection loop or pre-launch compatibility
+dialog. Runtime fingerprint/signature checks remain authoritative.
+
+The game loads the colocated d3d9.dll through its normal graphics startup.
+Bootstrap diagnostics use simoder/logs/proxy-bootstrap.log, with a local
+application-data fallback when the installation directory cannot be written.
+
 ## Pipeline
 
 Every producer emits the same semantic fields:

@@ -4,8 +4,8 @@ The companion repository is `../Simoder-DevTools`. It owns MCP/DevBridge, the
 four native developer CLIs, the VS Code extension, OpenSC5/OpenSCP importers,
 REA integration and their tests. Its README documents standalone builds and installation.
 
-Simoder owns the DLL, launcher, overlay, mod lifecycle, name resolver, package
-parsers, installer and runtime diagnostics. `src/dev/runtime_diagnostics.*`
+Simoder owns the integrated DLL, overlay, mod lifecycle, name resolver, package
+parsers and runtime diagnostics. `src/dev/runtime_diagnostics.*`
 publishes runtime evidence and stays in the loader. No developer executables or
 .NET payload are built or installed by this repository.
 
@@ -19,11 +19,13 @@ Runtime JSON retains `schemaVersion: 1`, atomic snapshots, verified PID,
 generation consistency and five-second freshness. Sharing an SDK version does
 not establish gameplay acceptance. Incompatible evidence schemas must be rejected.
 
-Install tools in a separate directory. Register MCP from its `AI` directory with
-`-GameRoot` pointing to the SimCity installation. The server receives
-`SIMODER_GAME_ROOT`; its location no longer determines the game path. Existing
-installed developer tools can remain until registration is migrated explicitly.
+Install game-owned tools as the DevTools service mod under `mods/simoder.devtools`
+and enable it explicitly in ModLoader. Broker/MCP processes belong to the game
+job and inherit its integrity level. Registration scripts belong to that package;
+the client-side stdio adapter has separate client ownership. See
+[service mods](developer-service-mods.md) for the current package contract.
 
-The extraction retained file history in a filtered local clone. Original commit
-mapping is available in the DevTools `.git/filter-repo/commit-map`. Neither
-repository was pushed as part of extraction.
+SDK pins must be updated deliberately after validation against the selected
+revision. A successful local override build does not prove that the remote pinned
+revision includes the same changes. Publication and remote verification are
+separate from local development.

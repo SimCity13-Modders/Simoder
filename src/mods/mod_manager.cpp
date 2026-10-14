@@ -1,3 +1,4 @@
+#include "scripting/script_patch_reducer.hpp"
 #include "mods/mod_manager.hpp"
 
 #include "mods/mod_definition_parser.hpp"
@@ -5,6 +6,7 @@
 #include "mods/mod_state_store.hpp"
 #include "mods/patch_registry.hpp"
 #include "runtime/runtime_resource_cache.hpp"
+#include "scripting/source_project.hpp"
 
 #include <Windows.h>
 
@@ -12,6 +14,8 @@
 #include <set>
 #include <system_error>
 #include <utility>
+#include <stdexcept>
+#include <bit>
 
 namespace sc13::mods {
 namespace {
@@ -33,64 +37,10 @@ void AppendError(std::string& destination, std::string_view message) {
     }
 }
 
-/** Hashes both declarative inputs used to construct a mod definition. */
-[[nodiscard]] bool HashDefinitionFiles(
-    const std::filesystem::path& directory,
-    ModDefinitionFingerprint& fingerprint,
-    std::string& error) noexcept {
-    std::error_code projectStatusError;
-    const bool hasProject = std::filesystem::exists(directory / L"project.toml", projectStatusError);
-    if (projectStatusError) { error = projectStatusError.message(); return false; }
-    if (hasProject) {
-        ModDefinition imported;
-        if (!LoadResourceProject(directory, imported, error)) return false;
-        if (!core::Sha256File(directory / L"project.toml", fingerprint.manifest, error)) return false;
-        fingerprint.overrides = fingerprint.manifest;
-        return true;
-    }
-    if (!core::Sha256File(directory / L"mod.toon", fingerprint.manifest, error)) {
-        error = "mod.toon fingerprint: " + error;
-        return false;
-    }
-    if (!core::Sha256File(directory / L"overrides.toon", fingerprint.overrides, error)) {
-        error = "overrides.toon fingerprint: " + error;
-        return false;
-    }
-    std::error_code statusError;
-    fingerprint.hasSymbols = std::filesystem::exists(directory / L"symbols.toon", statusError);
-    if (statusError) { error = "symbols.toon fingerprint: " + statusError.message(); return false; }
-    if (fingerprint.hasSymbols &&
-        !core::Sha256File(directory / L"symbols.toon", fingerprint.symbols, error)) return false;
-    return true;
-}
-
-/** Loads a definition only when its source bytes remain stable throughout parsing. */
-[[nodiscard]] bool LoadStableCandidate(
-    const std::filesystem::path& directory,
-    ModDefinition& definition,
-    ModDefinitionFingerprint& fingerprint,
-    std::string& error) noexcept {
-    for (unsigned int attempt = 0U; attempt < 2U; ++attempt) {
-        ModDefinitionFingerprint before;
-        if (!HashDefinitionFiles(directory, before, error)) {
-            return false;
-        }
-        ModDefinition parsed;
-        if (!LoadModDefinition(directory, parsed, error)) {
-            return false;
-        }
-        ModDefinitionFingerprint after;
-        if (!HashDefinitionFiles(directory, after, error)) {
-            return false;
-        }
-        if (before == after) {
-            definition = std::move(parsed);
-            fingerprint = after;
-            return true;
-        }
-    }
-    error = "Mod files changed repeatedly while they were being read";
-    return false;
+/** @summary Reserves the shared compiled cache outside mod sources, using Windows case-insensitive naming. */
+[[nodiscard]] bool IsSharedModCache(const std::filesystem::path& path) {
+    const auto name = path.filename().native();
+    return CompareStringOrdinal(name.c_str(), -1, L"cache", -1, TRUE) == CSTR_EQUAL;
 }
 
 /** Erases one ID from activation order while preserving all other ordering. */
@@ -98,13 +48,10 @@ void EraseEnabled(std::vector<ModId>& order, const ModId& id) {
     order.erase(std::remove(order.begin(), order.end(), id), order.end());
 }
 
-/** Collects all exact resource identities changed by one mod definition. */
-[[nodiscard]] std::set<core::Tgi> CollectTargets(
-    const ModDefinition& definition) {
+/** @summary Collects exact targets from effective declarative and scripted operations. */
+std::set<core::Tgi> PatchTargets(std::span<const ResourcePatchDefinition> patches) {
     std::set<core::Tgi> result;
-    for (const ResourcePatchDefinition& patch : definition.patches) {
-        result.insert(patch.target);
-    }
+    for (const auto& patch : patches) result.insert(patch.target);
     return result;
 }
 
@@ -115,12 +62,34 @@ ModManager::ModManager(
     std::filesystem::path statePath,
     PatchRegistry& registry,
     runtime::RuntimeResourceCache& cache,
-    RuntimeResourceRefreshCallback runtimeRefresh)
+    RuntimeResourceRefreshCallback runtimeRefresh, scripting::ScriptScheduler::LogSink scriptLog)
     : modsDirectory_(std::move(modsDirectory)),
       statePath_(std::move(statePath)),
       registry_(registry),
       cache_(cache),
-      runtimeRefresh_(std::move(runtimeRefresh)) {}
+      runtimeRefresh_(std::move(runtimeRefresh)),
+      scriptScheduler_(std::make_unique<scripting::ScriptScheduler>(std::move(scriptLog),
+          [this](const auto& id, const auto& runtime, const auto& commands, std::string& error) {
+              return ApplyScriptCommands(id, runtime, commands, error);
+          })),
+      actionWorker_(std::make_unique<ActionWorker>([this](const ModAction& action) {
+          std::string error;
+          const bool success = action.kind == "refresh" ? Refresh(error) :
+              action.kind == "reload" ? Reload(action.id, error, action.revision) :
+              SetEnabled(action.id, action.kind == "enable", error);
+          static_cast<void>(Snapshot());
+          return success ? action.kind + " completed: " + action.id : action.kind + " failed: " + error;
+      })) {}
+
+ModManager::~ModManager() {
+    actionWorker_.reset();
+    scriptScheduler_->Shutdown();
+    for (auto& [id, record] : records_) {
+        if (record.scriptRuntime) record.scriptRuntime->Stop();
+        scriptScheduler_->Flush(id, record.scriptRuntime);
+    }
+    scriptScheduler_.reset();
+}
 
 bool ModManager::Initialize(std::string& error) noexcept {
     try {
@@ -199,6 +168,9 @@ bool ModManager::RefreshLocked(std::string& error) {
     std::vector<std::filesystem::path> directories;
     for (std::filesystem::directory_iterator iterator(modsDirectory_, directoryError), end;
          !directoryError && iterator != end; iterator.increment(directoryError)) {
+        if (IsSharedModCache(iterator->path())) {
+            continue;
+        }
         std::error_code statusError;
         const std::filesystem::file_status status = iterator->symlink_status(statusError);
         if (statusError) {
@@ -240,6 +212,7 @@ bool ModManager::RefreshLocked(std::string& error) {
         }
         const auto resourceDiagnostic = ResourceRuntimeDiagnostic(candidate.definition);
         if (!resourceDiagnostic.empty()) {
+            failedPaths.emplace(directory, resourceDiagnostic);
             const auto& manifest = candidate.definition.manifest;
             failedDiscoveries_.push_back(ModUiEntry{manifest.id, manifest.name, manifest.version,
                 manifest.author, ModState::Failed, false, false, false, resourceDiagnostic});
@@ -292,11 +265,16 @@ bool ModManager::RefreshLocked(std::string& error) {
                     ++iterator;
                     continue;
                 }
-                std::set<core::Tgi> affected = CollectTargets(record.definition);
+                std::set<core::Tgi> affected = PatchTargets(EffectivePatches(record));
                 const std::size_t invalidatedBefore = cache_.Invalidate(affected);
                 static_cast<void>(invalidatedBefore);
                 std::string deactivateError;
                 if (registry_.Deactivate(iterator->first, affected, deactivateError)) {
+                    scriptScheduler_->Remove(iterator->first);
+                    if (record.scriptRuntime) record.scriptRuntime->Stop();
+                    scriptScheduler_->Flush(iterator->first, record.scriptRuntime);
+                    record.scriptRuntime.reset();
+                    record.scriptPatches.clear();
                     const std::size_t invalidatedAfter = cache_.Invalidate(affected);
                     static_cast<void>(invalidatedAfter);
                     EraseEnabled(enabledOrder_, iterator->first);
@@ -361,6 +339,77 @@ bool ModManager::RefreshLocked(std::string& error) {
     return error.empty();
 }
 
+std::vector<ResourcePatchDefinition> ModManager::EffectivePatches(const Record& record) {
+    auto result = record.definition.patches;
+    result.insert(result.end(), record.scriptPatches.begin(), record.scriptPatches.end());
+    return result;
+}
+
+scripting::ScriptHost ModManager::ScriptHost() {
+    return {[this](const core::Tgi& target, std::uint32_t property) { return cache_.ReadObservedFloat(target, property); }};
+}
+
+bool ModManager::ValidateScriptPatchesLocked(const ModId& owner,
+    const std::vector<ResourcePatchDefinition>& candidate, std::string& error) const {
+    auto targets = PatchTargets(candidate);
+    if (const auto found = records_.find(owner); found != records_.end()) {
+        const auto previous = PatchTargets(EffectivePatches(found->second));
+        targets.insert(previous.begin(), previous.end());
+    }
+    if (targets.empty()) return true;
+    for (const auto& entry : cache_.SnapshotForTargets(targets)) {
+        std::vector<RegisteredPatch> patches;
+        std::uint64_t sequence{};
+        bool inserted{};
+        for (const auto& id : enabledOrder_) {
+            const auto effective = id == owner ? candidate : EffectivePatches(records_.at(id));
+            if (id == owner) inserted = true;
+            for (const auto& patch : effective)
+                if (patch.target == entry.key.target) patches.push_back({id, patch, sequence});
+            ++sequence;
+        }
+        if (!inserted) for (const auto& patch : candidate)
+            if (patch.target == entry.key.target) patches.push_back({owner, patch, sequence});
+        std::vector<core::RuntimePropertyRecord> result;
+        if (!ApplyPatchSequence(entry.key.target, entry.vanilla, patches, result, error)) return false;
+    }
+    return true;
+}
+
+bool ModManager::ApplyScriptCommands(const ModId& id,
+    const std::shared_ptr<scripting::ScriptRuntime>& runtime,
+    const std::vector<scripting::ScriptPatchCommand>& commands, std::string& error) {
+    try {
+        const std::scoped_lock lock(mutex_);
+        const auto found = records_.find(id);
+        /** @summary Discard an in-flight callback from a disabled or superseded VM without touching its successor. */
+        if (found == records_.end() || found->second.scriptRuntime != runtime || !registry_.IsActive(id)) return true;
+        auto& record = found->second;
+        auto candidate = scripting::ReduceScriptPatches(record.scriptPatches, commands);
+        bool equal = candidate.size() == record.scriptPatches.size();
+        for (std::size_t i = 0; equal && i < candidate.size(); ++i) {
+            const auto& a = candidate[i]; const auto& b = record.scriptPatches[i];
+            equal = a.target == b.target && a.properties.size() == b.properties.size();
+            for (std::size_t j = 0; equal && j < a.properties.size(); ++j)
+                equal = a.properties[j].propertyId == b.properties[j].propertyId &&
+                    std::bit_cast<std::uint32_t>(a.properties[j].value) == std::bit_cast<std::uint32_t>(b.properties[j].value);
+        }
+        if (equal) return true;
+        auto effective = record.definition.patches;
+        effective.insert(effective.end(), candidate.begin(), candidate.end());
+        if (!ValidateScriptPatchesLocked(id, effective, error)) return false;
+        auto affected = PatchTargets(EffectivePatches(record));
+        const auto added = PatchTargets(effective); affected.insert(added.begin(), added.end());
+        static_cast<void>(cache_.Invalidate(affected));
+        if (!registry_.Replace(id, effective, affected, error)) return false;
+        record.scriptPatches = std::move(candidate);
+        static_cast<void>(cache_.Invalidate(affected));
+        RefreshRuntimeResourcesLocked(affected, record, "script update");
+        return true;
+    } catch (const std::exception& exception) { error = exception.what(); return false; }
+    catch (...) { error = "Script PROP transaction failed safely"; return false; }
+}
+
 bool ModManager::EnableLocked(
     Record& record,
     bool persist,
@@ -371,6 +420,24 @@ bool ModManager::EnableLocked(
         return false;
     }
     const ModId& id = record.definition.manifest.id;
+    scriptScheduler_->Reserve(id);
+    std::shared_ptr<scripting::ScriptRuntime> prepared;
+    if (record.definition.script) {
+        try { prepared = std::make_shared<scripting::ScriptRuntime>(id, *record.definition.script, ScriptHost()); }
+        catch (const std::exception& exception) { error = exception.what(); record.diagnostic = error; return false; }
+    }
+    auto scriptPatches = scripting::ReduceScriptPatches({}, prepared ? prepared->TakePatchCommands() : std::vector<scripting::ScriptPatchCommand>{});
+    std::unique_ptr<dev::ServiceSupervisor> preparedServices;
+    if (record.definition.services) {
+        preparedServices = std::make_unique<dev::ServiceSupervisor>();
+        if (!preparedServices->Start(*record.definition.services, modsDirectory_.parent_path(), error)) {
+            record.diagnostic = error;
+            return false;
+        }
+    }
+    auto effective = record.definition.patches;
+    effective.insert(effective.end(), scriptPatches.begin(), scriptPatches.end());
+    if (!scriptPatches.empty() && !ValidateScriptPatchesLocked(id, effective, error)) { record.diagnostic = error; return false; }
     const std::vector<ModId> previousOrder = enabledOrder_;
     std::vector<ModId> candidateOrder = previousOrder;
     candidateOrder.push_back(id);
@@ -380,10 +447,10 @@ bool ModManager::EnableLocked(
         record.diagnostic = error;
         return false;
     }
-    std::set<core::Tgi> affected = CollectTargets(record.definition);
+    std::set<core::Tgi> affected = PatchTargets(effective);
     const std::size_t invalidatedBefore = cache_.Invalidate(affected);
     static_cast<void>(invalidatedBefore);
-    if (!registry_.Activate(id, record.definition.patches, affected, error)) {
+    if (!registry_.Activate(id, effective, affected, error)) {
         if (persist) {
             std::string rollbackError;
             if (!PersistOrder(previousOrder, rollbackError)) {
@@ -397,6 +464,10 @@ bool ModManager::EnableLocked(
     const std::size_t invalidatedAfter = cache_.Invalidate(affected);
     static_cast<void>(invalidatedAfter);
     enabledOrder_ = std::move(candidateOrder);
+    if (prepared) { prepared->Commit(); scriptScheduler_->Put(id, prepared); }
+    record.scriptRuntime = std::move(prepared);
+    record.serviceSupervisor = std::move(preparedServices);
+    record.scriptPatches = std::move(scriptPatches);
     record.state = ModState::Active;
     record.diagnostic.clear();
     RefreshRuntimeResourcesLocked(affected, record, "enable");
@@ -423,7 +494,7 @@ bool ModManager::DisableLocked(
         record.diagnostic = error;
         return false;
     }
-    std::set<core::Tgi> affected = CollectTargets(record.definition);
+    std::set<core::Tgi> affected = PatchTargets(EffectivePatches(record));
     const std::size_t invalidatedBefore = cache_.Invalidate(affected);
     static_cast<void>(invalidatedBefore);
     if (!registry_.Deactivate(id, affected, error)) {
@@ -437,6 +508,12 @@ bool ModManager::DisableLocked(
         record.diagnostic = error;
         return false;
     }
+    scriptScheduler_->Remove(id);
+    if (record.scriptRuntime) record.scriptRuntime->Stop();
+    scriptScheduler_->Flush(id, record.scriptRuntime);
+    record.scriptRuntime.reset();
+    record.serviceSupervisor.reset();
+    record.scriptPatches.clear();
     const std::size_t invalidatedAfter = cache_.Invalidate(affected);
     static_cast<void>(invalidatedAfter);
     enabledOrder_ = std::move(candidateOrder);
@@ -529,35 +606,38 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
         }
         auto& record = found->second;
         const auto& fingerprint = *record.pendingFingerprint;
-        const auto revision = core::ToHex(fingerprint.manifest) + core::ToHex(fingerprint.overrides) +
-            (fingerprint.hasSymbols ? core::ToHex(fingerprint.symbols) : "absent");
+        if (record.definition.services || record.pendingDefinition->services) {
+            error = "Developer service changes require disabling and enabling the mod";
+            record.diagnostic = error;
+            return false;
+        }
+        const auto revision = core::ToHex(fingerprint.manifest);
         if (!expectedRevision.empty() && expectedRevision != revision) {
             error = "Reload preview is stale; review the latest pending definition";
             return false;
         }
         const auto& pending = *record.pendingDefinition;
-        auto affected = CollectTargets(record.definition);
-        const auto newTargets = CollectTargets(pending);
-        affected.insert(newTargets.begin(), newTargets.end());
-        for (const auto& entry : cache_.SnapshotForRestore()) {
-            if (!affected.contains(entry.key.target)) continue;
-            std::vector<RegisteredPatch> patches;
-            std::uint64_t sequence = 0;
-            for (const auto& owner : enabledOrder_) {
-                const auto& definition = owner == id ? pending : records_.at(owner).definition;
-                for (const auto& patch : definition.patches)
-                    if (patch.target == entry.key.target) patches.push_back(RegisteredPatch{owner, patch, sequence});
-                ++sequence;
-            }
-            std::vector<core::RuntimePropertyRecord> result;
-            if (!ApplyPatchSequence(entry.key.target, entry.vanilla, patches, result, error)) {
-                record.diagnostic = "Reload rejected: " + error;
-                return false;
-            }
+        std::shared_ptr<scripting::ScriptRuntime> prepared;
+        if (pending.script) {
+            try { prepared = std::make_shared<scripting::ScriptRuntime>(id, *pending.script, ScriptHost()); }
+            catch (const std::exception& exception) { error = exception.what(); record.diagnostic = "Reload rejected: " + error; return false; }
         }
+        auto scriptPatches = scripting::ReduceScriptPatches({}, prepared ? prepared->TakePatchCommands() : std::vector<scripting::ScriptPatchCommand>{});
+        auto effective = pending.patches;
+        effective.insert(effective.end(), scriptPatches.begin(), scriptPatches.end());
+        auto affected = PatchTargets(EffectivePatches(record));
+        const auto newTargets = PatchTargets(effective);
+        affected.insert(newTargets.begin(), newTargets.end());
+        if (!ValidateScriptPatchesLocked(id, effective, error)) { record.diagnostic = "Reload rejected: " + error; return false; }
         // /** @summary Invalidate around a single publication so in-flight old plans cannot commit. */
         static_cast<void>(cache_.Invalidate(affected));
-        if (!registry_.Replace(id, pending.patches, affected, error)) return false;
+        if (!registry_.Replace(id, effective, affected, error)) return false;
+        scriptScheduler_->Remove(id);
+        if (record.scriptRuntime) record.scriptRuntime->Stop();
+        scriptScheduler_->Flush(id, record.scriptRuntime);
+        if (prepared) { prepared->Commit(); scriptScheduler_->Put(id, prepared); }
+        record.scriptRuntime = std::move(prepared);
+        record.scriptPatches = std::move(scriptPatches);
         static_cast<void>(cache_.Invalidate(affected));
         record.definition = std::move(*record.pendingDefinition);
         record.fingerprint = *record.pendingFingerprint;
@@ -568,12 +648,18 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
     } catch (...) { error = "Reload failed safely with an exception"; return false; }
 }
 
-std::vector<ModUiEntry> ModManager::Snapshot() const {
-    const std::scoped_lock lock(mutex_);
+std::vector<ModUiEntry> ModManager::Snapshot(bool wait) const {
+    std::unique_lock lock(mutex_, std::defer_lock);
+    if (wait) lock.lock(); else static_cast<void>(lock.try_lock());
+    if (!lock.owns_lock()) {
+        const std::scoped_lock snapshotLock(snapshotMutex_); return cachedSnapshot_;
+    }
     std::vector<ModUiEntry> result;
     result.reserve(records_.size() + failedDiscoveries_.size());
     for (const auto& [id, record] : records_) {
         const bool registered = registry_.IsActive(id);
+        const auto scriptStatus = record.scriptRuntime ? record.scriptRuntime->Status() : scripting::ScriptStatus{};
+        const auto serviceDiagnostic = record.serviceSupervisor ? record.serviceSupervisor->Diagnostic() : std::string{};
         result.push_back(ModUiEntry{
             id,
             record.definition.manifest.name,
@@ -583,17 +669,35 @@ std::vector<ModUiEntry> ModManager::Snapshot() const {
             record.state == ModState::Inactive && !registered,
             registered,
             record.state == ModState::Changed,
-            record.diagnostic,
-            record.definition.patches,
+            serviceDiagnostic.empty() ? record.diagnostic : serviceDiagnostic,
+            EffectivePatches(record),
             record.pendingDefinition ? record.pendingDefinition->patches : std::vector<ResourcePatchDefinition>{},
-            registered && record.pendingDefinition.has_value(),
-            record.pendingFingerprint ? core::ToHex(record.pendingFingerprint->manifest) +
-                core::ToHex(record.pendingFingerprint->overrides) +
-                (record.pendingFingerprint->hasSymbols ? core::ToHex(record.pendingFingerprint->symbols) : "absent") : ""});
+            registered && record.pendingDefinition.has_value() && !record.definition.services && !record.pendingDefinition->services,
+            record.pendingFingerprint ? core::ToHex(record.pendingFingerprint->manifest) : "",
+            record.definition.script ? record.definition.script->language : "",
+            record.definition.script ? record.definition.script->revision : "",
+            record.pendingDefinition && record.pendingDefinition->script ? record.pendingDefinition->script->revision : "",
+            scriptStatus.diagnostic, scriptStatus.memoryBytes, scriptStatus.running});
     }
     result.insert(result.end(), failedDiscoveries_.begin(), failedDiscoveries_.end());
+    { const std::scoped_lock snapshotLock(snapshotMutex_); cachedSnapshot_ = result; }
     return result;
 }
+
+bool ModManager::DeveloperServicesActive() const {
+    const std::scoped_lock lock(mutex_);
+    for (const auto& [id, record] : records_) {
+        if (registry_.IsActive(id) && record.serviceSupervisor && record.serviceSupervisor->Diagnostic().empty()) return true;
+    }
+    return false;
+}
+
+bool ModManager::RequestAction(std::string action, ModId id, std::string revision) {
+    if (action != "refresh" && action != "reload" && action != "enable" && action != "disable") return false;
+    return actionWorker_->Submit({std::move(action), std::move(id), std::move(revision)});
+}
+std::string ModManager::ActionStatus() const { return actionWorker_->Status(); }
+bool ModManager::OperationBusy() const noexcept { return actionWorker_->Busy(); }
 
 std::vector<ModId> ModManager::EnabledOrder() const {
     const std::scoped_lock lock(mutex_);

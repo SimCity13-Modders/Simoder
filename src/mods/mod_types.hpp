@@ -4,9 +4,12 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
+namespace sc13::scripting { struct ScriptDefinition; }
+namespace sc13::dev { struct ServiceModDefinition; }
 namespace sc13::mods {
 
 using ModId = std::string;
@@ -78,6 +81,8 @@ struct BinaryResourceDefinition final {
     std::string payload;
     std::string sha256;
     std::uint64_t size{};
+    /** @summary Keeps the immutable compiled payload location when the owning definition points at source files. */
+    std::filesystem::path resolvedPayload;
 };
 
 /** Owns one validated mod's metadata and declarative patches. */
@@ -86,6 +91,10 @@ struct ModDefinition final {
     std::filesystem::path directory;
     std::vector<ResourcePatchDefinition> patches;
     std::vector<BinaryResourceDefinition> resources;
+    /** @summary Retains trusted worker-produced script bytecode independently from native game scripts. */
+    std::shared_ptr<const scripting::ScriptDefinition> script;
+    /** @summary Optional developer services activated only by this mod's enabled lifecycle. */
+    std::shared_ptr<const dev::ServiceModDefinition> services;
 };
 
 /** Associates a registered patch with its stable owner and activation sequence. */
@@ -121,6 +130,13 @@ struct ModUiEntry final {
     bool canReload{};
     /** @summary Binds a displayed reload preview to the exact pending source fingerprints. */
     std::string pendingRevision;
+    /** @summary Displays script generations and isolated runtime failures in the overlay and DevBridge snapshot. */
+    std::string scriptLanguage;
+    std::string scriptRevision;
+    std::string pendingScriptRevision;
+    std::string scriptDiagnostic;
+    std::size_t scriptMemoryBytes{};
+    bool scriptRunning{};
 };
 
 /** Returns a stable diagnostic label for a lifecycle state. */

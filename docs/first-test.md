@@ -1,89 +1,53 @@
-# M3 runtime acceptance test
+# Live-game runtime acceptance
 
-This procedure validates Simoder discovery, UI, ON/OFF state, runtime rebuilds, logging, and clean
-detach without changing a `.package` file.
+This procedure verifies the installed DLL, explicit mod lifecycle and service
+ownership in an actual EA-launched game. Synthetic tests and successful compilation
+are prerequisites, not substitutes for these observations. Record current binary
+hashes and results under ignored .analysis/.
 
-## 1. Build and stage
+## Prepare and launch
 
-```powershell
-cmake --preset vs2026-x86
-cmake --build --preset vs2026-release --parallel
-ctest --preset vs2026-release
-cmake --install build/vs2026 --config Release --prefix '<SimCity-install>'
-& '<SimCity-install>\Start-Simoder.bat' --check
-& '<SimCity-install>\simoder\simoder.exe' --self-check
-```
+Build the x86 Release target and run CTest. Close the game; preserve an existing
+foreign graphics proxy. Copy the built d3d9.dll beside the actual SimCity.exe and
+launch through EA App. No launcher or BAT is required. Read bootstrap/runtime logs
+to confirm successful exact-build hook initialization. Record the game executable
+identity and DLL SHA-256. Verify ordinary graphics and city loading.
 
-Confirm `config.toon` has `developerConsole.enabled: false` for the default-console test. Delete or
-edit `simoder/state.toon` so Better Sanitizer is initially absent from `enabled`.
+Install selected examples from Simoder-DevTools into the installation's mods/
+directory. Use the actual IDs and metadata in each current mod.toml. New mods
+should remain inactive until explicitly enabled. Open the overlay and confirm that
+Refresh detects newly installed packages without enabling them. Preserve user
+state; use isolated fixtures rather than deleting existing settings.
 
-## 2. Start through EA App
+## Declarative and scripted behavior
 
-Double-click `Start-Simoder.bat` and approve UAC. The current EA-launched game requires elevation,
-so rejecting UAC prevents the watcher from attaching. If base-game infinite loading returns,
-disable the EA App in-game overlay and retry.
+For BetterSanitizer, verify the manifest's canonical TGI/property and baseline
+before enabling. The known scalar operating-cost patch changes 300 to 345; the
+displayed aggregate may include other costs. Verify the actual selected object,
+retained resource diagnostics and simulation effect rather than assuming a total.
 
-Load a city that can construct the Sewage Sanitizer. The always-visible `Simoder` button should
-open a table with Name, Version, Author, State, and Enabled columns.
+Enable and disable the mod. Confirm state persistence, deterministic ownership
+and restoration from vanilla plus remaining active owners. Edit mod.toml while
+inactive and confirm enabling rereads it. While active, preview a valid change
+and reload; reject invalid edits without replacing the active generation. Recreate
+objects or panels when the game has copied an earlier property value.
 
-## 3. Discovery and inactive baseline
+For a Luau example, verify lifecycle logs, execution isolation, pending revision
+and disable behavior. Run PROP API Example against an observed resource and check
+its owner-scoped override and restoration. Record any unverified gameplay effects.
 
-Verify `Better Sanitizer 1.0.0 Dawid` appears as `Inactive` and OFF. With it OFF, reload the map or
-otherwise force a fresh Sanitizer resource load. The selector must show vanilla `500 $/h`
-(`300 + 200`). No runtime patch event for its mod ID should appear.
+## Developer services and exit
 
-Copy a second valid test mod directory into `mods/` while the game runs. It must not appear before
-Refresh. After Refresh it must appear `Inactive`/OFF and must not register a patch.
+Install the DevTools service mod and explicitly enable it. Confirm its service
+processes are children of the game and that MCP can observe the current session.
+Disable the mod and verify its captured process identities terminate; reenable
+and verify a new owned set. Normal game exit must terminate owned services.
+Use only an isolated test host for forced termination regression unless a live
+forced-exit test has explicit authorization; avoid risking a user's unsaved city.
 
-## 4. Enable and disable
+Restart through EA App and check intended persisted activation. Confirm no duplicate
+services, stale listeners or independent watcher remain. The external client-side
+MCP adapter has separate client ownership and must not be mistaken for a game child.
 
-Switch Better Sanitizer ON, then recreate the building or reload the map. Verify:
-
-1. its state is `Active`;
-2. `state.toon` contains `dawid.better-sanitizer`;
-3. the selector and simulation charge are `545 $/h` (`345 + 200`);
-4. placement, enable/disable, tank/modules, bulldoze, save, and reload remain functional;
-5. the log includes `[MOD] [dawid.better-sanitizer] [PATCH]` and the exact target TGI.
-
-Switch it OFF. The retained live PROP resource must return immediately to `500 $/h` from vanilla
-plus the remaining active set. No subtraction/division rollback is involved.
-
-While it is OFF, change property `0x09AE19D7` in `overrides.toon`, then switch it ON without
-clicking Refresh. The selector and details must use the new value. A subsystem that copied an
-earlier PROP value may require its panel or object to be recreated, but the retained PROP instance
-and log must show the new generation immediately.
-
-## 5. Refresh and removal
-
-- Edit an active mod, click Refresh, and verify `Changed`; its old active definition remains until
-  OFF/ON.
-- Delete an inactive mod and Refresh; its entry disappears.
-- Delete an active mod and Refresh; its registry entries and persisted enabled ID disappear, while
-  the UI reports `Missing`. Future loads use the remaining active set.
-- Add two folders with the same manifest ID; both must be `Failed` and diagnostics must name both
-  paths. Other valid mods must continue.
-
-## 6. Logging and optional console
-
-With the default config, no external console window should appear and file logging should continue
-under `simoder/logs/sc13modloader.log`. Set `developerConsole.enabled: true`, restart the game, and
-verify a separate `Simoder Developer Console` appears. Loader and mod messages must be classified;
-any game `OutputDebugStringA/W` message must be tagged `GAME`.
-
-## 7. Controlled detach
-
-From an elevated terminal:
-
-```powershell
-& '<SimCity-install>\simoder\simoder.exe' --detach <pid>
-```
-
-The original WndProc and ImGui context must be removed, every still-matching retained resource must
-be restored to vanilla, the DLL must unload, and the game must remain responsive.
-
-## 8. Integrity
-
-Compare canonical package hashes before and after. The validated
-`SimCityDLCEP1-Scripts_287520926.package` baseline is 409297 bytes with SHA-256
-`0A3F66804D9A99A626509B42C76D3C308A53F9FB2D84529F621A88BF85043FF9`.
-No package, log, dump, capture, generated binary, or local `state.toon` belongs in source control.
+Record each result separately: bootstrap, overlay, patches, scripts, service control
+and process teardown. Missing observations remain unverified acceptance items.

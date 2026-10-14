@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <new>
 
 namespace sc13::logging {
@@ -63,16 +64,8 @@ bool AsyncLogger::Start(
             return false;
         }
         consoleOptions_ = console;
-        if (console.enabled && AllocConsole() != FALSE) {
-            consoleAllocated_ = true;
-            SetConsoleTitleW(L"Simoder Developer Console");
-            consoleOutput_ = CreateFileW(
-                L"CONOUT$", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (consoleOutput_ == INVALID_HANDLE_VALUE) {
-                FreeConsole();
-                consoleAllocated_ = false;
-            }
+        if (console.enabled) {
+            (void)CreateConsoleLocked();
         }
         readIndex_ = 0U;
         writeIndex_ = 0U;
@@ -143,6 +136,56 @@ bool AsyncLogger::IsConsoleActive() const noexcept {
     const bool active = consoleAllocated_ && consoleOutput_ != INVALID_HANDLE_VALUE;
     ReleaseSRWLockShared(&lock_);
     return active;
+}
+
+bool AsyncLogger::CreateConsoleLocked() noexcept {
+    if (consoleAllocated_) {
+        return true;
+    }
+    // @summary Resolve dynamically to preserve Windows 10 support without a focus-stealing fallback.
+    /** @summary Mirrors the documented ABI to allow compilation with pre-24H2 Windows SDKs. */
+    struct ConsoleOptions final {
+        int mode;
+        BOOL useShowWindow;
+        WORD showWindow;
+    };
+    static_assert(sizeof(ConsoleOptions) == 12U);
+    using Allocate = HRESULT(WINAPI*)(ConsoleOptions*, int*);
+    const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    const FARPROC procedure = kernel == nullptr ? nullptr :
+        GetProcAddress(kernel, "AllocConsoleWithOptions");
+    if (procedure == nullptr) {
+        return false;
+    }
+    Allocate allocate{};
+    static_assert(sizeof(allocate) == sizeof(procedure));
+    std::memcpy(&allocate, &procedure, sizeof(allocate));
+    ConsoleOptions options{1, TRUE, SW_SHOWNOACTIVATE};
+    int result{};
+    if (FAILED(allocate(&options, &result)) || result != 1) {
+        return false;
+    }
+    consoleAllocated_ = true;
+    SetConsoleTitleW(L"Simoder Developer Console");
+    consoleOutput_ = CreateFileW(L"CONOUT$", GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (consoleOutput_ == INVALID_HANDLE_VALUE) {
+        FreeConsole();
+        consoleAllocated_ = false;
+        return false;
+    }
+    return true;
+}
+
+bool AsyncLogger::EnableDeveloperConsole(const DeveloperConsoleOptions& console) noexcept {
+    AcquireSRWLockExclusive(&lock_);
+    bool enabled = false;
+    if (running_ && !stopping_ && console.enabled) {
+        consoleOptions_ = console;
+        enabled = CreateConsoleLocked();
+    }
+    ReleaseSRWLockExclusive(&lock_);
+    return enabled;
 }
 
 void AsyncLogger::Write(Level level, const char* message) noexcept {
@@ -250,6 +293,7 @@ void AsyncLogger::WorkerMain() noexcept {
             if (stream_) {
                 stream_.write(formatted.data(), static_cast<std::streamsize>(length));
             }
+            AcquireSRWLockShared(&lock_);
             if (consoleOutput_ != INVALID_HANDLE_VALUE &&
                 ShouldWriteConsole(batch[index])) {
                 DWORD bytesWritten = 0U;
@@ -257,6 +301,7 @@ void AsyncLogger::WorkerMain() noexcept {
                     consoleOutput_, formatted.data(), static_cast<DWORD>(length),
                     &bytesWritten, nullptr);
             }
+            ReleaseSRWLockShared(&lock_);
         }
         if (dropped != 0U) {
             const int length = std::snprintf(

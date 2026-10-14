@@ -91,8 +91,8 @@ bool PatchRegistry::Activate(
     try {
         affected.clear();
         error.clear();
-        if (owner.empty() || patches.empty()) {
-            error = "Patch activation requires an owner and at least one patch";
+        if (owner.empty()) {
+            error = "Activation requires a stable owner (script-only mods may have no patches)";
             return false;
         }
         const std::scoped_lock lock(mutationMutex_);
@@ -165,7 +165,7 @@ bool PatchRegistry::Replace(const ModId& owner, std::span<const ResourcePatchDef
         error.clear(); affected.clear();
         const std::scoped_lock lock(mutationMutex_);
         const auto existing = active_.find(owner);
-        if (existing == active_.end() || patches.empty()) { error = "Replace requires an active owner and patches"; return false; }
+        if (existing == active_.end()) { error = "Replace requires an active owner"; return false; }
         auto candidate = active_;
         for (const auto& patch : existing->second.patches) affected.insert(patch.target);
         for (const auto& patch : patches) affected.insert(patch.target);

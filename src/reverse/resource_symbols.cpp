@@ -1,4 +1,5 @@
 #include "reverse/resource_symbols.hpp"
+#include "reverse/build_compatibility.hpp"
 
 #include "core/sha256.hpp"
 #include "memory/signature.hpp"
@@ -14,10 +15,6 @@
 namespace sc13::reverse {
 namespace {
 
-constexpr std::string_view kSupportedFileSha256 =
-    "4E5F136A7BF58A52C4B97ED9C9A615A118D4A696E13AA8CAA6A0A51FD4516D35";
-constexpr std::string_view kSupportedTextSha256 =
-    "D187C19201972ABEBCAA2FA5D8E38263D7A0B0FC3B6803D646636AFB14C49D39";
 constexpr std::uint32_t kExpectedPFRecordReadConstructorRva = 0x0052B9B0U;
 constexpr std::string_view kPFRecordReadConstructorSignature =
     "53 55 56 8B F1 57 C7 06 44 A8 CF 00 33 C0 8D 4E 04 87 01 "
@@ -79,8 +76,8 @@ constexpr std::string_view kPropDeserializeSignature =
     const std::byte*& imageBase,
     std::span<const std::byte>& text,
     std::string& error) {
-    if (core::ToHex(fingerprint.fileSha256) != kSupportedFileSha256 ||
-        core::ToHex(fingerprint.loadedTextSha256) != kSupportedTextSha256) {
+    if (core::ToHex(fingerprint.fileSha256) != kSupportedGameFileSha256 ||
+        core::ToHex(fingerprint.loadedTextSha256) != kSupportedGameTextSha256) {
         error = "Resource symbols are not validated for this file/.text fingerprint";
         return false;
     }

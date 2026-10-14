@@ -5,7 +5,7 @@
 
 namespace sc13::dev {
 /** @summary Serializes bounded cached runtime evidence without implying gameplay acceptance. */
-[[nodiscard]] std::string RuntimeDiagnosticsJson(const mods::ModManager& manager, std::uint32_t processId);
+[[nodiscard]] std::string RuntimeDiagnosticsJson(const mods::ModManager& manager, std::uint32_t processId, bool controlAvailable = false);
 /** @summary Watches definitions and atomically publishes read-only developer snapshots. */
 class RuntimeDiagnostics final {
 public:

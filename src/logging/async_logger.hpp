@@ -39,6 +39,9 @@ public:
     /** Reports whether the optional console sink was created successfully. */
     [[nodiscard]] bool IsConsoleActive() const noexcept;
 
+    /** @summary Enables a console without activation after runtime initialization has succeeded. */
+    [[nodiscard]] bool EnableDeveloperConsole(const DeveloperConsoleOptions& console) noexcept;
+
     /** Enqueues a loader event for compatibility with existing producers. */
     void Write(Level level, const char* message) noexcept;
 
@@ -87,6 +90,9 @@ private:
 
     /** Reports whether one event is enabled for the optional console sink. */
     [[nodiscard]] bool ShouldWriteConsole(const Record& record) const noexcept;
+
+    /** @summary Creates an owned console through the nonactivating Windows API under the sink lock. */
+    [[nodiscard]] bool CreateConsoleLocked() noexcept;
 
     mutable SRWLOCK lock_ = SRWLOCK_INIT;
     CONDITION_VARIABLE wake_ = CONDITION_VARIABLE_INIT;

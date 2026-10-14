@@ -1,4 +1,5 @@
 #include "mods/resource_project.hpp"
+#include "scripting/source_project.hpp"
 #include "mods/mod_definition_parser.hpp"
 #include "core/sha256.hpp"
 #include "../../third_party/tomlplusplus/toml.hpp"
@@ -20,9 +21,32 @@ std::string Text(const toml::node_view<const toml::node>& node) {
 }
 /** @summary Reject links and junctions for each existing input component. */
 void PlainPath(const std::filesystem::path& path) {
-    const DWORD attributes = GetFileAttributesW(path.c_str());
+    const DWORD attributes = GetFileAttributesW(scripting::NativePath(path).c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
         throw std::runtime_error("Missing input or reparse point in resource project");
+}
+/** @summary Resolve a portable asset path while rejecting traversal, alternate streams and junctions. */
+std::filesystem::path AssetPath(const std::filesystem::path& directory, const std::string& payload) {
+    if (!payload.starts_with("assets/") || payload.find('\\') != std::string::npos ||
+        payload.find(':') != std::string::npos)
+        throw std::runtime_error("Payload must be a relative assets path");
+    auto result = directory;
+    std::size_t begin = 0;
+    while (begin < payload.size()) {
+        const auto end = payload.find('/', begin);
+        const auto component = payload.substr(begin, end == std::string::npos ? end : end - begin);
+        if (component.empty() || component == "." || component == ".." ||
+            component.back() == '.' || component.back() == ' ' ||
+            std::any_of(component.begin(), component.end(), [](unsigned char c) {
+                return c < 32 || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|';
+            }))
+            throw std::runtime_error("Unsafe asset path component");
+        result /= std::filesystem::path(std::u8string(component.begin(), component.end()));
+        PlainPath(result);
+        if (end == std::string::npos) return result;
+        begin = end + 1;
+    }
+    throw std::runtime_error("Payload path ends with a separator");
 }
 /** @summary Parse each fixed-width hexadecimal component without narrowing a 64-bit instance. */
 void CheckIdentity(std::string_view value) {
@@ -42,11 +66,11 @@ bool LoadResourceProject(const std::filesystem::path& directory, ModDefinition& 
     try {
         definition = {};
         PlainPath(directory);
-        const auto manifest = directory / L"project.toml";
+        const auto manifest = scripting::SourcePath(directory, "mod.toml");
         PlainPath(manifest);
         if (std::filesystem::file_size(manifest) > 8U*1024U*1024U)
             throw std::runtime_error("TOML manifest exceeds 8 MiB");
-        std::ifstream input(manifest,std::ios::binary);
+        std::ifstream input(scripting::NativePath(manifest),std::ios::binary);
         const std::string bytes{std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
         const auto document = toml::parse(bytes);
         if (document["schemaVersion"].value<std::int64_t>() != 3 ||
@@ -90,17 +114,16 @@ bool LoadResourceProject(const std::filesystem::path& directory, ModDefinition& 
             if (resource.sha256.size()!=64 || !std::all_of(resource.sha256.begin(),resource.sha256.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');}))
                 throw std::runtime_error("Expected lowercase SHA-256");
             resource.payload = Text((*table)["payload"]);
-            if (resource.payload != "assets/"+resource.sha256+".bin")
-                throw std::runtime_error("Payload must be its content-addressed assets/SHA256.bin path");
             const auto size = (*table)["size"].value<std::int64_t>();
             if (!size || *size<0 || *size>256LL*1024LL*1024LL) throw std::runtime_error("Invalid resource size");
             resource.size = static_cast<std::uint64_t>(*size);
             PlainPath(directory/L"assets");
-            const auto path = directory/std::filesystem::path(resource.payload);
+            const auto path = AssetPath(directory, resource.payload);
+            resource.resolvedPayload = path;
             PlainPath(path);
-            if (std::filesystem::file_size(path)!=resource.size) throw std::runtime_error("Resource size mismatch");
+            if (std::filesystem::file_size(scripting::NativePath(path))!=resource.size) throw std::runtime_error("Resource size mismatch");
             core::Sha256Digest digest;
-            if (!core::Sha256File(path,digest,error)) throw std::runtime_error(error);
+            if (!core::Sha256File(scripting::NativePath(path),digest,error)) throw std::runtime_error(error);
             auto actual = core::ToHex(digest);
             std::transform(actual.begin(),actual.end(),actual.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
             if (actual!=resource.sha256) throw std::runtime_error("Resource SHA-256 mismatch");
@@ -111,11 +134,11 @@ bool LoadResourceProject(const std::filesystem::path& directory, ModDefinition& 
         return true;
     } catch (const std::exception& exception) {
         definition = {};
-        error = "project.toml: " + std::string(exception.what());
+        error = "mod.toml: " + std::string(exception.what());
         return false;
     } catch (...) {
         definition = {};
-        error = "project.toml validation failed";
+        error = "mod.toml validation failed";
         return false;
     }
 }
@@ -123,6 +146,6 @@ bool LoadResourceProject(const std::filesystem::path& directory, ModDefinition& 
 std::string ResourceRuntimeDiagnostic(const ModDefinition& definition) {
     if (definition.resources.empty()) return {};
     return "Validated TOML project ("+std::to_string(definition.resources.size())+
-        " lossless resources). Activation blocked: resource.register/resource.replace runtime is not implemented; no resources applied.";
+        " lossless resources). Activation blocked: resource.register/resource.replace runtime is not implemented; no resources or attached scripts applied.";
 }
 }
