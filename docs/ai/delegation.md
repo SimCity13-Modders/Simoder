@@ -6,7 +6,7 @@ Version: 1.0. Roles are instruction profiles, not independent permission boundar
 
 Enumerate available subagent tools and project/user agent definitions permitted by current scope. Inspect matching description and relevant instructions; don't read unrelated histories or credentials. Build an ephemeral registry with identity, invocation method, supported tasks/tools, write scope, availability, verification and evidence. Matching names alone do not prove capability. Never overwrite or rename an existing REA profile.
 
-REA means Reverse Engineer Anything as named by this user. No local REA definition was found in the inspected Simoder .codex or personal agents directory during package creation. Availability is therefore UNVERIFIED, not installed or forbidden. If exposed later as a named agent/tool, inspect it before delegation. If unavailable, use simoder-researcher for bounded source/ABI investigation and explicitly disclose the fallback; don't claim it is REA or has disassembly tools.
+REA means Reverse Engineer Anything as named by this user. Discover current REA roles/tools in the session catalog rather than treating an old installation snapshot as current availability. Advertised tools establish exposure, not server health or permission for an operation. Qualify identity and the bounded capability needed for this task before use; do not run setup, analysis or process operations merely to claim readiness. If unavailable, use simoder-researcher for bounded source/ABI investigation and explicitly disclose the fallback; don't claim it is REA or has disassembly tools.
 
 ## Dispatch
 

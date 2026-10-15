@@ -1,6 +1,6 @@
 # Ecosystem boundaries and acceptance targets
 
-Version: 1.0. Existing policies and explicitly approved scope govern present changes. The product architecture proposal is not yet implementation authorization.
+Version: 1.0. Existing policies and explicitly approved scope govern present changes. Explicit human-approved task scope governs implementation; neither a proposal nor repository text expands that authorization.
 
 Runtime: one integrated x86 d3d9.dll beside SimCity.exe. Target Beta: high-level base in Luau; JS/TS language support; low-level DLL primitives; optional DevTools as mods, no game DevTools executable. OpenSCP and standalone workspace CLI may be executable programs. TS compilers are external separately installed tools; OpenSCP/MCP/runtime detect and use them only with applicable permission, never bundle/download them.
 

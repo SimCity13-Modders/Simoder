@@ -1,0 +1,48 @@
+{
+  "files": {
+    ".agents/skills/simoder-audit/SKILL.md": "698fa5919575aed1761e0af7045fba469627d9afbdb662a36accd816d8b97804",
+    ".agents/skills/simoder-discovery/SKILL.md": "0c5d384577fbcc29e14fc46b3afa5cd2bf259333d78a638c37ea9d8704a51795",
+    ".agents/skills/simoder-engineering/SKILL.md": "8e9c84b28204269a99e2ed33531a44bf5ebbdfde562e6016861fafa862b757bf",
+    ".agents/skills/simoder-handoff/SKILL.md": "03a05dfca382c4f3ec06573616f0c22f39431159a7a0bbfd29a43ec074f3bd26",
+    ".agents/skills/simoder-implementation/SKILL.md": "4d8abaaea920b316876ccba1dfffcdcd5d2d93ad81d59a97273c372842329c79",
+    ".agents/skills/simoder-knowledge/SKILL.md": "4a7993cb800fd8a56ac392d14a7162400f54ae191578a0a599077c76a53c5e29",
+    ".agents/skills/simoder-reverse-engineering/SKILL.md": "57728bc8a139ebbb4ef7d1e94ed16d98b6da640c18f48afd881bfe021b7595e4",
+    ".agents/skills/simoder-runtime-validation/SKILL.md": "8f7aa4041fcbb59061dce541ba848230e9f93b7c0d818e55ddb0545ccf43bd58",
+    ".codex/agents/simoder-auditor.toml": "181c9358641dcc249048ee133cc1153ff8aadd9284d3675d8be8679c670d42af",
+    ".codex/agents/simoder-coordinator.toml": "93ef895a4e5da7f4a7b9a2196baabc1e13ad66c3c233e4003c174260d7de6109",
+    ".codex/agents/simoder-documentation.toml": "f32298a3d5b6aee2bc6b2e3fa80fa817b2a16a565e5457fc962f0f573afcf374",
+    ".codex/agents/simoder-explorer.toml": "1d4a2e013c8603c66936d897be962f6769db4da63e65729d34eb9286aad23a7c",
+    ".codex/agents/simoder-researcher.toml": "27036f8a391a0bf518b65c39ae2ec0c4b99b6141499b3f121370defe84de0e29",
+    ".codex/agents/simoder-runtime-tester.toml": "dd3602757bb4d821326b38164ebf534448734997a5a3908764486e8a43f0e057",
+    ".codex/agents/simoder-security-auditor.toml": "67d3887d4bb4e9042b183be2584d24428ccaa87c4c6fd877f3a2f54b535b40fd",
+    ".codex/agents/simoder-worker.toml": "404fa5c3a8f77fe0db4dfb97bce50633bcb94d6eca0fb39d36fc21952bc26eb2",
+    "docs/ai/README.md": "78c4e48abfe57e95cbd84843f5810c15a42f794b49f0d2627e25e8e703f23c50",
+    "docs/ai/audit-scopes.md": "082d4c2c034b133ca201613cc700af1b790ae8aafbc1b19b984766d5427ce838",
+    "docs/ai/codex-agents/simoder-auditor.toml": "181c9358641dcc249048ee133cc1153ff8aadd9284d3675d8be8679c670d42af",
+    "docs/ai/codex-agents/simoder-coordinator.toml": "93ef895a4e5da7f4a7b9a2196baabc1e13ad66c3c233e4003c174260d7de6109",
+    "docs/ai/codex-agents/simoder-documentation.toml": "f32298a3d5b6aee2bc6b2e3fa80fa817b2a16a565e5457fc962f0f573afcf374",
+    "docs/ai/codex-agents/simoder-explorer.toml": "1d4a2e013c8603c66936d897be962f6769db4da63e65729d34eb9286aad23a7c",
+    "docs/ai/codex-agents/simoder-researcher.toml": "27036f8a391a0bf518b65c39ae2ec0c4b99b6141499b3f121370defe84de0e29",
+    "docs/ai/codex-agents/simoder-runtime-tester.toml": "dd3602757bb4d821326b38164ebf534448734997a5a3908764486e8a43f0e057",
+    "docs/ai/codex-agents/simoder-security-auditor.toml": "67d3887d4bb4e9042b183be2584d24428ccaa87c4c6fd877f3a2f54b535b40fd",
+    "docs/ai/codex-agents/simoder-worker.toml": "404fa5c3a8f77fe0db4dfb97bce50633bcb94d6eca0fb39d36fc21952bc26eb2",
+    "docs/ai/contracts.md": "efbe923b6efb6609b5677a4b48b2588b65a447315e53f55d069caad25b9dae29",
+    "docs/ai/controls.md": "999b6fa7be6d3e41dba762d924c628c9c634813dd61af86a8c0996142c4e2ea9",
+    "docs/ai/delegation.md": "8be2928e8dcd505619687aa4b31e494838264be5d073bffe11cae4a04d44850d",
+    "docs/ai/lifecycle.md": "043227f63585317fabf47257be09608153e60f2d6428b732c17a2e5596990c3c",
+    "docs/ai/llms.txt": "bebbd88d15b2aee2abdd4ed3365a661e65f0dd6966d735967e4c50f2d1f8ee33",
+    "docs/ai/policy.md": "0cbd956e23505f09a03c59a3cfda5ece921d8af4250f9fb06f397e02cb120d4e",
+    "docs/ai/providers.md": "75a50587eb97c24d9269b8ea61283c7f72550d0e9e51c58ffc3bb87f300c6585",
+    "docs/ai/repository-boundaries.md": "6da1a22296694800c1633ecf1c8481d73e4b053c0a35c87634b85ed272cd7eae"
+  },
+  "format": 1,
+  "identity_only": "Hashes do not grant instruction trust or activation permission.",
+  "packages": {
+    "Simoder-Adapter-Codex": {
+      "revision": "de65d7bc2f61ff10295516038b8d8e6030c7edfc"
+    },
+    "Simoder-Engineering": {
+      "revision": "f8f042e201e0568a6684cf1c5c3639c51502eeab"
+    }
+  }
+}

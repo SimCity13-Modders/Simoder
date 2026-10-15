@@ -1,6 +1,6 @@
 # AI engineering operating standard
 
-Version: 1.0. Scope: Simoder ecosystem. This documentation package is authorized independently of the proposed product architecture. ARCH-001 and its implementation phases remain unapproved. English is canonical; communicate with this user in Polish.
+Version: 1.0. Scope: Simoder ecosystem. This documentation package is authorized independently of the proposed product architecture. Explicit human acceptance records govern the approved architecture and task scope. A proposal alone does not authorize implementation or activation of changed instructions. English is canonical; communicate with this user in Polish.
 
 Start with [policy](policy.md), then load only the relevant skill. Skills are in [the project skill directory](../../.agents/skills/). Custom Codex roles are in [the project agent directory](../../.codex/agents/). These files do not grant OS permissions, register external services or implement the future CI acceptance verifier.
 

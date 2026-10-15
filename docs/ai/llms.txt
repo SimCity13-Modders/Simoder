@@ -1,6 +1,6 @@
 # Simoder AI engineering
 
-> Version 1.0. Read only relevant entries. Product ARCH-001 remains proposed.
+> Version 1.0. Read only relevant entries. Architecture proposals, approved scope and accepted implementation are separate evidence states.
 
 - [Entry point](README.md): routing and current scope.
 - [Policy](policy.md): authority, preservation, approvals.
