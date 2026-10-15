@@ -9,9 +9,136 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <array>
+#include <exception>
+#include <type_traits>
+#include <algorithm>
+#include <cstring>
 
 namespace sc13::scripting {
+/** @summary Shares one private interpreter lane across managed and standalone runtimes. */
+class ScriptLane final {
+public:
+    /** @summary A caller-owned command uses the VM's permanently reserved control record. */
+    struct Work final { void (*run)(void*); void* context; std::exception_ptr error; bool done{}; };
+    /** @summary Starts the sole serial interpreter lane. */
+    ScriptLane() : worker_([this] { Run(); }) {}
+    /** @summary Joins after runtime-owned references have drained and closed every Lua VM. */
+    ~ScriptLane() {
+        { const std::scoped_lock lock(mutex_); stopping_ = true; }
+        wake_.notify_all(); worker_.join();
+    }
+    /** @summary Reserves a VM identity and control/retirement record before allocating Lua. */
+    std::size_t Reserve(ScriptRuntime* runtime) {
+        const std::scoped_lock lock(mutex_);
+        for (std::size_t i = 0; i < slots_.size(); ++i) if (!slots_[i].runtime) {
+            auto generation = nextGeneration_.load();
+            do { if (generation == UINT64_MAX) throw std::runtime_error("Script generation space exhausted"); }
+            while (!nextGeneration_.compare_exchange_weak(generation, generation + 1));
+            slots_[i].runtime = runtime; slots_[i].generation = generation + 1;
+            runtime->vmGeneration_ = slots_[i].generation; return i;
+        }
+        throw std::runtime_error("Script VM/control capacity exhausted (128)");
+    }
+    /** @summary Releases a closed VM without allocating a teardown request. */
+    void Release(std::size_t index) noexcept {
+        const std::scoped_lock lock(mutex_); slots_[index] = {};
+    }
+    /** @summary Binds the real published owner before scheduling; borrowed aliases never extend VM lifetime. */
+    void Bind(std::size_t index, const std::shared_ptr<ScriptRuntime>& runtime) {
+        const std::scoped_lock lock(mutex_); slots_[index].published = runtime;
+    }
+    /** @summary Fences current dispatch destruction before the last off-lane scheduler anchor can disappear. */
+    void WaitIdle() {
+        std::unique_lock lock(mutex_); wake_.wait(lock, [this] { return activeTicks_ == 0; });
+    }
+    /** @summary Dispatches through the VM's reserved record; same-lane native control does not queue.
+     * @param index Private slot. @param run Owned native control operation. */
+    template<class Function>
+    void Invoke(std::size_t index, Function&& run) {
+        if (OnLane()) { run(); return; }
+        Work work{[](void* context) { (*static_cast<std::remove_reference_t<Function>*>(context))(); }, std::addressof(run)};
+        std::unique_lock lock(mutex_);
+        if (stopping_ || !slots_[index].runtime || slots_[index].work)
+            throw std::runtime_error("Script control record unavailable");
+        slots_[index].work = &work; wake_.notify_all();
+        wake_.wait(lock, [&] { return work.done; });
+        if (work.error) std::rethrow_exception(work.error);
+    }
+    /** @summary Returns native lane ownership without exposing a Lua pointer. */
+    static bool OnLane() noexcept { return current_ != nullptr; }
+private:
+    /** @summary Keeps private VM identity valid until synchronous close and release finish. */
+    struct Slot final { ScriptRuntime* runtime{}; Work* work{}; std::uint64_t generation{}; std::weak_ptr<ScriptRuntime> published; };
+    /** @summary Rotates bounded VM visits without retaining the lane mutex during user code. */
+    void Run() noexcept {
+        current_ = this;
+        std::size_t controlCursor{};
+        std::size_t visitCursor{};
+        bool controlTurn = true;
+        auto nextTick = std::chrono::steady_clock::now();
+        while (true) {
+            Work* work{}; std::shared_ptr<ScriptRuntime> runtime;
+            {
+                std::unique_lock lock(mutex_);
+                for (std::size_t n = 0; (controlTurn || std::chrono::steady_clock::now() < nextTick) && n < slots_.size(); ++n) {
+                    auto& slot = slots_[(controlCursor + n) % slots_.size()];
+                    if (slot.work) { work = slot.work; slot.work = nullptr; controlCursor = (controlCursor + n + 1) % slots_.size(); break; }
+                }
+                if (!work && stopping_) break;
+                if (!work && std::chrono::steady_clock::now() < nextTick) {
+                    wake_.wait_until(lock, nextTick); continue;
+                }
+                if (!work) {
+                    for (std::size_t n = 0; n < slots_.size(); ++n) {
+                        auto& slot = slots_[visitCursor++ % slots_.size()];
+                        if (slot.runtime && slot.runtime->scheduled_.load()) {
+                            runtime = slot.published.lock();
+                            if (runtime) { ++activeTicks_; break; }
+                        }
+                    }
+                    nextTick = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
+                }
+            }
+            if (work) {
+                try { work->run(work->context); } catch (...) { work->error = std::current_exception(); }
+                { const std::scoped_lock lock(mutex_); work->done = true; }
+                wake_.notify_all();
+                controlTurn = false;
+            } else if (runtime) {
+                try { runtime->ScheduledTick(); } catch (...) { /* @summary Isolate host sink failures from the lane. */ }
+                runtime.reset();
+                { const std::scoped_lock lock(mutex_); --activeTicks_; }
+                wake_.notify_all();
+                controlTurn = true;
+            }
+        }
+        current_ = nullptr;
+    }
+    inline static thread_local ScriptLane* current_{};
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    std::array<Slot, 128> slots_{};
+    inline static std::atomic_uint64_t nextGeneration_{};
+    bool stopping_{};
+    std::size_t activeTicks_{};
+    std::thread worker_;
+};
+/** @summary Retains copied sinks independently of scheduler destruction. */
+struct ScriptSchedulerHost final {
+    ScriptScheduler::LogSink log;
+    ScriptScheduler::CommandSink commands;
+};
 namespace {
+/** @summary Reuses one live lane; every VM retains it through final Lua close. */
+std::shared_ptr<ScriptLane> AcquireScriptLane() {
+    static std::mutex mutex;
+    static std::weak_ptr<ScriptLane> current;
+    const std::scoped_lock lock(mutex);
+    auto lane = current.lock();
+    if (!lane) { lane = std::make_shared<ScriptLane>(); current = lane; }
+    return lane;
+}
 /** @summary Bounds combined declared VM budgets in the game's finite x86 address space. */
 std::atomic<std::size_t> reservedScriptMemory{};
 constexpr std::size_t maximumScriptMemory = 128U * 1024U * 1024U;
@@ -58,6 +185,7 @@ int ScriptRuntime::Log(lua_State* state) {
     const char* message = luaL_checklstring(state, 1, &length);
     if (length > 2048) luaL_error(state, "Simoder log message exceeds 2048 bytes");
     if (self.logs_.size() < 128) self.logs_.emplace_back(message, length);
+    else if (self.droppedLogs_ != UINT64_MAX) ++self.droppedLogs_;
     return 0;
 }
 
@@ -151,6 +279,7 @@ int ScriptRuntime::Time(lua_State* state) {
 
 int ScriptRuntime::Require(lua_State* state) {
     auto& self = *static_cast<ScriptRuntime*>(lua_callbacks(state)->userdata);
+    self.Observe(ScriptPhase::Require);
     const std::string_view requested(luaL_checkstring(state, 1));
     if ((!requested.starts_with("./") && !requested.starts_with("../")) ||
         requested.find(':') != requested.npos || requested.find('\\') != requested.npos)
@@ -220,6 +349,16 @@ ScriptRuntime::ScriptRuntime(std::string modId, const ScriptDefinition& definiti
     : modId_(std::move(modId)), maximum_(definition.memoryBytes), budgetMs_(definition.budgetMs),
       modules_(definition.modules), resourceAliases_(definition.resourceAliases),
       propertyAliases_(definition.propertyAliases), host_(std::move(host)) {
+    lane_ = AcquireScriptLane();
+    laneSlot_ = lane_->Reserve(this);
+    try { lane_->Invoke(laneSlot_, [this, &definition] { Initialize(definition); }); }
+    catch (...) { lane_->Release(laneSlot_); throw; }
+}
+
+bool ScriptRuntime::OnScriptLane() noexcept { return ScriptLane::OnLane(); }
+
+void ScriptRuntime::Initialize(const ScriptDefinition& definition) {
+    Observe(ScriptPhase::Create);
     if (maximum_ < 2U * 1024U * 1024U || maximum_ > 64U * 1024U * 1024U ||
         budgetMs_ < 1 || budgetMs_ > 20 || definition.bytecode.empty() ||
         definition.bytecode.size() > 8U * 1024U * 1024U)
@@ -261,32 +400,67 @@ ScriptRuntime::ScriptRuntime(std::string modId, const ScriptDefinition& definiti
             const char* error = lua_tostring(state_, -1);
             throw std::runtime_error(error ? error : "Invalid Luau bytecode");
         }
-        Call(0, 1);
+        Observe(ScriptPhase::Entry); Call(0, 1);
         if (!lua_istable(state_, -1)) throw std::runtime_error("Script must return a lifecycle table");
         tickRef_ = Callback("onTick");
         disableRef_ = Callback("onDisable");
         const int enable = Callback("onEnable");
         lua_pop(state_, 1);
-        if (enable != -1) { lua_getref(state_, enable); Call(0, 0); lua_unref(state_, enable); }
+        if (enable != -1) { Observe(ScriptPhase::Enable); lua_getref(state_, enable); Call(0, 0); lua_unref(state_, enable); }
         running_ = true;
-    } catch (...) { lua_close(state_); state_ = nullptr; reservedScriptMemory.fetch_sub(maximum_); reservedMemory_ = false; throw; }
+        PublishStatus();
+    } catch (...) { lua_close(state_); state_ = nullptr; reservedScriptMemory.fetch_sub(maximum_); reservedMemory_ = false; Observe(ScriptPhase::Close); throw; }
 }
 
-ScriptRuntime::~ScriptRuntime() { if (state_) lua_close(state_); if (reservedMemory_) reservedScriptMemory.fetch_sub(maximum_); }
-void ScriptRuntime::Commit() { const std::scoped_lock lock(mutex_); committed_ = true; }
+ScriptRuntime::~ScriptRuntime() {
+    scheduled_.store(false);
+    const std::scoped_lock control(controlMutex_);
+    lane_->Invoke(laneSlot_, [this] { Close(); });
+    lane_->Release(laneSlot_);
+}
+void ScriptRuntime::Close() noexcept {
+    try { Stop(); }
+    catch (...) { CaptureDiagnostic("Script retirement failed; forcing VM close"); }
+    bool closed{};
+    {
+        const std::scoped_lock lock(mutex_);
+        committed_ = false; running_ = false; stopping_ = true; commands_.clear();
+        if (state_) { lua_close(state_); state_ = nullptr; closed = true; }
+        if (reservedMemory_) { reservedScriptMemory.fetch_sub(maximum_); reservedMemory_ = false; }
+        PublishStatus();
+    }
+    if (closed) Observe(ScriptPhase::Close);
+}
+void ScriptRuntime::Commit() {
+    const std::scoped_lock lock(mutex_);
+    committed_ = true;
+    const std::scoped_lock statusLock(statusMutex_);
+    publishedStatus_.running = running_;
+}
 
 void ScriptRuntime::Tick(double deltaSeconds) {
+    if (!OnScriptLane()) {
+        const std::scoped_lock control(controlMutex_);
+        lane_->Invoke(laneSlot_, [this, deltaSeconds] { Tick(deltaSeconds); }); return;
+    }
     const std::scoped_lock lock(mutex_);
     if (!running_ || !committed_ || tickRef_ == -1) return;
     const auto now = std::chrono::steady_clock::now();
     if (deltaSeconds < 0) deltaSeconds = std::chrono::duration<double>(now - lastTick_).count();
     lastTick_ = now;
     try {
-        lua_getref(state_, tickRef_); lua_pushnumber(state_, deltaSeconds); Call(1, 0);
-    } catch (const std::exception& error) { running_ = false; diagnostic_ = error.what(); }
+        Observe(ScriptPhase::Tick); lua_getref(state_, tickRef_); lua_pushnumber(state_, deltaSeconds); Call(1, 0);
+    } catch (const std::exception& error) { running_ = false; CaptureDiagnostic(error.what()); }
+    catch (...) { running_ = false; CaptureDiagnostic("Script callback failed with a nonstandard exception"); }
+    PublishStatus();
 }
 
 void ScriptRuntime::Stop() {
+    scheduled_.store(false);
+    if (!OnScriptLane()) {
+        const std::scoped_lock control(controlMutex_);
+        lane_->Invoke(laneSlot_, [this] { Stop(); }); return;
+    }
     const std::scoped_lock lock(mutex_);
     if (!committed_) return;
     committed_ = false;
@@ -294,14 +468,37 @@ void ScriptRuntime::Stop() {
     stopping_ = true;
     commands_.clear();
     if (disableRef_ != -1) {
-        try { lua_getref(state_, disableRef_); Call(0, 0); }
-        catch (const std::exception& error) { diagnostic_ = error.what(); }
+        try { Observe(ScriptPhase::Disable); lua_getref(state_, disableRef_); Call(0, 0); }
+        catch (const std::exception& error) { CaptureDiagnostic(error.what()); }
+        catch (...) { CaptureDiagnostic("Script onDisable failed with a nonstandard exception"); }
     }
+    PublishStatus();
 }
 
 ScriptStatus ScriptRuntime::Status() const {
-    const std::scoped_lock lock(mutex_);
-    return {running_ && committed_, used_, diagnostic_};
+    const std::scoped_lock lock(statusMutex_);
+    return {publishedStatus_.running, publishedStatus_.memoryBytes,
+        std::string(publishedStatus_.diagnostic.data(), publishedStatus_.diagnosticLength),
+        publishedStatus_.generation, publishedStatus_.droppedLogs};
+}
+void ScriptRuntime::CaptureDiagnostic(std::string_view diagnostic) noexcept {
+    diagnosticLength_ = std::min(diagnostic.size(), diagnostic_.size());
+    if (diagnosticLength_) std::memcpy(diagnostic_.data(), diagnostic.data(), diagnosticLength_);
+}
+void ScriptRuntime::PublishStatus() noexcept {
+    try {
+        const std::scoped_lock lock(statusMutex_);
+        publishedStatus_.running = running_ && committed_;
+        publishedStatus_.memoryBytes = used_;
+        publishedStatus_.diagnostic = diagnostic_;
+        publishedStatus_.diagnosticLength = diagnosticLength_;
+        publishedStatus_.generation = vmGeneration_;
+        publishedStatus_.droppedLogs = droppedLogs_;
+    } catch (...) { /* @summary Diagnostic publication cannot prevent retirement or VM release. */ }
+}
+void ScriptRuntime::Observe(ScriptPhase phase) noexcept {
+    try { if (host_.lifecycle) host_.lifecycle(phase, vmGeneration_); }
+    catch (...) { /* @summary Diagnostic observers cannot change committed runtime semantics. */ }
 }
 
 std::vector<std::string> ScriptRuntime::DrainLogs() {
@@ -315,57 +512,98 @@ std::vector<ScriptPatchCommand> ScriptRuntime::TakePatchCommands() {
     auto result = std::move(commands_); commands_.clear(); return result;
 }
 void ScriptRuntime::Fail(std::string diagnostic) {
-    const std::scoped_lock lock(mutex_); running_ = false; commands_.clear(); diagnostic_ = std::move(diagnostic);
+    const std::scoped_lock lock(mutex_); running_ = false; commands_.clear(); CaptureDiagnostic(diagnostic);
+    PublishStatus();
+}
+
+void ScriptRuntime::ScheduledTick() {
+    if (!scheduled_.load() || !schedulerHost_) return;
+    if (std::chrono::steady_clock::now() - lastTick_ < std::chrono::milliseconds(50)) return;
+    Tick(-1);
+    const auto commands = TakePatchCommands();
+    if (!commands.empty()) {
+        std::string error;
+        const auto borrowed = shared_from_this();
+        if (!schedulerHost_->commands || !schedulerHost_->commands(modId_, borrowed, commands, error))
+            Fail("PROP transaction rejected: " + error);
+    }
+    for (const auto& message : DrainLogs()) if (schedulerHost_->log) schedulerHost_->log(modId_, message);
 }
 
 ScriptScheduler::ScriptScheduler(LogSink sink, CommandSink commands)
-    : sink_(std::move(sink)), commands_(std::move(commands)), worker_([this](std::stop_token stop) {
-    std::size_t cursor{};
-    while (!stop.stop_requested()) {
-        const auto now = std::chrono::steady_clock::now();
-        const auto cycleDeadline = now + std::chrono::milliseconds(5);
-        std::vector<std::pair<std::string, std::shared_ptr<ScriptRuntime>>> current;
-        try { const std::scoped_lock lock(mutex_); current.assign(runtimes_.begin(), runtimes_.end()); }
-        catch (...) { /* @summary Under host allocation pressure, skip this cycle without terminating the process. */ }
-        for (std::size_t visited = 0; visited < current.size(); ++visited) {
-            const auto& [owner, runtime] = current[cursor++ % current.size()];
-            if (!runtime) continue;
-            if (stop.stop_requested()) break;
-            try {
-                runtime->Tick(-1);
-                const auto commands = runtime->TakePatchCommands();
-                if (!commands.empty()) {
-                    std::string error;
-                    if (!commands_ || !commands_(owner, runtime, commands, error))
-                        runtime->Fail("PROP transaction rejected: " + error);
-                }
-                for (const auto& message : runtime->DrainLogs()) if (sink_) sink_(owner, message);
-            } catch (...) { /* @summary A logging sink failure cannot escape the owned scheduler thread. */ }
-            if (std::chrono::steady_clock::now() >= cycleDeadline) break;
-        }
-        std::unique_lock lock(mutex_);
-        wake_.wait_for(lock, std::chrono::milliseconds(50), [&stop] { return stop.stop_requested(); });
+    : lane_(AcquireScriptLane()), host_(std::make_shared<ScriptSchedulerHost>(ScriptSchedulerHost{std::move(sink), std::move(commands)})) {}
+ScriptScheduler::~ScriptScheduler() { Shutdown(); }
+void ScriptScheduler::Prepare(const std::shared_ptr<ScriptRuntime>& runtime) {
+    if (ScriptRuntime::OnScriptLane()) throw std::runtime_error("Scheduler mutation from a script callback is unavailable");
+    if (runtime) {
+        const std::scoped_lock lock(runtime->mutex_);
+        if (runtime->schedulerHost_ || runtime->scheduled_.load() || runtime->committed_)
+            throw std::runtime_error("Script runtime is already bound or committed");
+        runtime->schedulerHost_ = host_; lane_->Bind(runtime->laneSlot_, runtime);
     }
-}) {}
-ScriptScheduler::~ScriptScheduler() {
-    Shutdown();
 }
 void ScriptScheduler::Shutdown() {
-    worker_.request_stop(); wake_.notify_all(); if (worker_.joinable()) worker_.join();
+    if (ScriptRuntime::OnScriptLane()) throw std::runtime_error("Scheduler shutdown from a script callback is unavailable");
+    std::map<std::string, std::shared_ptr<ScriptRuntime>> current;
+    {
+        const std::scoped_lock lock(mutex_);
+        if (stopped_) return;
+        stopped_ = true; current.swap(runtimes_);
+        for (auto& [owner, runtime] : current) if (runtime) runtime->scheduled_.store(false);
+    }
+    lane_->WaitIdle();
+    for (auto& [owner, runtime] : current) if (runtime) {
+        runtime->Stop(); Flush(owner, runtime);
+        const std::scoped_lock control(runtime->controlMutex_);
+        runtime->lane_->Invoke(runtime->laneSlot_, [&runtime] { runtime->Close(); });
+    }
 }
 void ScriptScheduler::Flush(const std::string& owner, const std::shared_ptr<ScriptRuntime>& runtime) {
+    if (ScriptRuntime::OnScriptLane()) throw std::runtime_error("Scheduler flush from a script callback is unavailable");
     if (!runtime) return;
-    try { for (const auto& message : runtime->DrainLogs()) if (sink_) sink_(owner, message); }
-    catch (...) { /* @summary Shutdown and disable remain effective if a logging sink throws. */ }
+    try {
+        const std::scoped_lock control(runtime->controlMutex_);
+        runtime->lane_->Invoke(runtime->laneSlot_, [&] {
+            for (const auto& message : runtime->DrainLogs()) if (host_->log) host_->log(owner, message);
+        });
+    }
+    catch (...) { /* @summary Sink failure cannot prevent retirement. */ }
 }
 void ScriptScheduler::Put(const std::string& owner, std::shared_ptr<ScriptRuntime> runtime) {
-    const std::scoped_lock lock(mutex_); runtimes_.at(owner) = std::move(runtime);
+    if (ScriptRuntime::OnScriptLane()) throw std::runtime_error("Scheduler mutation from a script callback is unavailable");
+    if (runtime && !runtime->schedulerHost_) Prepare(runtime);
+    std::shared_ptr<ScriptRuntime> replaced;
+    {
+        const std::scoped_lock lock(mutex_);
+        if (stopped_) throw std::runtime_error("Script scheduler is stopping");
+        replaced = std::move(runtimes_.at(owner));
+        if (replaced) replaced->scheduled_.store(false);
+        runtimes_.at(owner) = std::move(runtime);
+        if (runtimes_.at(owner)) runtimes_.at(owner)->scheduled_.store(true);
+    }
 }
 void ScriptScheduler::Reserve(const std::string& owner) {
-    const std::scoped_lock lock(mutex_); runtimes_.try_emplace(owner);
-}
-void ScriptScheduler::Remove(const std::string& owner) {
+    if (ScriptRuntime::OnScriptLane()) throw std::runtime_error("Scheduler mutation from a script callback is unavailable");
     const std::scoped_lock lock(mutex_);
-    if (const auto found = runtimes_.find(owner); found != runtimes_.end()) found->second.reset();
+    if (stopped_) throw std::runtime_error("Script scheduler is stopping");
+    if (!runtimes_.contains(owner) && runtimes_.size() >= 128) throw std::runtime_error("Script scheduler owner capacity exhausted");
+    runtimes_.try_emplace(owner);
+}
+void ScriptScheduler::ReleaseReservation(const std::string& owner) {
+    const std::scoped_lock lock(mutex_);
+    const auto found = runtimes_.find(owner);
+    if (found != runtimes_.end() && !found->second) runtimes_.erase(found);
+}
+void ScriptScheduler::Remove(const std::string& owner, bool retainReservation) {
+    if (ScriptRuntime::OnScriptLane()) throw std::runtime_error("Scheduler mutation from a script callback is unavailable");
+    std::shared_ptr<ScriptRuntime> removed;
+    {
+        const std::scoped_lock lock(mutex_);
+        if (const auto found = runtimes_.find(owner); found != runtimes_.end()) {
+            if (found->second) found->second->scheduled_.store(false);
+            removed = std::move(found->second);
+            if (!retainReservation) runtimes_.erase(found);
+        }
+    }
 }
 }

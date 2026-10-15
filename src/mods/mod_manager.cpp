@@ -65,6 +65,38 @@ struct RetiredDrain final {
     ~RetiredDrain() { static_cast<void>(manager.RuntimeScopesDrained()); }
 };
 
+/** @summary Reserves a lifecycle transaction without retaining any lock while the interpreter runs. */
+struct LifecycleReservation final {
+    std::atomic_bool& busy;
+    bool acquired{};
+    /** @summary Rejects overlapping writers and lane-origin synchronous lifecycle reentry. */
+    explicit LifecycleReservation(std::atomic_bool& value) : busy(value) {
+        bool expected = false;
+        acquired = !scripting::ScriptRuntime::OnScriptLane() && busy.compare_exchange_strong(expected, true);
+    }
+    /** @summary Releases only the reservation acquired by this operation. */
+    ~LifecycleReservation() { if (acquired) busy.store(false); }
+};
+
+/** @summary Disposes candidates and retires replaced VMs only after releasing the manager mutex. */
+struct ScriptExit final {
+    std::unique_lock<std::mutex>& lock;
+    scripting::ScriptScheduler& scheduler;
+    const ModId& owner;
+    std::shared_ptr<scripting::ScriptRuntime>& candidate;
+    std::shared_ptr<scripting::ScriptRuntime> retired;
+    /** @summary Never holds manager or registry locks across lifecycle code or lane completion. */
+    ~ScriptExit() noexcept {
+        if (lock.owns_lock()) lock.unlock();
+        if (retired) {
+            try { retired->Stop(); } catch (...) { /* @summary Retirement failure cannot prevent owner release. */ }
+            try { scheduler.Flush(owner, retired); } catch (...) { /* @summary Diagnostic failure cannot prevent owner release. */ }
+        }
+        candidate.reset();
+        scheduler.ReleaseReservation(owner);
+    }
+};
+
 }  // namespace
 
 ModManager::ModManager(
@@ -145,8 +177,10 @@ bool ModManager::RuntimeScopesDrained() noexcept {
 
 bool ModManager::Initialize(std::string& error) noexcept {
     const RetiredDrain drain{*this};
+    const LifecycleReservation reservation(lifecycleBusy_);
+    if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
-        const std::scoped_lock lock(mutex_);
+        std::unique_lock lock(mutex_);
         error.clear();
         if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         if (initialized_) {
@@ -159,7 +193,7 @@ bool ModManager::Initialize(std::string& error) noexcept {
         const bool stateValid = LoadEnabledState(statePath_, requested, stateError);
         enabledOrder_.clear();
         std::string refreshError;
-        const bool refreshValid = RefreshLocked(refreshError);
+        const bool refreshValid = RefreshLocked(refreshError, lock);
         if (!stateValid) {
             AppendError(error, stateError);
         }
@@ -175,11 +209,13 @@ bool ModManager::Initialize(std::string& error) noexcept {
                     continue;
                 }
                 std::string activationError;
-                if (!EnableLocked(record->second, false, activationError)) {
+                if (!EnableLocked(record->second, false, activationError, lock)) {
+                    if (!lock.owns_lock()) lock.lock();
                     record->second.state = ModState::Failed;
                     record->second.diagnostic = activationError;
                     AppendError(error, "Mod '" + id + "': " + activationError);
                 }
+                if (!lock.owns_lock()) lock.lock();
             }
         }
         std::string persistenceError;
@@ -196,20 +232,22 @@ bool ModManager::Initialize(std::string& error) noexcept {
 
 bool ModManager::Refresh(std::string& error) noexcept {
     const RetiredDrain drain{*this};
+    const LifecycleReservation reservation(lifecycleBusy_);
+    if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
-        const std::scoped_lock lock(mutex_);
+        std::unique_lock lock(mutex_);
         if (!initialized_) {
             error = "Mod manager must be initialized before refresh";
             return false;
         }
-        return RefreshLocked(error);
+        return RefreshLocked(error, lock);
     } catch (...) {
         error = "Mod refresh failed due to an allocation or I/O exception";
         return false;
     }
 }
 
-bool ModManager::RefreshLocked(std::string& error) {
+bool ModManager::RefreshLocked(std::string& error, std::unique_lock<std::mutex>& lock) {
     error.clear();
     if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
     std::error_code directoryError;
@@ -327,10 +365,9 @@ bool ModManager::RefreshLocked(std::string& error) {
                 std::string deactivateError;
                 if (registry_.Deactivate(iterator->first, affected, deactivateError)) {
                     if (record.runtimeScope) record.runtimeScope->RequestStop();
+                    const auto owner = iterator->first;
+                    auto retired = std::move(record.scriptRuntime);
                     scriptScheduler_->Remove(iterator->first);
-                    if (record.scriptRuntime) record.scriptRuntime->Stop();
-                    scriptScheduler_->Flush(iterator->first, record.scriptRuntime);
-                    record.scriptRuntime.reset();
                     record.serviceSupervisor.reset();
                     record.scriptPatches.clear();
                     const std::size_t invalidatedAfter = cache_.Invalidate(affected);
@@ -343,6 +380,9 @@ bool ModManager::RefreshLocked(std::string& error) {
                     record.diagnostic = "Active mod directory is missing or no longer valid";
                     RefreshRuntimeResourcesLocked(
                         affected, record, "removed-mod restoration");
+                    lock.unlock();
+                    if (retired) { retired->Stop(); scriptScheduler_->Flush(owner, retired); retired.reset(); }
+                    lock.lock();
                     ++iterator;
                     continue;
                 }
@@ -481,22 +521,31 @@ bool ModManager::ApplyScriptCommands(const ModId& id,
 bool ModManager::EnableLocked(
     Record& record,
     bool persist,
-    std::string& error) {
+    std::string& error, std::unique_lock<std::mutex>& lock) {
     error.clear();
     if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
     if (record.state != ModState::Inactive) {
         error = "Only an inactive mod can be enabled";
         return false;
     }
-    const ModId& id = record.definition.manifest.id;
+    const ModId id = record.definition.manifest.id;
+    const auto definition = record.definition;
+    const auto expectedGeneration = registry_.Current()->generation();
     // @summary Keep migrated generic admission closed throughout candidate preparation.
     if (record.runtimeScope && retiredScopes_.size() >= MaxRetiredRuntimeScopes) { error = "Retired runtime generations are still draining"; return false; }
     auto preparedScope = runtimeOwner_ ? std::make_shared<runtime::RuntimeScope>(runtimeOwner_, runtimeDomain_) : nullptr;
-    scriptScheduler_->Reserve(id);
+    if (definition.script) scriptScheduler_->Reserve(id);
     std::shared_ptr<scripting::ScriptRuntime> prepared;
-    if (record.definition.script) {
-        try { prepared = std::make_shared<scripting::ScriptRuntime>(id, *record.definition.script, ScriptHost()); }
-        catch (const std::exception& exception) { error = exception.what(); record.diagnostic = error; return false; }
+    ScriptExit exit{lock, *scriptScheduler_, id, prepared};
+    if (definition.script) {
+        lock.unlock();
+        try { prepared = std::make_shared<scripting::ScriptRuntime>(id, *definition.script, ScriptHost()); }
+        catch (const std::exception& exception) { lock.lock(); error = exception.what(); record.diagnostic = error; return false; }
+        scriptScheduler_->Prepare(prepared);
+        lock.lock();
+        if (RuntimeStopping() || registry_.Current()->generation() != expectedGeneration || record.state != ModState::Inactive) {
+            error = "Script candidate became stale while preparing"; return false;
+        }
     }
     auto scriptPatches = scripting::ReduceScriptPatches({}, prepared ? prepared->TakePatchCommands() : std::vector<scripting::ScriptPatchCommand>{});
     std::shared_ptr<dev::ServiceSupervisor> preparedServices;
@@ -576,7 +625,7 @@ bool ModManager::EnableLocked(
 bool ModManager::DisableLocked(
     Record& record,
     bool persist,
-    std::string& error) {
+    std::string& error, std::unique_lock<std::mutex>& lock) {
     error.clear();
     if (!registry_.IsActive(record.definition.manifest.id)) {
         error = "Only an active or changed mod can be disabled";
@@ -608,10 +657,9 @@ bool ModManager::DisableLocked(
         return false;
     }
     if (record.runtimeScope) record.runtimeScope->RequestStop();
+    std::shared_ptr<scripting::ScriptRuntime> candidate;
+    ScriptExit exit{lock, *scriptScheduler_, id, candidate, std::move(record.scriptRuntime)};
     scriptScheduler_->Remove(id);
-    if (record.scriptRuntime) record.scriptRuntime->Stop();
-    scriptScheduler_->Flush(id, record.scriptRuntime);
-    record.scriptRuntime.reset();
     record.serviceSupervisor.reset();
     // @summary Public-operation exit drains the stopped scope after releasing the manager lock.
     record.scriptPatches.clear();
@@ -670,8 +718,10 @@ bool ModManager::SetEnabled(
     bool enabled,
     std::string& error) noexcept {
     const RetiredDrain drain{*this};
+    const LifecycleReservation reservation(lifecycleBusy_);
+    if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
-        const std::scoped_lock lock(mutex_);
+        std::unique_lock lock(mutex_);
         if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         if (!initialized_) {
             error = "Mod manager is not initialized";
@@ -679,7 +729,7 @@ bool ModManager::SetEnabled(
         }
         if (enabled) {
             std::string refreshError;
-            if (!RefreshLocked(refreshError)) {
+            if (!RefreshLocked(refreshError, lock)) {
                 error = "Could not refresh mod files before enable: " + refreshError;
                 return false;
             }
@@ -689,8 +739,8 @@ bool ModManager::SetEnabled(
             error = "Unknown mod ID '" + id + "'";
             return false;
         }
-        return enabled ? EnableLocked(record->second, true, error)
-                       : DisableLocked(record->second, true, error);
+        return enabled ? EnableLocked(record->second, true, error, lock)
+                       : DisableLocked(record->second, true, error, lock);
     } catch (...) {
         error = "Mod state change failed due to an allocation or I/O exception";
         return false;
@@ -699,11 +749,13 @@ bool ModManager::SetEnabled(
 
 bool ModManager::Reload(const ModId& id, std::string& error, std::string_view expectedRevision) noexcept {
     const RetiredDrain drain{*this};
+    const LifecycleReservation reservation(lifecycleBusy_);
+    if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
-        const std::scoped_lock lock(mutex_);
+        std::unique_lock lock(mutex_);
         error.clear();
         if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
-        if (!RefreshLocked(error)) return false;
+        if (!RefreshLocked(error, lock)) return false;
         const auto found = records_.find(id);
         if (found == records_.end() || !registry_.IsActive(id) || !found->second.pendingDefinition) {
             error = "No valid pending definition for an active mod";
@@ -721,16 +773,25 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
             error = "Reload preview is stale; review the latest pending definition";
             return false;
         }
-        const auto& pending = *record.pendingDefinition;
+        const auto pending = *record.pendingDefinition;
+        const auto expectedGeneration = registry_.Current()->generation();
         if (record.runtimeScope && retiredScopes_.size() >= MaxRetiredRuntimeScopes) {
             error = "Retired runtime generations are still draining";
             return false;
         }
         auto preparedScope = runtimeOwner_ ? std::make_shared<runtime::RuntimeScope>(runtimeOwner_, runtimeDomain_) : nullptr;
         std::shared_ptr<scripting::ScriptRuntime> prepared;
+        ScriptExit exit{lock, *scriptScheduler_, id, prepared};
         if (pending.script) {
+            scriptScheduler_->Reserve(id);
+            lock.unlock();
             try { prepared = std::make_shared<scripting::ScriptRuntime>(id, *pending.script, ScriptHost()); }
-            catch (const std::exception& exception) { error = exception.what(); record.diagnostic = "Reload rejected: " + error; return false; }
+            catch (const std::exception& exception) { lock.lock(); error = exception.what(); record.diagnostic = "Reload rejected: " + error; return false; }
+            scriptScheduler_->Prepare(prepared);
+            lock.lock();
+            if (RuntimeStopping() || registry_.Current()->generation() != expectedGeneration || !registry_.IsActive(id)) {
+                error = "Reload candidate became stale while preparing"; return false;
+            }
         }
         if (preparedScope && prepared && !preparedScope->RetainResource(prepared)) {
             error = "Cannot retain prepared reload runtime";
@@ -764,9 +825,8 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
             record.runtimeScope->RequestStop();
             retiredScopes_.push_back(std::move(record.runtimeScope));
         }
-        scriptScheduler_->Remove(id);
-        if (record.scriptRuntime) record.scriptRuntime->Stop();
-        scriptScheduler_->Flush(id, record.scriptRuntime);
+        exit.retired = std::move(record.scriptRuntime);
+        scriptScheduler_->Remove(id, bool(prepared));
         if (prepared) { prepared->Commit(); scriptScheduler_->Put(id, prepared); }
         record.scriptRuntime = std::move(prepared);
         record.runtimeScope = std::move(preparedScope);

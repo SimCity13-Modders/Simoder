@@ -5,6 +5,10 @@ native-mod SDK, a production authentication provider, Luau base, or a new MCP
 transport. Existing executable services and their authorization remain the migration
 baseline. No new game operation is admitted through these primitives.
 
+The [script lane and lifecycle](script-scheduler.md) guide describes the U3c
+interpreter ownership and staged ModManager migration layered on this foundation.
+The [private copied-value codec](copied-values.md) remains a separate Core primitive.
+
 ## Boundaries
 
 `RuntimeOwner` acquires a fresh, secured `Global\Simoder.Runtime.Owner` object after

@@ -129,19 +129,19 @@ private:
     };
 
     /** Performs refresh while the manager lock is already held. */
-    [[nodiscard]] bool RefreshLocked(std::string& error);
+    [[nodiscard]] bool RefreshLocked(std::string& error, std::unique_lock<std::mutex>& lock);
 
     /** Activates one inactive record with optional immediate persistence. */
     [[nodiscard]] bool EnableLocked(
         Record& record,
         bool persist,
-        std::string& error);
+        std::string& error, std::unique_lock<std::mutex>& lock);
 
     /** Deactivates one active or changed record with optional immediate persistence. */
     [[nodiscard]] bool DisableLocked(
         Record& record,
         bool persist,
-        std::string& error);
+        std::string& error, std::unique_lock<std::mutex>& lock);
     /** @summary Combines source operations and ephemeral script overrides in deterministic owner order. */
     [[nodiscard]] static std::vector<ResourcePatchDefinition> EffectivePatches(const Record& record);
     /** @summary Preflights a candidate owner patch set against retained vanilla before registry publication. */
@@ -176,6 +176,8 @@ private:
     std::shared_ptr<runtime::RuntimeCommitDomain> runtimeDomain_;
     /** @summary Sticky close gate set before waiting for the discovery lock. */
     std::atomic_bool runtimeStopping_{};
+    /** @summary Nonblocking transaction reservation rejects overlapping lifecycle writers without holding a lock across Lua. */
+    std::atomic_bool lifecycleBusy_{};
     /** @summary Bounded retired generations, drained outside the manager lock. */
     std::vector<std::shared_ptr<runtime::RuntimeScope>> retiredScopes_;
     mutable std::mutex mutex_;
