@@ -127,3 +127,12 @@ Installed current manifests use mod.toml. Retired manifest migration is offline
 DevTools work. Raw-resource integrity validation does not imply registration or
 replacement capability in the game. See [resource contracts](resource-projects.md)
 and [stable input validation](mod-input-validation.md).
+
+## Accepted MCP migration target
+
+The [MCP DevTool architecture](architecture/mcp-devtool.md) and
+[ADR 0001](architecture/decisions/0001-mcp-native-devtool.md) record the accepted
+native-mod, base lifecycle and network-profile direction. Existing executable
+service/stdio descriptions above are the legacy migration baseline, not an
+exception to the game-only MCP contract. Implementation and runtime acceptance
+remain separate from architecture approval.
