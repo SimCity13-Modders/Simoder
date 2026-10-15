@@ -1,5 +1,9 @@
 # Architecture
 
+See [repository ownership](architecture/repository-ownership.md) for the accepted
+separation of responsibilities and actual extraction status. Internal source
+libraries, future public SDKs and optional example packages are distinct boundaries.
+
 ## Runtime flow
 
 ```text
