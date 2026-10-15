@@ -1,7 +1,7 @@
 # Developer tools and source SDK
 
 The companion Simoder-DevTools repository composes the separately owned
-Simoder-DevTools-Authoring compiler/editor package, current MCP/DevBridge and
+Simoder-DevTools-Authoring compiler/editor package, Simoder-DevTools-MCP services and
 REA integration. Conversion and resource inspection belong to the
 OpenSCP fork. The retired standalone CLIs/importers and alpha migration workflows
 are no longer distributed. Its README documents current builds and installation.
