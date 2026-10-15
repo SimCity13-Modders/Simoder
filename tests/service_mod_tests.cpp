@@ -1,4 +1,6 @@
 #include "dev/service_supervisor.hpp"
+#include "dev/authoring_tool_manifest.hpp"
+#include "dev/service_manifest.hpp"
 #include "mods/mod_definition_parser.hpp"
 #include "mods/mod_manager.hpp"
 #include "mods/patch_registry.hpp"
@@ -123,6 +125,37 @@ int wmain(int argc, wchar_t** argv) {
             "[metadata]\nid='fixture.services'\nname='Developer fixture'\nversion='1'\n";
         const std::string entries = "[[services]]\nid='b'\nexecutable='service-b.exe'\narguments=['--fixture-child']\ndependencies=['a']\n"
             "[[services]]\nid='a'\nexecutable='service-a.exe'\narguments=['--fixture-child']\n";
+        /** @summary Exercise process-independent validation without granting service-owned leases. */
+        Check(sc13::dev::ParseAuthoringToolManifest(toml::parse(header + entries), mod).empty(),
+            "Absent tools did not produce an empty descriptor");
+        const auto absentTools = sc13::dev::ParseServiceManifest(toml::parse(header + entries), mod);
+        Check(absentTools->tools.empty() && absentTools->services.size() == 2,
+            "Service parser changed absent-tools behavior");
+        std::filesystem::create_directory(mod / "typescript");
+        Write(mod / "typescript/build.mjs", "export {};\n");
+        const auto validTools = sc13::dev::ParseAuthoringToolManifest(toml::parse(
+            "[tools]\ncompiler='service-a.exe'\nresource-converter='service-b.exe'\ntypescript-toolchain='typescript'\n"), mod);
+        Check(validTools.size() == 3 && validTools.at("compiler") == mod / "service-a.exe" &&
+            validTools.at("resource-converter") == mod / "service-b.exe" &&
+            validTools.at("typescript-toolchain") == mod / "typescript", "Valid authoring descriptors changed");
+        const auto toolchainService = sc13::dev::ParseServiceManifest(toml::parse(
+            header + entries + "[tools]\ntypescript-toolchain='typescript'\n"), mod);
+        Check(toolchainService->tools.at("typescript-toolchain") == validTools.at("typescript-toolchain"),
+            "Service parser did not retain the validated TypeScript toolchain");
+        bool wrongToolsRejected{};
+        try { sc13::dev::ParseServiceManifest(toml::parse("tools=7\n" + header + entries), mod); }
+        catch (const std::runtime_error& exception) {
+            wrongToolsRejected = std::string_view(exception.what()) == "tools must be a table";
+        }
+        Check(wrongToolsRejected, "Wrong tools type lost its exact diagnostic");
+        bool dependencyFirst{};
+        try {
+            sc13::dev::ParseServiceManifest(toml::parse(header + entries +
+                "dependencies=['missing']\n[tools]\narbitrary='service-a.exe'\n"), mod);
+        } catch (const std::runtime_error& exception) {
+            dependencyFirst = std::string_view(exception.what()) == "Missing service dependency: missing";
+        }
+        Check(dependencyFirst, "Tool validation displaced dependency validation");
         Write(mod / "mod.toml", header + entries + "[tools]\ncompiler='service-a.exe'\n");
         sc13::mods::ModDefinition definition;
         std::string error;
@@ -176,17 +209,23 @@ int wmain(int argc, wchar_t** argv) {
         Write(mod / "mod.toml", header + "[[services]]\nid='a'\nexecutable='../outside.exe'\n");
         Check(!sc13::mods::LoadModDefinition(mod, definition, error), "Executable traversal was accepted");
         /** @summary Invalid tool contracts must fail discovery without spawning processes or granting capabilities. */
-        const auto rejectedTools = [&](std::string_view tools) {
+        const auto rejectedTools = [&](std::string_view tools, std::string_view diagnostic = {}) {
             Write(mod / "mod.toml", header + entries + std::string(tools));
             Check(!sc13::mods::LoadModDefinition(mod, definition, error), "Invalid authoring tool contract accepted");
+            if (!diagnostic.empty()) {
+                const auto expected = "mod.toml: " + std::string(diagnostic);
+                if (error != expected) throw std::runtime_error("Authoring diagnostic changed: expected [" +
+                    expected + "] actual [" + error + "] fixture [" + std::string(tools) + "]");
+            }
             Check(Children().empty(), "Invalid tool discovery started services");
             Check(sc13::dev::FindAuthoringTool("compiler").empty(), "Invalid tool discovery registered a compiler");
         };
-        rejectedTools("[tools]\narbitrary='service-a.exe'\n");
-        rejectedTools("[tools]\ncompiler='../outside.exe'\n");
-        rejectedTools("[tools]\ncompiler=7\n");
-        rejectedTools("[tools]\ncompiler='mod.toml'\n");
-        rejectedTools("[tools]\ntypescript-toolchain='service-a.exe'\n");
+        rejectedTools("[tools]\narbitrary='service-a.exe'\n", "Unknown authoring capability: arbitrary");
+        rejectedTools("[tools]\ncompiler='../outside.exe'\n", "Unsafe source path component");
+        rejectedTools("[tools]\ncompiler=7\n", "Invalid authoring tool path");
+        rejectedTools("[tools]\ncompiler='mod.toml'\n", "Authoring tool must be a local executable");
+        rejectedTools("[tools]\ntypescript-toolchain='service-a.exe'\n",
+            "Missing path or forbidden link/junction: " + (mod / "service-a.exe" / "build.mjs").make_preferred().string());
         rejectedTools("[tools]\ntypescript-toolchain='missing-toolchain'\n");
         std::filesystem::remove_all(root);
         std::cout << "Service mods: validation, dependency order, explicit lifecycle and rollback passed.\n";

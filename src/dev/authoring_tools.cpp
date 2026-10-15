@@ -13,6 +13,10 @@ struct Registry {
 Registry& State() { static auto* state = new Registry; return *state; }
 }
 
+bool IsAuthoringCapability(std::string_view capability) noexcept {
+    return capability == "compiler" || capability == "resource-converter" || capability == "typescript-toolchain";
+}
+
 AuthoringToolLease::~AuthoringToolLease() {
     if (!registered_) return;
     auto& state = State();
@@ -23,7 +27,7 @@ AuthoringToolLease::~AuthoringToolLease() {
 std::unique_ptr<AuthoringToolLease> RegisterAuthoringTools(std::string owner, AuthoringToolPaths paths) {
     if (owner.empty() || paths.empty()) throw std::runtime_error("Authoring registration requires an owner and tools");
     for (const auto& [capability, path] : paths) {
-        if (capability != "compiler" && capability != "resource-converter" && capability != "typescript-toolchain")
+        if (!IsAuthoringCapability(capability))
             throw std::runtime_error("Unknown authoring capability: " + capability);
         if (!path.is_absolute()) throw std::runtime_error("Authoring tool path must be absolute");
     }

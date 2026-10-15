@@ -19,6 +19,14 @@ int main() {
         try { auto conflict = RegisterAuthoringTools("fixture.second", {{"compiler", L"C:\\other.exe"}}); }
         catch (const std::runtime_error&) { rejected = true; }
         if (!rejected || FindAuthoringTool("compiler").empty()) throw std::runtime_error("Capability conflict was not isolated");
+        rejected = false;
+        try { auto unknown = RegisterAuthoringTools("fixture.unknown", {{"unknown", L"C:\\fixture\\unknown.exe"}}); }
+        catch (const std::runtime_error& error) {
+            rejected = std::string_view(error.what()) == "Unknown authoring capability: unknown";
+        }
+        if (!rejected || FindAuthoringTool("compiler") != L"C:\\fixture\\compiler.exe" ||
+            !FindAuthoringTool("unknown").empty())
+            throw std::runtime_error("Unknown capability rejection damaged the enabled owner");
         auto second = RegisterAuthoringTools("fixture.second", {{"typescript-toolchain", L"C:\\fixture\\typescript"}});
         if (sc13::scripting::TypeScriptToolchainPath() != L"C:\\fixture\\typescript")
             throw std::runtime_error("TypeScript resolution ignored the enabled owner");

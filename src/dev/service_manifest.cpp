@@ -1,4 +1,5 @@
 #include "dev/service_manifest.hpp"
+#include "dev/authoring_tool_manifest.hpp"
 #include "mods/mod_types.hpp"
 #include "mods/mod_definition_parser.hpp"
 #include "scripting/source_project.hpp"
@@ -73,23 +74,7 @@ std::shared_ptr<const ServiceModDefinition> ParseServiceManifest(const toml::tab
     };
     for (const auto& [id, service] : candidates) { static_cast<void>(service); visit(id); }
     result->owner = Text(document["metadata"]["id"], "metadata.id");
-    if (const auto tools = document["tools"].as_table()) {
-        for (const auto& [name, node] : *tools) {
-            const std::string capability(name.str());
-            if (capability != "compiler" && capability != "resource-converter" && capability != "typescript-toolchain")
-                throw std::runtime_error("Unknown authoring capability: " + capability);
-            const auto relative = node.value<std::string>();
-            if (!relative || relative->empty()) throw std::runtime_error("Invalid authoring tool path");
-            const auto path = scripting::SourcePath(directory, *relative);
-            if (capability == "typescript-toolchain") {
-                const auto entry = scripting::SourcePath(directory, *relative + "/build.mjs");
-                if (!std::filesystem::is_directory(path) || !std::filesystem::is_regular_file(entry))
-                    throw std::runtime_error("TypeScript toolchain must contain build.mjs");
-            } else if (!std::filesystem::is_regular_file(path) || path.extension() != ".exe")
-                throw std::runtime_error("Authoring tool must be a local executable");
-            result->tools.emplace(capability, path);
-        }
-    } else if (document.contains("tools")) throw std::runtime_error("tools must be a table");
+    result->tools = ParseAuthoringToolManifest(document, directory);
     return result;
 }
 }

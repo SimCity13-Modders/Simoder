@@ -9,6 +9,12 @@ namespace sc13::dev {
 /** @summary Describe explicitly installed developer tools without runtime-relative path guessing. */
 using AuthoringToolPaths = std::map<std::string, std::filesystem::path, std::less<>>;
 
+/** @summary Identify capabilities supported by authoring manifests and registration.
+ * @param capability Exact, case-sensitive capability name.
+ * @return True for a supported authoring capability.
+ */
+[[nodiscard]] bool IsAuthoringCapability(std::string_view capability) noexcept;
+
 /** @summary Own registered authoring capabilities for one enabled developer mod. */
 class AuthoringToolLease final {
 public:

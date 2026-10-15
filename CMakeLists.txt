@@ -50,6 +50,7 @@ add_library(sc13_core STATIC
     src/core/tgi.cpp
     src/dev/mod_validation.cpp
     src/dev/authoring_tools.cpp
+    src/dev/authoring_tool_manifest.cpp
     src/dev/service_supervisor.cpp
     src/dev/service_manifest.cpp
     src/dev/runtime_diagnostics.cpp

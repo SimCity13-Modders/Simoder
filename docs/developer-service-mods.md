@@ -1,5 +1,19 @@
 # Developer service mods
 
+## Validation and ownership boundaries
+
+`dev/authoring_tool_manifest` validates the optional authoring-tool descriptors
+without activating them. The shared capability predicate in `dev/authoring_tools`
+keeps manifest validation and the lease registry aligned. Manifest validation
+checks contained files and toolchain layout; registration separately checks its
+absolute-path contract and owner/capability conflicts. A validated descriptor
+does not grant a capability: the existing service supervisor owns the registration
+lease and revokes it when its service fails or stops.
+
+This separates existing validation from executable-service ownership. It does
+not implement the accepted [native MCP DevTool architecture](architecture/mcp-devtool.md)
+or add a new manifest kind. Existing service behavior remains the migration baseline.
+
 Optional `[tools]` entries declare `compiler`, `resource-converter` or
 `typescript-toolchain` as paths inside the owning package. Executable capabilities
 must resolve to plain local EXE files; a TypeScript directory must contain
