@@ -1,4 +1,5 @@
 #include "hooks/game_log_capture.hpp"
+#include "hooks/runtime_hooks.hpp"
 
 #include "logging/async_logger.hpp"
 
@@ -122,9 +123,10 @@ thread_local bool g_capturingDebugString = false;
 
 /** Preserves ANSI debugger output while forwarding a bounded copy to the logger. */
 void WINAPI HookOutputDebugStringA(LPCSTR message) noexcept {
+    const RuntimeHookActivity::Entry entry(RuntimeHookCallbacks());
     g_originalOutputDebugStringA(message);
     const DWORD apiError = GetLastError();
-    if (!g_capturingDebugString) {
+    if (entry.admitted() && !g_capturingDebugString) {
         g_capturingDebugString = true;
         std::array<char, kMaximumDebugMessage> copy{};
         if (CopyAnsiMessage(message, copy)) {
@@ -139,9 +141,10 @@ void WINAPI HookOutputDebugStringA(LPCSTR message) noexcept {
 
 /** Preserves UTF-16 debugger output while forwarding a UTF-8 copy to the logger. */
 void WINAPI HookOutputDebugStringW(LPCWSTR message) noexcept {
+    const RuntimeHookActivity::Entry entry(RuntimeHookCallbacks());
     g_originalOutputDebugStringW(message);
     const DWORD apiError = GetLastError();
-    if (!g_capturingDebugString) {
+    if (entry.admitted() && !g_capturingDebugString) {
         g_capturingDebugString = true;
         std::array<char, kMaximumDebugMessage> copy{};
         if (CopyWideMessage(message, copy)) {
@@ -188,8 +191,7 @@ bool CreateGameLogCaptureHooks(std::string& error) noexcept {
 }
 
 void ResetGameLogCapture() noexcept {
-    g_originalOutputDebugStringA = nullptr;
-    g_originalOutputDebugStringW = nullptr;
+    // @summary Disabled original trampolines remain process-owned for pre-entry forwarding after retirement.
     g_capturingDebugString = false;
 }
 

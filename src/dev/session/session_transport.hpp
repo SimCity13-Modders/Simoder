@@ -16,4 +16,8 @@ void PollSessionTransport(const std::filesystem::path& directory, bool servicesA
 [[nodiscard]] std::string SessionTransportJson();
 /** @summary Cancel queued commands and revoke the adapter before hook or manager destruction. */
 void ShutdownSessionTransport() noexcept;
+/** @summary Observe completion without blocking the game thread or releasing active callbacks.
+ * @return Whether no native session executor remains active.
+ */
+[[nodiscard]] bool SessionTransportDrained() noexcept;
 }

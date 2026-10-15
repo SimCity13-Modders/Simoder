@@ -217,6 +217,14 @@ void VerifyPropApi(const std::filesystem::path& root) {
     const auto value = [&] { return cache.ReadObservedFloat(target, 0x09AE19D7U)->value; };
     Write(mod / "scripts/main.luau", "assert(simoder.hasCapability('game.props.float')); local v=simoder.props.getFloat('sanitizer','cost'); assert(v.value==300 and v.vanilla==300 and v.historical); return {onEnable=function() simoder.props.setFloat('sanitizer','cost',345) end, onTick=function() simoder.props.setFloat('sanitizer','cost',345) end}");
     sc13::mods::ModManager manager(root / "mods", root / "state.toon", registry, cache, refresh);
+    /** @summary Preserve disable return/error and observed value without conflating persistence rejection with lost patches. */
+    const auto disableAndCheck = [&](const char* id, float expected, const char* diagnostic) {
+        const bool disabled = manager.SetEnabled(id, false, error);
+        const auto observed = value();
+        if (disabled && observed == expected) Check(true, diagnostic);
+        else Check(false, std::string(diagnostic) + "; disabled=" + std::to_string(disabled) +
+                   "; value=" + std::to_string(observed) + "; error=" + error);
+    };
     Check(manager.Initialize(error) && manager.SetEnabled("fixture.script", true, error), error);
     Check(value() == 345, "Staged named override was not applied");
     const auto generation = registry.Current()->generation();
@@ -239,7 +247,7 @@ void VerifyPropApi(const std::filesystem::path& root) {
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('sanitizer','cost',365) end}");
     Check(manager.Refresh(error) && manager.Reload("fixture.script", error), error);
     Check(value() == 365, "Final scripted override missing");
-    Check(manager.SetEnabled("fixture.script", false, error) && value() == 300, "Disable failed to remove owned script patches");
+    disableAndCheck("fixture.script", 300, "Disable failed to remove owned script patches");
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('sanitizer','cost',math.huge) end}");
     Check(manager.Refresh(error) && !manager.SetEnabled("fixture.script", true, error), "Non-finite float accepted");
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('00B1B104:61EFC000:00000001719436BD','cost',1) end}");
@@ -249,13 +257,13 @@ void VerifyPropApi(const std::filesystem::path& root) {
     Write(mod / "scripts/main.ts", "export function onEnable() { const v=simoder.props.getFloat('sanitizer','cost'); if (!v || !v.historical) throw 'missing'; simoder.props.setFloat('sanitizer','cost',370); }");
     Check(manager.Refresh(error) && manager.SetEnabled("fixture.script", true, error), error);
     Check(value() == 370, "TypeScript PROP bindings used a method receiver or lost data");
-    Check(manager.SetEnabled("fixture.script", false, error) && value() == 300, "TypeScript override was not restored");
+    disableAndCheck("fixture.script", 300, "TypeScript override was not restored");
 #endif
     Write(mod / "mod.toml", Manifest());
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('sanitizer','cost',-0.0) end, onTick=function() simoder.props.setFloat('sanitizer','cost',0.0) end}");
     Check(manager.Refresh(error) && manager.SetEnabled("fixture.script", true, error), error);
     Eventually([&] { return std::bit_cast<std::uint32_t>(value()) == 0; }, "Positive zero was deduplicated against negative zero");
-    Check(manager.SetEnabled("fixture.script", false, error) && value() == 300, "Signed-zero override was not restored");
+    disableAndCheck("fixture.script", 300, "Signed-zero override was not restored");
     const auto other = root / "mods/Other";
     auto otherManifest = Manifest();
     otherManifest.replace(otherManifest.find("fixture.script"), std::string("fixture.script").size(), "fixture.other");
@@ -263,8 +271,8 @@ void VerifyPropApi(const std::filesystem::path& root) {
     Write(other / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('00B1B104:61EFC000:00000000719436BD',0x09AE19D7,400) end}");
     Check(manager.Refresh(error) && manager.SetEnabled("fixture.script", true, error) && manager.SetEnabled("fixture.other", true, error), error);
     Check(value() == 400 && !manager.Conflicts().empty(), "Activation order or script conflict reporting failed");
-    Check(manager.SetEnabled("fixture.script", false, error) && value() == 400, "Disabling an earlier owner removed another owner's override");
-    Check(manager.SetEnabled("fixture.other", false, error) && value() == 300, "Final owner removal did not restore vanilla");
+    disableAndCheck("fixture.script", 400, "Disabling an earlier owner removed another owner's override");
+    disableAndCheck("fixture.other", 300, "Final owner removal did not restore vanilla");
     const sc13::runtime::RuntimeResourceKey secondKey{target, 0x2000};
     auto conflictingTable = table;
     conflictingTable.front().valueBits = std::bit_cast<std::uint32_t>(301.0F);

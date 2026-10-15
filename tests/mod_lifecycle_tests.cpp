@@ -173,6 +173,50 @@ void TestModManager() {
     SC13_EXPECT(!directoryError);
 }
 
+/** @summary Verifies runtime stop is sticky across all public mutation entry points without changing committed patches. */
+void TestRuntimeStopGate() {
+    const auto root = CreateTemporaryDirectory();
+    const auto directory = root / L"mods";
+    const auto mod = directory / L"StopGate";
+    WriteModFixture(mod, "test.stop-gate", "Stop Gate", 345.0F);
+    sc13::mods::PatchRegistry registry;
+    sc13::runtime::RuntimeResourceCache cache;
+    {
+        sc13::mods::ModManager manager(directory, root / L"state.toon", registry, cache);
+        std::string error;
+        SC13_EXPECT(manager.Initialize(error));
+        SC13_EXPECT(manager.SetEnabled("test.stop-gate", true, error));
+        const auto generation = manager.Generation();
+        const auto order = manager.EnabledOrder();
+        manager.RequestRuntimeStop();
+        manager.RequestRuntimeStop();
+        SC13_EXPECT(manager.RuntimeScopesDrained());
+        WriteModFixture(mod, "test.stop-gate", "Stop Gate Changed", 450.0F);
+        SC13_EXPECT(!manager.Refresh(error));
+        SC13_EXPECT(error.find("stopping") != std::string::npos);
+        SC13_EXPECT(!manager.Reload("test.stop-gate", error));
+        SC13_EXPECT(!manager.SetEnabled("test.stop-gate", false, error));
+        SC13_EXPECT(!manager.SetEnabled("test.stop-gate", true, error));
+        SC13_EXPECT(!manager.RequestAction("refresh"));
+        SC13_EXPECT(!manager.RequestAction("enable", "test.stop-gate"));
+        SC13_EXPECT(!manager.RequestAction("disable", "test.stop-gate"));
+        SC13_EXPECT(!manager.RequestAction("reload", "test.stop-gate"));
+        SC13_EXPECT(manager.Generation() == generation);
+        SC13_EXPECT(manager.EnabledOrder() == order);
+        SC13_EXPECT(registry.IsActive("test.stop-gate"));
+    }
+    {
+        sc13::mods::ModManager neverStarted(directory, root / L"other-state.toon", registry, cache);
+        neverStarted.RequestRuntimeStop();
+        std::string error;
+        SC13_EXPECT(!neverStarted.Initialize(error));
+        SC13_EXPECT(error.find("stopping") != std::string::npos);
+    }
+    std::error_code cleanupError;
+    std::filesystem::remove_all(root, cleanupError);
+    SC13_EXPECT(!cleanupError);
 }
-void TestModLifecycle() { TestModManager(); }
+
+}
+void TestModLifecycle() { TestModManager(); TestRuntimeStopGate(); }
 }

@@ -1,6 +1,7 @@
 #include "platform/windows_arguments.hpp"
 #include "dev/authoring_tools.hpp"
 #include "scripting/source_project.hpp"
+#include "platform/file_publication_retry.hpp"
 #include "scripting/luau_compiler.hpp"
 #include "dev/service_manifest.hpp"
 #include "scripting/script_runtime.hpp"
@@ -148,10 +149,10 @@ bool PublishGeneration(const std::filesystem::path& staging, const std::filesyst
             }
         }
         if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
-        const auto elapsed = GetTickCount64() - started;
-        if ((failure != ERROR_ACCESS_DENIED && failure != ERROR_SHARING_VIOLATION) || attempts >= 11 || elapsed >= 500) break;
-        Sleep(static_cast<DWORD>(std::min<ULONGLONG>(50, 500 - elapsed)));
-        if (GetTickCount64() - started >= 500) break;
+        const auto delay = platform::FilePublicationRetryDelay(failure, attempts, GetTickCount64() - started);
+        if (!delay) break;
+        Sleep(delay);
+        if (GetTickCount64() - started >= platform::FilePublicationBudgetMs) break;
     }
     throw std::runtime_error("Cannot publish compiled generation (Win32 error " + std::to_string(failure) +
         "; attempts=" + std::to_string(attempts) + "; staging=" + staging.string() + "; destination=" + generation.string() + ")");

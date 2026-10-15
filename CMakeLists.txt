@@ -64,6 +64,8 @@ add_library(sc13_core STATIC
     src/logging/log_event.cpp
     src/memory/signature.cpp
     src/platform/windows_arguments.cpp
+    src/platform/runtime_owner.cpp
+    src/platform/game_window_dispatch.cpp
     src/mods/mod_definition_parser.cpp
     src/mods/action_worker.cpp
     src/mods/mod_candidate.cpp
@@ -75,6 +77,8 @@ add_library(sc13_core STATIC
     src/reverse/pe_file.cpp
     src/reverse/build_compatibility.cpp
     src/runtime/runtime_resource_cache.cpp
+    src/runtime/runtime_scope.cpp
+    src/runtime/runtime_lifecycle.cpp
     src/scripting/script_runtime.cpp
     src/scripting/script_patch_reducer.cpp
     src/scripting/luau_compiler.cpp
@@ -82,7 +86,7 @@ add_library(sc13_core STATIC
 )
 target_include_directories(sc13_core PUBLIC src)
 target_compile_definitions(sc13_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(sc13_core PUBLIC bcrypt version Luau.VM Luau.Compiler)
+target_link_libraries(sc13_core PUBLIC bcrypt version advapi32 user32 Luau.VM Luau.Compiler)
 sc13_enable_warnings(sc13_core)
 
 # @summary Stable source SDK consumed by the separately versioned DevTools repository.
@@ -181,6 +185,27 @@ endif()
 
 if(SC13_BUILD_TESTS)
     enable_testing()
+    # @summary Compile synthetic authority construction only into an independent, non-installed test library.
+    add_library(sc13-runtime-test-support STATIC src/runtime/runtime_scope.cpp src/runtime/runtime_lifecycle.cpp
+        src/platform/runtime_owner.cpp)
+    target_include_directories(sc13-runtime-test-support PUBLIC src)
+    target_compile_definitions(sc13-runtime-test-support PUBLIC SIMODER_RUNTIME_TEST_AUTHORITY
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(sc13-runtime-test-support PUBLIC bcrypt advapi32)
+    sc13_enable_warnings(sc13-runtime-test-support)
+    foreach(suite runtime_scope runtime_lifecycle runtime_owner)
+        string(REPLACE "_" "-" suite_name "${suite}")
+        add_executable(simoder-${suite_name}-tests tests/${suite}_tests.cpp)
+        target_link_libraries(simoder-${suite_name}-tests PRIVATE sc13-runtime-test-support)
+        sc13_enable_warnings(simoder-${suite_name}-tests)
+        add_test(NAME simoder-${suite_name}-tests COMMAND simoder-${suite_name}-tests)
+        set_tests_properties(simoder-${suite_name}-tests PROPERTIES TIMEOUT 30)
+    endforeach()
+    add_executable(simoder-game-window-dispatch-tests tests/game_window_dispatch_tests.cpp)
+    target_link_libraries(simoder-game-window-dispatch-tests PRIVATE sc13_core user32)
+    sc13_enable_warnings(simoder-game-window-dispatch-tests)
+    add_test(NAME simoder-game-window-dispatch-tests COMMAND simoder-game-window-dispatch-tests)
+    set_tests_properties(simoder-game-window-dispatch-tests PROPERTIES TIMEOUT 30)
     add_executable(simoder-native-session-transport-tests tests/native_session_transport_tests.cpp)
     target_link_libraries(simoder-native-session-transport-tests PRIVATE sc13_core user32)
     sc13_enable_warnings(simoder-native-session-transport-tests)

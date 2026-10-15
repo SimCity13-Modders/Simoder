@@ -2,6 +2,7 @@
 
 #include "formats/toon/toon_document.hpp"
 #include "mods/mod_definition_parser.hpp"
+#include "platform/file_publication_retry.hpp"
 
 #include <Windows.h>
 
@@ -110,16 +111,24 @@ bool SaveEnabledState(
                 return false;
             }
         }
-        if (MoveFileExW(
-                temporary.c_str(), path.c_str(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
-            const DWORD moveError = GetLastError();
-            DeleteFileW(temporary.c_str());
-            error = "Could not atomically publish state.toon; Win32 error " +
-                    std::to_string(moveError);
-            return false;
+        const auto started = GetTickCount64();
+        DWORD moveError{};
+        unsigned attempts{};
+        for (;;) {
+            ++attempts;
+            if (MoveFileExW(temporary.c_str(), path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE) return true;
+            moveError = GetLastError();
+            const auto delay = platform::FilePublicationRetryDelay(moveError, attempts, GetTickCount64() - started);
+            if (!delay) break;
+            Sleep(delay);
+            if (GetTickCount64() - started >= platform::FilePublicationBudgetMs) break;
         }
-        return true;
+        DeleteFileW(temporary.c_str());
+        error = "Could not atomically publish state.toon; Win32 error " + std::to_string(moveError) +
+                "; attempts=" + std::to_string(attempts) +
+                "; elapsedMs=" + std::to_string(GetTickCount64() - started);
+        return false;
     } catch (...) {
         error = "Enabled-state save failed due to an allocation exception";
         return false;

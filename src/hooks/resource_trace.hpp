@@ -30,7 +30,7 @@ void ConfigureResourceRuntime(
 [[nodiscard]] bool CreateResourceTraceHook(
     const reverse::BuildFingerprint& fingerprint, std::string& error) noexcept;
 
-/** Clears local resource-hook state after the shared MinHook lifecycle is removed. */
+/** @summary Restore retained resource values and release optional services; keep disabled originals until process exit. */
 void ResetResourceTrace() noexcept;
 
 }  // namespace sc13::hooks

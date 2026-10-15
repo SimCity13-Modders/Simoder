@@ -7,6 +7,7 @@
 #include "runtime/runtime_resource_cache.hpp"
 #include "mods/mod_types.hpp"
 #include "dev/session/session_transport.hpp"
+#include "platform/game_window_dispatch.hpp"
 
 #include <Windows.h>
 #include <d3d9.h>
@@ -22,6 +23,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <mutex>
 
 /** Forwards Win32 messages to the official ImGui backend without changing its header. */
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -45,9 +47,26 @@ void* g_endSceneAddress = nullptr;
 void* g_resetAddress = nullptr;
 mods::ModManager* g_manager = nullptr;
 HWND g_gameWindow = nullptr;
-WNDPROC g_originalWindowProcedure = nullptr;
 std::atomic_bool g_initialized = false;
 std::atomic_bool g_initializationAttempted = false;
+std::mutex g_callbackGate;
+std::recursive_mutex g_renderMutex;
+unsigned g_activeCallbacks{};
+bool g_closed{};
+/** @summary Retain rendering dependencies across callback execution, including closed forwarding. */
+struct OverlayCallback final {
+    bool admitted{};
+    EndSceneFunction endScene{};
+    ResetFunction reset{};
+    /** @summary Reserve callback lifetime before consulting mutable UI state. */
+    OverlayCallback() noexcept {
+        std::lock_guard lock(g_callbackGate);
+        ++g_activeCallbacks; admitted = !g_closed;
+        endScene = g_originalEndScene; reset = g_originalReset;
+    }
+    /** @summary Release lifetime only after native and original callbacks return. */
+    ~OverlayCallback() { std::lock_guard lock(g_callbackGate); --g_activeCallbacks; }
+};
 ModPanelState g_view;
 unsigned int g_uiMouseButtons = 0U;
 unsigned int g_gameMouseButtons = 0U;
@@ -312,6 +331,9 @@ bool RouteOverlayInput(
     UINT message,
     WPARAM word,
     LPARAM value) noexcept {
+    OverlayCallback callback;
+    if (!callback.admitted) return false;
+    std::lock_guard lock(g_renderMutex);
     const unsigned int uiButtonsBeforeDispatch = g_uiMouseButtons;
     const bool imguiHandled = g_initialized.load(std::memory_order_acquire) &&
         ImGui_ImplWin32_WndProcHandler(window, message, word, value) != 0;
@@ -357,18 +379,21 @@ bool RouteOverlayInput(
     return captured;
 }
 
-/** @summary Handle native dispatch and input not already observed in the game window queue. */
-LRESULT CALLBACK HookWindowProcedure(HWND window, UINT message, WPARAM word, LPARAM value) noexcept {
-    if (dev::session::DispatchSessionMessage(window, message)) return 0;
+/** @summary Consume overlay input without owning the game window procedure.
+ * @param window Receiver.
+ * @param message Message identifier.
+ * @param word First message value.
+ * @param value Second message value.
+ * @return Whether overlay-owned input was consumed.
+ */
+bool OverlayWindowInput(HWND window, UINT message, WPARAM word, LPARAM value) noexcept {
+    OverlayCallback callback;
+    if (!callback.admitted) return false;
+    std::lock_guard lock(g_renderMutex);
+    if (window != g_gameWindow) return false;
     const bool captured = !IsObservedWindowInput(window, message) &&
         RouteUnqueuedWindowInput(window, message, word, value);
-    const LRESULT result = captured
-        ? 1
-        : (g_originalWindowProcedure != nullptr
-               ? CallWindowProcW(g_originalWindowProcedure, window, message, word, value)
-               : DefWindowProcW(window, message, word, value));
-    LogWindowTransition(message, word, value, result, captured);
-    return result;
+    return captured;
 }
 
 /** Initializes one ImGui context against the actual game device and focus window. */
@@ -391,19 +416,9 @@ LRESULT CALLBACK HookWindowProcedure(HWND window, UINT message, WPARAM word, LPA
         ImGui::DestroyContext();
         return false;
     }
-    SetLastError(ERROR_SUCCESS);
-    const LONG_PTR previous = SetWindowLongPtrW(
-        creation.hFocusWindow, GWLP_WNDPROC,
-        reinterpret_cast<LONG_PTR>(&HookWindowProcedure));
-    if (previous == 0 && GetLastError() != ERROR_SUCCESS) {
-        ImGui_ImplDX9_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-        return false;
-    }
     g_gameWindow = creation.hFocusWindow;
-    g_originalWindowProcedure = reinterpret_cast<WNDPROC>(previous);
-    dev::session::BindSessionWindow(g_gameWindow);
+    platform::SetGameWindowInputConsumer(&OverlayWindowInput);
+    platform::SetGameWindowResultObserver(&LogWindowTransition);
     g_initialized.store(true, std::memory_order_release);
     std::string inputError;
     if (!InitializeWindowMessageHook(g_gameWindow, &RouteOverlayInput, inputError)) {
@@ -429,7 +444,15 @@ void RenderSimoder() {
 
 /** Renders one overlay frame and always continues into the original EndScene. */
 HRESULT WINAPI HookEndScene(IDirect3DDevice9* device) noexcept {
+    OverlayCallback callback;
+    if (!callback.admitted) return callback.endScene ? callback.endScene(device) : D3DERR_INVALIDCALL;
     try {
+        std::lock_guard lock(g_renderMutex);
+        D3DDEVICE_CREATION_PARAMETERS creation{};
+        if (device && SUCCEEDED(device->GetCreationParameters(&creation)) &&
+            platform::BindGameWindow(creation.hFocusWindow)) {
+            dev::session::BindSessionWindow(creation.hFocusWindow);
+        }
         if (!g_initializationAttempted.exchange(true, std::memory_order_acq_rel)) {
             if (!InitializeImGui(device)) {
                 logging::AsyncLogger::Instance().Write(
@@ -446,13 +469,16 @@ HRESULT WINAPI HookEndScene(IDirect3DDevice9* device) noexcept {
             logging::Level::Error,
             "Simoder overlay frame failed; original EndScene continues");
     }
-    return g_originalEndScene(device);
+    return callback.endScene ? callback.endScene(device) : D3DERR_INVALIDCALL;
 }
 
 /** Invalidates ImGui device objects around the game's original D3D9 Reset. */
 HRESULT WINAPI HookReset(
     IDirect3DDevice9* device,
     D3DPRESENT_PARAMETERS* presentation) noexcept {
+    OverlayCallback callback;
+    if (!callback.admitted) return callback.reset ? callback.reset(device, presentation) : D3DERR_INVALIDCALL;
+    std::lock_guard lock(g_renderMutex);
     const bool initialized = g_initialized.load(std::memory_order_acquire);
     if (initialized) {
         ImGui_ImplDX9_InvalidateDeviceObjects();
@@ -466,7 +492,7 @@ HRESULT WINAPI HookReset(
         presentation != nullptr ? presentation->BackBufferWidth : 0U,
         presentation != nullptr ? presentation->BackBufferHeight : 0U,
         presentation != nullptr ? static_cast<unsigned int>(presentation->BackBufferFormat) : 0U);
-    const HRESULT result = g_originalReset(device, presentation);
+    const HRESULT result = callback.reset ? callback.reset(device, presentation) : D3DERR_INVALIDCALL;
     if (SUCCEEDED(result) && initialized) {
         ImGui_ImplDX9_CreateDeviceObjects();
     }
@@ -483,7 +509,10 @@ HRESULT WINAPI HookReset(
 }  // namespace
 
 void ConfigureSimoderOverlay(mods::ModManager& manager) noexcept {
+    std::lock_guard lock(g_callbackGate);
+    if (g_activeCallbacks) return;
     g_manager = &manager;
+    g_closed = false;
 }
 
 bool CreateSimoderOverlayHooks(std::string& error) noexcept {
@@ -506,8 +535,7 @@ bool CreateSimoderOverlayHooks(std::string& error) noexcept {
         g_endSceneAddress, reinterpret_cast<LPVOID>(&HookEndScene),
         reinterpret_cast<LPVOID*>(&g_originalEndScene));
     if (endSceneStatus != MH_OK) {
-        MH_RemoveHook(g_resetAddress);
-        g_originalReset = nullptr;
+        // @summary Keep the already created Reset trampoline valid even if its sibling hook cannot be created.
         error = std::string("MH_CreateHook failed for D3D9 EndScene: ") +
                 MH_StatusToString(endSceneStatus);
         return false;
@@ -515,16 +543,19 @@ bool CreateSimoderOverlayHooks(std::string& error) noexcept {
     return true;
 }
 
+void RequestStopSimoderOverlay() noexcept {
+    std::lock_guard lock(g_callbackGate); g_closed = true;
+}
+bool SimoderOverlayDrained() noexcept {
+    std::lock_guard lock(g_callbackGate); return g_activeCallbacks == 0;
+}
 void ShutdownSimoderOverlay() noexcept {
-    dev::session::BindSessionWindow(nullptr);
+    RequestStopSimoderOverlay();
+    if (!SimoderOverlayDrained()) return;
+    platform::SetGameWindowInputConsumer(nullptr);
+    platform::SetGameWindowResultObserver(nullptr);
     ShutdownWindowMessageHook();
     try {
-        if (g_gameWindow != nullptr && g_originalWindowProcedure != nullptr &&
-            IsWindow(g_gameWindow) != FALSE) {
-            SetWindowLongPtrW(
-                g_gameWindow, GWLP_WNDPROC,
-                reinterpret_cast<LONG_PTR>(g_originalWindowProcedure));
-        }
         if (g_initialized.exchange(false, std::memory_order_acq_rel)) {
             ImGui_ImplDX9_Shutdown();
             ImGui_ImplWin32_Shutdown();
@@ -536,9 +567,7 @@ void ShutdownSimoderOverlay() noexcept {
             "Simoder overlay shutdown caught an exception");
     }
     g_gameWindow = nullptr;
-    g_originalWindowProcedure = nullptr;
-    g_originalEndScene = nullptr;
-    g_originalReset = nullptr;
+    // @summary Retain disabled graphics trampolines for a detour suspended before its callback reservation.
     g_endSceneAddress = nullptr;
     g_resetAddress = nullptr;
     g_manager = nullptr;

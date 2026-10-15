@@ -14,6 +14,10 @@
 #include "reverse/resource_symbols.hpp"
 #include "runtime/patch_signal.hpp"
 #include "runtime/runtime_resource_cache.hpp"
+#include "runtime/runtime_scope.hpp"
+#include "runtime/runtime_lifecycle.hpp"
+#include "platform/runtime_owner.hpp"
+#include "platform/game_window_dispatch.hpp"
 #include "ui/simoder_overlay.hpp"
 
 #include <Windows.h>
@@ -22,6 +26,7 @@
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -31,11 +36,48 @@ namespace {
 
 HMODULE g_module = nullptr;
 std::atomic_bool g_initialized = false;
+/** @summary A stopped runtime requires process restart; retained detours cannot be re-admitted. */
+std::atomic_bool g_retired{};
+/** @summary Serialize bootstrap ownership mutations without waiting on a callback or reentrant caller. */
+std::recursive_mutex g_lifecycleOperation;
+/** @summary Reject same-thread recursion before taking any second ownership operation. */
+bool g_lifecycleOperationActive{};
+/** @summary Reset the guarded operation flag on every exception/return path. */
+struct LifecycleOperation final {
+    /** @summary Mark the serialized bootstrap operation active after recursion checks. */
+    LifecycleOperation() noexcept { g_lifecycleOperationActive = true; }
+    /** @summary Permit a later operation after every normal or exceptional return. */
+    ~LifecycleOperation() { g_lifecycleOperationActive = false; }
+};
 std::unique_ptr<mods::PatchRegistry> g_patchRegistry;
 std::unique_ptr<runtime::RuntimeResourceCache> g_resourceCache;
 std::unique_ptr<mods::ModManager> g_modManager;
 std::unique_ptr<dev::RuntimeDiagnostics> g_runtimeDiagnostics;
+std::shared_ptr<platform::RuntimeOwner> g_runtimeOwner;
+std::shared_ptr<runtime::RuntimeScope> g_runtimeScope;
+/** @summary Shared serial writer lane and revision for core and all mod scopes. */
+std::shared_ptr<runtime::RuntimeCommitDomain> g_commitDomain;
+std::unique_ptr<runtime::RuntimeLifecycle> g_runtimeLifecycle;
+std::atomic_bool g_stopRequested{};
 config::LoaderConfig g_loaderConfig;
+
+/** @summary Revoke native admission without waiting or invoking script/lifecycle callbacks in a window procedure. */
+void RequestCoreStop() noexcept {
+    g_retired.store(true);
+    g_stopRequested.store(true);
+    if (g_commitDomain) g_commitDomain->RequestStop();
+    if (g_runtimeScope) g_runtimeScope->RequestStop(runtime::StopReason::WindowClosing);
+    dev::session::ShutdownSessionTransport();
+}
+
+/** @summary Route existing session wakeups independently of ImGui.
+ * @param window Verified owned window. @param message Native wakeup identifier.
+ * @param word Unused Windows parameter. @param value Unused Windows parameter.
+ * @return Whether the existing session transport consumed the message. */
+bool DispatchCoreWindowMessage(HWND window, UINT message, WPARAM word, LPARAM value) noexcept {
+    static_cast<void>(word); static_cast<void>(value);
+    return dev::session::DispatchSessionMessage(window, message);
+}
 
 /** Resolves the injected DLL path for colocated logs and diagnostics. */
 [[nodiscard]] bool ReadModulePath(std::filesystem::path& path) noexcept {
@@ -75,6 +117,7 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
     using sc13::logging::AsyncLogger;
     using sc13::logging::Level;
 
+    if (sc13::bootstrap::g_retired.load()) return ERROR_SHUTDOWN_IN_PROGRESS;
     bool expected = false;
     if (!sc13::bootstrap::g_initialized.compare_exchange_strong(expected, true)) {
         return 0;
@@ -180,6 +223,21 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
             return 14;
         }
 
+        // @summary Acquire one fresh process-lifetime owner before any mod/service can initialize.
+        sc13::bootstrap::g_runtimeOwner = std::make_shared<sc13::platform::RuntimeOwner>();
+        if (!sc13::bootstrap::g_runtimeOwner->IsAcquired()) {
+            AsyncLogger::Instance().WriteFormat(Level::Error,
+                "Runtime owner unavailable (Win32 %u); no mods or developer services admitted",
+                sc13::bootstrap::g_runtimeOwner->Error());
+            return ERROR_BUSY;
+        }
+        sc13::bootstrap::g_stopRequested.store(false);
+        sc13::bootstrap::g_commitDomain = std::make_shared<sc13::runtime::RuntimeCommitDomain>();
+        sc13::bootstrap::g_runtimeScope = std::make_shared<sc13::runtime::RuntimeScope>(sc13::bootstrap::g_runtimeOwner, sc13::bootstrap::g_commitDomain);
+        sc13::bootstrap::g_runtimeLifecycle = std::make_unique<sc13::runtime::RuntimeLifecycle>();
+        sc13::platform::ConfigureGameWindowDispatch(&sc13::bootstrap::DispatchCoreWindowMessage,
+                                                   &sc13::bootstrap::RequestCoreStop);
+
         sc13::bootstrap::g_patchRegistry =
             std::make_unique<sc13::mods::PatchRegistry>();
         sc13::bootstrap::g_resourceCache =
@@ -197,7 +255,7 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
             [](const std::string& owner, const std::string& message) {
                 sc13::logging::AsyncLogger::Instance().WriteEventFormat(sc13::logging::Level::Info,
                     sc13::logging::SourceType::Mod, owner.c_str(), "[Luau] %s", message.c_str());
-            });
+            }, sc13::bootstrap::g_runtimeOwner, sc13::bootstrap::g_commitDomain);
         error.clear();
         if (!sc13::bootstrap::g_modManager->Initialize(error)) {
             AsyncLogger::Instance().WriteFormat(
@@ -248,14 +306,14 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
                 Level::Error, "Resource instrumentation disabled: %s", error.c_str());
             AsyncLogger::Instance().Write(
                 Level::Warning,
-                "No hook remains installed; the game continues without SC13 resource patches");
+                    "Hook setup failed; shutdown retains any still executing owned resources safely");
             return 14;
         }
         std::string nativeSessionError;
         if (sc13::dev::session::InitializeScriptBridge(fingerprint, nativeSessionError)) {
             auto* manager = sc13::bootstrap::g_modManager.get();
             sc13::dev::session::ConfigureSessionTransport(sc13::dev::session::ExecuteScriptPacket,
-                [manager] { return manager->DeveloperServicesActive(); });
+                [manager] { return !sc13::bootstrap::g_stopRequested.load() && manager->DeveloperServicesActive(); });
         } else {
             AsyncLogger::Instance().WriteFormat(Level::Warning, "Native session adapter unavailable: %s", nativeSessionError.c_str());
         }
@@ -278,6 +336,9 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
             AsyncLogger::Instance().Write(Level::Warning,
                 "Developer snapshot/watch worker unavailable; runtime mods remain enabled");
         }
+        if (!sc13::bootstrap::g_runtimeScope->CommitActivation()) return ERROR_BUSY;
+        sc13::bootstrap::g_runtimeScope->SetReadiness(true);
+        static_cast<void>(sc13::bootstrap::g_runtimeLifecycle->Publish({0, true, false, false, false}));
         return 0;
     } catch (...) {
         AsyncLogger::Instance().Write(
@@ -289,6 +350,9 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
 namespace sc13::bootstrap {
 /** @summary Validate explicit installation roots before starting the integrated runtime. */
 DWORD Initialize(const InstallContext& context) noexcept {
+    const std::unique_lock operation(g_lifecycleOperation, std::try_to_lock);
+    if (!operation.owns_lock() || g_lifecycleOperationActive) return ERROR_BUSY;
+    const LifecycleOperation active;
     if (context.size != sizeof(context) || context.version != 1 ||
         !context.gameRoot || !context.dataRoot) return ERROR_INVALID_PARAMETER;
     return InitializeImpl(context);
@@ -296,10 +360,31 @@ DWORD Initialize(const InstallContext& context) noexcept {
 
 /** @summary Release runtime services outside loader lock; the process owns final teardown. */
 DWORD Shutdown() noexcept {
+    const std::unique_lock operation(g_lifecycleOperation, std::try_to_lock);
+    if (!operation.owns_lock() || g_lifecycleOperationActive) return ERROR_BUSY;
+    const LifecycleOperation active;
+    sc13::bootstrap::g_retired.store(true);
+    sc13::bootstrap::RequestCoreStop();
+    sc13::ui::RequestStopSimoderOverlay();
+    sc13::platform::ShutdownGameWindowDispatch();
+    if (!sc13::dev::session::SessionTransportDrained() || !sc13::platform::GameWindowDispatchDrained() ||
+        !sc13::ui::SimoderOverlayDrained()) return ERROR_BUSY;
+    if (sc13::bootstrap::g_runtimeScope &&
+        !sc13::bootstrap::g_runtimeScope->DrainFor(std::chrono::milliseconds(0))) return ERROR_BUSY;
+    if (sc13::bootstrap::g_modManager) {
+        sc13::bootstrap::g_modManager->RequestRuntimeStop();
+        if (!sc13::bootstrap::g_modManager->RuntimeScopesDrained()) return ERROR_BUSY;
+    }
+    if (sc13::bootstrap::g_runtimeLifecycle)
+        static_cast<void>(sc13::bootstrap::g_runtimeLifecycle->Publish({0, false, false, false, true}));
+    if (!sc13::hooks::UninstallRuntimeHooks()) return ERROR_BUSY;
     sc13::bootstrap::g_runtimeDiagnostics.reset();
-    sc13::hooks::UninstallRuntimeHooks();
     sc13::runtime::StopPatchAppliedSignal();
     sc13::bootstrap::ResetModServices();
+    sc13::bootstrap::g_runtimeScope.reset();
+    sc13::bootstrap::g_runtimeLifecycle.reset();
+    sc13::bootstrap::g_commitDomain.reset();
+    // @summary Keep the kernel owner for this process lifetime, including disabled retained detours.
     sc13::logging::AsyncLogger::Instance().Write(
         sc13::logging::Level::Info, "SC13 Mod Loader shutting down");
     sc13::logging::AsyncLogger::Instance().Stop();

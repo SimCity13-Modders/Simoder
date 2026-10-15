@@ -21,8 +21,11 @@
 
 namespace sc13::runtime {
 class RuntimeResourceCache;
+class RuntimeScope;
+class RuntimeCommitDomain;
 struct RuntimeResourceObservation;
 }
+namespace sc13::platform { class RuntimeOwner; }
 
 namespace sc13::mods {
 
@@ -36,16 +39,28 @@ using RuntimeResourceRefreshCallback = std::function<bool(
 /** Owns discovery, lifecycle, persistence, and UI projections for installed mods. */
 class ModManager final {
 public:
-    /** Binds one game-root mods directory and persistent state file to runtime services. */
+    /** @summary Binds one game-root mods directory and persistent state file to runtime services.
+     * @param modsDirectory Canonical installed mod directory. @param statePath Persisted activation state.
+     * @param registry Single authoritative patch registry. @param cache Retained runtime resource evidence.
+     * @param runtimeRefresh Existing validated live-resource refresh adapter. @param scriptLog Script diagnostics sink.
+     * @param runtimeOwner Bootstrap-validated shared process guard, or null when generic admission is unavailable.
+     * @param runtimeDomain Shared core writer/revision domain across all per-mod generations. */
     ModManager(
         std::filesystem::path modsDirectory,
         std::filesystem::path statePath,
         PatchRegistry& registry,
         runtime::RuntimeResourceCache& cache,
         RuntimeResourceRefreshCallback runtimeRefresh = {},
-        scripting::ScriptScheduler::LogSink scriptLog = {});
+        scripting::ScriptScheduler::LogSink scriptLog = {},
+        std::shared_ptr<platform::RuntimeOwner> runtimeOwner = {},
+        std::shared_ptr<runtime::RuntimeCommitDomain> runtimeDomain = {});
     /** @summary Stops script scheduling and lifecycle callbacks before runtime service destruction. */
     ~ModManager();
+    /** @summary Revoke generic scopes before runtime dependency destruction; call outside game callbacks. */
+    void RequestRuntimeStop() noexcept;
+    /** @summary Observe safe generic scope drain without replacing legacy service authorization.
+     * @return True only when no generic operation retains its record resources. */
+    [[nodiscard]] bool RuntimeScopesDrained() noexcept;
 
     /** Discovers mods and activates each valid persisted entry with failure isolation. */
     [[nodiscard]] bool Initialize(std::string& error) noexcept;
@@ -86,6 +101,9 @@ public:
     [[nodiscard]] bool DeveloperServicesActive() const;
 
 private:
+    /** @summary Combines local manager stop and lock-free shared runtime stop without granting authority.
+     * @return True when existing mutation entry points must reject work. */
+    [[nodiscard]] bool RuntimeStopping() const noexcept;
     /** Retains the committed definition and an optional changed-on-disk successor. */
     struct Record final {
         ModDefinition definition;
@@ -97,7 +115,9 @@ private:
         /** @summary Retains the active VM independently of failed pending compiler generations. */
         std::shared_ptr<scripting::ScriptRuntime> scriptRuntime;
         /** @summary Own optional services for exactly the enabled lifetime of this record. */
-        std::unique_ptr<dev::ServiceSupervisor> serviceSupervisor;
+        std::shared_ptr<dev::ServiceSupervisor> serviceSupervisor;
+        /** @summary Prepared closed scope committed only after registry/persistence; never authorizes legacy services. */
+        std::shared_ptr<runtime::RuntimeScope> runtimeScope;
         /** @summary Retains ephemeral owner-scoped overrides separately from editable declarative sources. */
         std::vector<ResourcePatchDefinition> scriptPatches;
     };
@@ -150,6 +170,14 @@ private:
     PatchRegistry& registry_;
     runtime::RuntimeResourceCache& cache_;
     RuntimeResourceRefreshCallback runtimeRefresh_;
+    /** @summary Retain one bootstrap-validated process owner across all per-mod scope generations. */
+    std::shared_ptr<platform::RuntimeOwner> runtimeOwner_;
+    /** @summary One shared core writer/revision domain across all module generations. */
+    std::shared_ptr<runtime::RuntimeCommitDomain> runtimeDomain_;
+    /** @summary Sticky close gate set before waiting for the discovery lock. */
+    std::atomic_bool runtimeStopping_{};
+    /** @summary Bounded retired generations, drained outside the manager lock. */
+    std::vector<std::shared_ptr<runtime::RuntimeScope>> retiredScopes_;
     mutable std::mutex mutex_;
     std::map<ModId, Record, std::less<>> records_;
     std::vector<ModUiEntry> failedDiscoveries_;

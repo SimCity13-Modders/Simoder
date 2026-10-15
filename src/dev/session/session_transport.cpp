@@ -1,5 +1,6 @@
 #include "dev/session/session_transport.hpp"
 #include "core/json.hpp"
+#include "platform/game_window_dispatch.hpp"
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <vector>
 #include <algorithm>
+#include <limits>
 
 namespace sc13::dev::session {
 namespace {
@@ -21,15 +23,21 @@ struct Request final {
     bool running{};
     bool done{};
     ScriptReply reply;
+    platform::GameWindowIdentity window;
+    std::uint64_t epoch{};
 };
 std::mutex g_mutex;
 std::deque<std::shared_ptr<Request>> g_requests;
 std::function<ScriptReply(HWND, std::string_view)> g_executor;
 std::function<bool()> g_permitted;
 std::atomic<HWND> g_window{};
+std::atomic<std::uint64_t> g_windowGeneration{};
 std::atomic_bool g_verified{};
 std::atomic_flag g_pumping = ATOMIC_FLAG_INIT;
 std::atomic<UINT> g_message{};
+bool g_stopped{true};
+std::uint64_t g_epoch{};
+std::atomic_uint g_active{};
 
 /** @summary Compare expiration against the same Unix-millisecond clock used by DevBridge. */
 std::int64_t Now() noexcept {
@@ -110,13 +118,27 @@ bool Publish(const std::filesystem::path& directory, const Request& request) {
 void ConfigureSessionTransport(std::function<ScriptReply(HWND, std::string_view)> executor, std::function<bool()> permitted) {
     /* @summary Register the wakeup outside DLL loader lock, during explicit runtime initialization. */
     g_message.store(RegisterWindowMessageW(L"Simoder.NativeSession.Dispatch.v1"));
-    std::lock_guard lock(g_mutex); g_executor = std::move(executor); g_permitted = std::move(permitted); g_verified.store(false);
+    std::lock_guard lock(g_mutex);
+    g_verified.store(false);
+    if (g_epoch == std::numeric_limits<std::uint64_t>::max() || g_active.load()) {
+        g_stopped = true; g_executor = {}; g_permitted = {}; return;
+    }
+    ++g_epoch; g_stopped = false;
+    g_executor = std::move(executor); g_permitted = std::move(permitted); g_verified.store(false);
 }
-void BindSessionWindow(HWND window) noexcept { g_window.store(window); g_verified.store(false); }
+void BindSessionWindow(HWND window) noexcept {
+    if (!platform::BindGameWindow(window)) return;
+    const auto identity = platform::CurrentGameWindow();
+    const auto previousWindow = g_window.exchange(identity.window);
+    const auto previousGeneration = g_windowGeneration.exchange(identity.generation);
+    if (previousWindow != identity.window || previousGeneration != identity.generation) g_verified.store(false);
+}
 bool DispatchSessionMessage(HWND window, UINT message) noexcept {
     const auto wakeup = g_message.load();
     if (!wakeup || message != wakeup) return false;
-    if (window != g_window.load() || g_pumping.test_and_set()) return true;
+    const auto identity = platform::CurrentGameWindow();
+    if (window != g_window.load() || identity.window != window || identity.thread != GetCurrentThreadId() || g_pumping.test_and_set()) return true;
+    g_active.fetch_add(1);
     std::shared_ptr<Request> request;
     try {
         std::function<ScriptReply(HWND, std::string_view)> executor;
@@ -125,12 +147,27 @@ bool DispatchSessionMessage(HWND window, UINT message) noexcept {
             std::lock_guard lock(g_mutex);
             for (const auto& candidate : g_requests) if (!candidate->running && !candidate->done) { request = candidate; request->running = true; break; }
             executor = g_executor; permitted = g_permitted;
+            if (request && (g_stopped || request->epoch != g_epoch)) {
+                request->done = true; request->reply.error = "Native session transport generation ended.";
+                request.reset();
+            }
         }
         if (request) {
             ScriptReply reply;
-            if (request->expires < Now()) reply.error = "Native session request expired before game-thread execution.";
+            if (!platform::IsCurrentGameWindow(request->window)) reply.error = "Native session window generation changed before execution.";
+            else if (request->expires < Now()) reply.error = "Native session request expired before game-thread execution.";
             else if (!executor || !permitted || !permitted()) reply.error = "Developer service lease or native adapter is unavailable.";
-            else reply = executor(window, request->packet);
+            else {
+                bool committed{};
+                {
+                    std::lock_guard lock(g_mutex);
+                    committed = !g_stopped && request->epoch == g_epoch && request->expires >= Now() &&
+                        platform::IsCurrentGameWindow(request->window);
+                }
+                // The commit reservation precedes callback invocation; shutdown may not pretend to undo committed work.
+                if (committed) reply = executor(window, request->packet);
+                else reply.error = "Native session authority changed before execution commit.";
+            }
             std::lock_guard lock(g_mutex);
             request->reply = std::move(reply); request->done = true;
             if (request->reply.success) g_verified.store(true);
@@ -140,6 +177,7 @@ bool DispatchSessionMessage(HWND window, UINT message) noexcept {
         if (request) { std::lock_guard lock(g_mutex); request->done = true; request->reply.error = "Native session transport failed before completing its reply."; }
     }
     g_pumping.clear();
+    g_active.fetch_sub(1);
     return true;
 }
 void PollSessionTransport(const std::filesystem::path& directory, bool servicesActive) {
@@ -150,9 +188,11 @@ void PollSessionTransport(const std::filesystem::path& directory, bool servicesA
     {
         std::lock_guard lock(g_mutex);
         if (request) {
+            request->window = platform::CurrentGameWindow();
+            request->epoch = g_epoch;
             if (g_requests.size() >= 8) { request->done = true; request->reply.error = "Native session queue is full."; rejected = std::move(request); }
             else {
-                if (!g_executor) { request->done = true; request->reply.error = "Native session adapter unavailable."; }
+                if (g_stopped || !g_executor || !request->window.window) { request->done = true; request->reply.error = "Native session adapter unavailable."; }
                 g_requests.push_back(std::move(request));
             }
         }
@@ -177,12 +217,17 @@ void PollSessionTransport(const std::filesystem::path& directory, bool servicesA
 }
 std::string SessionTransportJson() {
     std::lock_guard lock(g_mutex);
+    const auto identity = platform::CurrentGameWindow();
+    const bool ready = identity.window && identity.window == g_window.load() && identity.generation == g_windowGeneration.load();
     return "{\"admitted\":" + std::string(g_executor ? "true" : "false") + ",\"threadVerified\":" +
-        (g_verified.load() ? "true" : "false") + ",\"windowReady\":" + (g_window.load() ? "true" : "false") + "}";
+        (ready && g_verified.load() ? "true" : "false") + ",\"windowReady\":" + (ready ? "true" : "false") + "}";
 }
 void ShutdownSessionTransport() noexcept {
     g_window.store(nullptr); g_verified.store(false);
-    std::lock_guard lock(g_mutex); g_executor = {}; g_permitted = {};
+    std::lock_guard lock(g_mutex); g_stopped = true;
+    if (g_epoch != std::numeric_limits<std::uint64_t>::max()) ++g_epoch;
+    g_executor = {}; g_permitted = {};
     for (const auto& request : g_requests) if (!request->running) { request->done = true; request->reply.error = "Native session transport stopped."; }
 }
+bool SessionTransportDrained() noexcept { return g_active.load() == 0; }
 }

@@ -2,6 +2,10 @@
 
 Status: architecture accepted by the user on 2026-10-15. Implementation and runtime acceptance remain separate. Decision record: [ADR 0001](decisions/0001-mcp-native-devtool.md).
 
+The [U1 internal foundation](runtime-foundation.md) implements generic ownership,
+closed admission and window routing. It does not deploy the native MCP mod or
+qualify the network/authentication and installed-game paths described here.
+
 ## Ownership
 
 The production Simoder core remains one integrated x86 `d3d9.dll`. MCP is an optional native DevTool mod DLL, installed and explicitly trusted separately; it is not a mandatory companion to the core. It owns the MCP protocol, transport and tool registry. No MCP/DevTools executable or always-running bootstrap server belongs in the game payload.

@@ -3,6 +3,8 @@
 See [repository ownership](architecture/repository-ownership.md) for the accepted
 separation of responsibilities and actual extraction status. Internal source
 libraries, future public SDKs and optional example packages are distinct boundaries.
+See the [internal U1 runtime foundation](architecture/runtime-foundation.md) for
+generic ownership, closed admission, dispatch, and retained shutdown contracts.
 
 ## Runtime flow
 
@@ -82,9 +84,11 @@ manual Refresh.
 - `AsyncLogger` copies events into a bounded queue and drains batches on one worker thread.
 - ImGui state stays on the D3D9/window thread; UI snapshots are copied before rendering.
 
-Explicit runtime shutdown first stops diagnostics, then removes hooks and the
-overlay, stops the patch signal, releases mod services, and flushes the logger.
-Hook rollback is shared with failed initialization. Process exit also releases
+Explicit runtime shutdown closes admission and verifies owned callbacks/scopes
+have drained before disabling hooks and releasing optional services. Disabled hook
+trampolines and the machine owner remain retained until process exit; a stopped
+runtime requires restart. A busy drain retains dependencies for retry. Hook
+retirement is shared with failed initialization. Process exit also releases
 OS job handles; orderly C++ shutdown and abrupt process teardown are distinct
 paths and both need lifecycle coverage.
 

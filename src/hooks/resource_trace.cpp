@@ -1,4 +1,5 @@
 #include "hooks/resource_trace.hpp"
+#include "hooks/runtime_hooks.hpp"
 
 #include "core/runtime_property_table.hpp"
 #include "core/tgi.hpp"
@@ -390,8 +391,9 @@ bool __fastcall HookPropDeserialize(
     void* self,
     void*,
     void* reader) noexcept {
+    const RuntimeHookActivity::Entry entry(RuntimeHookCallbacks());
     const bool result = g_originalPropDeserialize(self, reader);
-    PatchDeserializedResource(self, reader, result);
+    if (entry.admitted()) PatchDeserializedResource(self, reader, result);
     return result;
 }
 
@@ -455,9 +457,10 @@ void* __fastcall HookPFRecordReadConstructor(
     void* ownerContext,
     const std::uint32_t* keyArgument,
     void* options) noexcept {
+    const RuntimeHookActivity::Entry entry(RuntimeHookCallbacks());
     void* const result =
         g_originalPFRecordReadConstructor(self, ownerContext, keyArgument, options);
-    if (self != nullptr) {
+    if (entry.admitted() && self != nullptr) {
         std::array<std::uint32_t, 3> words{};
         if (ReadCurrentProcess(
                 reinterpret_cast<std::uintptr_t>(self) + 0x0CU,
@@ -479,7 +482,8 @@ void __cdecl HookPublishParsedResource(
     void* resource,
     void* context,
     std::uint32_t notify) noexcept {
-    if (resource != nullptr) {
+    const RuntimeHookActivity::Entry entry(RuntimeHookCallbacks());
+    if (entry.admitted() && resource != nullptr) {
         ParsedResourcePrefix prefix{};
         if (ReadCurrentProcess(
                 reinterpret_cast<std::uintptr_t>(resource), &prefix, sizeof(prefix))) {
@@ -501,6 +505,7 @@ void __cdecl HookPublishParsedResource(
 void ConfigureResourceRuntime(
     mods::PatchRegistry& registry,
     runtime::RuntimeResourceCache& cache) noexcept {
+    if (!PrepareRuntimeHookCallbacks()) return;
     g_registry = &registry;
     g_cache = &cache;
 }
@@ -508,6 +513,8 @@ void ConfigureResourceRuntime(
 bool RefreshRuntimeResources(
     const std::set<core::Tgi>& affected,
     std::string& error) noexcept {
+    const RuntimeHookActivity::Entry callbackLifetime(RuntimeHookCallbacks());
+    if (!callbackLifetime.admitted()) { error = "Runtime resource hooks are stopping"; return false; }
     try {
         error.clear();
         if (g_registry == nullptr || g_cache == nullptr) {
@@ -670,9 +677,7 @@ bool CreateResourceTraceHook(
 
 void ResetResourceTrace() noexcept {
     RestoreRuntimeResources();
-    g_originalPFRecordReadConstructor = nullptr;
-    g_originalPublishParsedResource = nullptr;
-    g_originalPropDeserialize = nullptr;
+    // @summary Keep disabled originals reachable for a pre-entry detour suspended before its activity reservation.
     g_registry = nullptr;
     g_cache = nullptr;
 }

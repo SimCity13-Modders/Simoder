@@ -6,6 +6,7 @@
 #include "mods/mod_state_store.hpp"
 #include "mods/patch_registry.hpp"
 #include "runtime/runtime_resource_cache.hpp"
+#include "runtime/runtime_scope.hpp"
 #include "scripting/source_project.hpp"
 
 #include <Windows.h>
@@ -19,6 +20,8 @@
 
 namespace sc13::mods {
 namespace {
+/** @summary Bound retired module generations retained while callbacks finish. */
+constexpr std::size_t MaxRetiredRuntimeScopes = 128;
 
 /** Appends a diagnostic without discarding earlier independent failures. */
 void AppendError(std::string& destination, std::string_view message) {
@@ -55,6 +58,13 @@ std::set<core::Tgi> PatchTargets(std::span<const ResourcePatchDefinition> patche
     return result;
 }
 
+/** @summary Drains retired references only after a public operation releases its manager lock. */
+struct RetiredDrain final {
+    ModManager& manager;
+    /** @summary Performs bounded nonblocking drain without changing operation success semantics. */
+    ~RetiredDrain() { static_cast<void>(manager.RuntimeScopesDrained()); }
+};
+
 }  // namespace
 
 ModManager::ModManager(
@@ -62,12 +72,16 @@ ModManager::ModManager(
     std::filesystem::path statePath,
     PatchRegistry& registry,
     runtime::RuntimeResourceCache& cache,
-    RuntimeResourceRefreshCallback runtimeRefresh, scripting::ScriptScheduler::LogSink scriptLog)
+    RuntimeResourceRefreshCallback runtimeRefresh, scripting::ScriptScheduler::LogSink scriptLog,
+    std::shared_ptr<platform::RuntimeOwner> runtimeOwner,
+    std::shared_ptr<runtime::RuntimeCommitDomain> runtimeDomain)
     : modsDirectory_(std::move(modsDirectory)),
       statePath_(std::move(statePath)),
       registry_(registry),
       cache_(cache),
       runtimeRefresh_(std::move(runtimeRefresh)),
+      runtimeOwner_(std::move(runtimeOwner)),
+      runtimeDomain_(runtimeDomain ? std::move(runtimeDomain) : std::make_shared<runtime::RuntimeCommitDomain>()),
       scriptScheduler_(std::make_unique<scripting::ScriptScheduler>(std::move(scriptLog),
           [this](const auto& id, const auto& runtime, const auto& commands, std::string& error) {
               return ApplyScriptCommands(id, runtime, commands, error);
@@ -79,9 +93,10 @@ ModManager::ModManager(
               SetEnabled(action.id, action.kind == "enable", error);
           static_cast<void>(Snapshot());
           return success ? action.kind + " completed: " + action.id : action.kind + " failed: " + error;
-      })) {}
+      })) { retiredScopes_.reserve(MaxRetiredRuntimeScopes); }
 
 ModManager::~ModManager() {
+    RequestRuntimeStop();
     actionWorker_.reset();
     scriptScheduler_->Shutdown();
     for (auto& [id, record] : records_) {
@@ -91,10 +106,49 @@ ModManager::~ModManager() {
     scriptScheduler_.reset();
 }
 
+bool ModManager::RuntimeStopping() const noexcept {
+    return runtimeStopping_.load() || runtimeDomain_->IsStopping();
+}
+
+void ModManager::RequestRuntimeStop() noexcept {
+    runtimeStopping_.store(true);
+    const std::scoped_lock lock(mutex_);
+    for (auto& [id, record] : records_) {
+        static_cast<void>(id);
+        if (record.runtimeScope) record.runtimeScope->RequestStop();
+    }
+    for (const auto& scope : retiredScopes_) scope->RequestStop();
+}
+
+bool ModManager::RuntimeScopesDrained() noexcept {
+    try {
+        std::vector<std::shared_ptr<runtime::RuntimeScope>> scopes;
+        {
+            const std::scoped_lock lock(mutex_);
+            scopes.reserve(records_.size() + retiredScopes_.size());
+            for (const auto& [id, record] : records_) {
+                static_cast<void>(id);
+                if (record.runtimeScope) scopes.push_back(record.runtimeScope);
+            }
+            scopes.insert(scopes.end(), retiredScopes_.begin(), retiredScopes_.end());
+        }
+        bool drained = true;
+        for (const auto& scope : scopes)
+            if (!scope->DrainFor(std::chrono::milliseconds(0))) drained = false;
+        {
+            const std::scoped_lock lock(mutex_);
+            std::erase_if(retiredScopes_, [](const auto& scope) { return scope->Current().drained; });
+        }
+        return drained;
+    } catch (...) { return false; }
+}
+
 bool ModManager::Initialize(std::string& error) noexcept {
+    const RetiredDrain drain{*this};
     try {
         const std::scoped_lock lock(mutex_);
         error.clear();
+        if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         if (initialized_) {
             error = "Mod manager is already initialized";
             return false;
@@ -141,6 +195,7 @@ bool ModManager::Initialize(std::string& error) noexcept {
 }
 
 bool ModManager::Refresh(std::string& error) noexcept {
+    const RetiredDrain drain{*this};
     try {
         const std::scoped_lock lock(mutex_);
         if (!initialized_) {
@@ -156,6 +211,7 @@ bool ModManager::Refresh(std::string& error) noexcept {
 
 bool ModManager::RefreshLocked(std::string& error) {
     error.clear();
+    if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
     std::error_code directoryError;
     std::filesystem::create_directories(modsDirectory_, directoryError);
     if (directoryError) {
@@ -270,10 +326,12 @@ bool ModManager::RefreshLocked(std::string& error) {
                 static_cast<void>(invalidatedBefore);
                 std::string deactivateError;
                 if (registry_.Deactivate(iterator->first, affected, deactivateError)) {
+                    if (record.runtimeScope) record.runtimeScope->RequestStop();
                     scriptScheduler_->Remove(iterator->first);
                     if (record.scriptRuntime) record.scriptRuntime->Stop();
                     scriptScheduler_->Flush(iterator->first, record.scriptRuntime);
                     record.scriptRuntime.reset();
+                    record.serviceSupervisor.reset();
                     record.scriptPatches.clear();
                     const std::size_t invalidatedAfter = cache_.Invalidate(affected);
                     static_cast<void>(invalidatedAfter);
@@ -293,6 +351,15 @@ bool ModManager::RefreshLocked(std::string& error) {
                 AppendError(error, record.diagnostic);
                 ++iterator;
                 continue;
+            }
+            if (record.runtimeScope) {
+                record.runtimeScope->RequestStop();
+                if (retiredScopes_.size() >= MaxRetiredRuntimeScopes) {
+                    AppendError(error, "Retired runtime generations are still draining");
+                    ++iterator;
+                    continue;
+                }
+                retiredScopes_.push_back(std::move(record.runtimeScope));
             }
             iterator = records_.erase(iterator);
             continue;
@@ -381,6 +448,7 @@ bool ModManager::ApplyScriptCommands(const ModId& id,
     const std::vector<scripting::ScriptPatchCommand>& commands, std::string& error) {
     try {
         const std::scoped_lock lock(mutex_);
+        if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         const auto found = records_.find(id);
         /** @summary Discard an in-flight callback from a disabled or superseded VM without touching its successor. */
         if (found == records_.end() || found->second.scriptRuntime != runtime || !registry_.IsActive(id)) return true;
@@ -415,11 +483,15 @@ bool ModManager::EnableLocked(
     bool persist,
     std::string& error) {
     error.clear();
+    if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
     if (record.state != ModState::Inactive) {
         error = "Only an inactive mod can be enabled";
         return false;
     }
     const ModId& id = record.definition.manifest.id;
+    // @summary Keep migrated generic admission closed throughout candidate preparation.
+    if (record.runtimeScope && retiredScopes_.size() >= MaxRetiredRuntimeScopes) { error = "Retired runtime generations are still draining"; return false; }
+    auto preparedScope = runtimeOwner_ ? std::make_shared<runtime::RuntimeScope>(runtimeOwner_, runtimeDomain_) : nullptr;
     scriptScheduler_->Reserve(id);
     std::shared_ptr<scripting::ScriptRuntime> prepared;
     if (record.definition.script) {
@@ -427,9 +499,9 @@ bool ModManager::EnableLocked(
         catch (const std::exception& exception) { error = exception.what(); record.diagnostic = error; return false; }
     }
     auto scriptPatches = scripting::ReduceScriptPatches({}, prepared ? prepared->TakePatchCommands() : std::vector<scripting::ScriptPatchCommand>{});
-    std::unique_ptr<dev::ServiceSupervisor> preparedServices;
+    std::shared_ptr<dev::ServiceSupervisor> preparedServices;
     if (record.definition.services) {
-        preparedServices = std::make_unique<dev::ServiceSupervisor>();
+        preparedServices = std::make_shared<dev::ServiceSupervisor>();
         if (!preparedServices->Start(*record.definition.services, modsDirectory_.parent_path(), error)) {
             record.diagnostic = error;
             return false;
@@ -437,11 +509,18 @@ bool ModManager::EnableLocked(
     }
     auto effective = record.definition.patches;
     effective.insert(effective.end(), scriptPatches.begin(), scriptPatches.end());
+    if (preparedScope && ((prepared && !preparedScope->RetainResource(prepared)) ||
+                          (preparedServices && !preparedScope->RetainResource(preparedServices)))) {
+        error = "Cannot retain prepared runtime resources";
+        record.diagnostic = error;
+        return false;
+    }
     if (!scriptPatches.empty() && !ValidateScriptPatchesLocked(id, effective, error)) { record.diagnostic = error; return false; }
     const std::vector<ModId> previousOrder = enabledOrder_;
     std::vector<ModId> candidateOrder = previousOrder;
     candidateOrder.push_back(id);
     record.state = ModState::Loading;
+    if (RuntimeStopping()) { record.state = ModState::Inactive; error = "Mod runtime is stopping"; return false; }
     if (persist && !PersistOrder(candidateOrder, error)) {
         record.state = ModState::Inactive;
         record.diagnostic = error;
@@ -461,12 +540,32 @@ bool ModManager::EnableLocked(
         record.diagnostic = error;
         return false;
     }
+    // @summary A generic scope cannot observe activation until both persistence and registry committed.
+    if (RuntimeStopping() || (preparedScope && !preparedScope->CommitActivation())) {
+        std::string rollbackError;
+        std::set<core::Tgi> rollbackAffected;
+        error = "Runtime scope activation rejected";
+        if (!registry_.Deactivate(id, rollbackAffected, rollbackError))
+            AppendError(error, "registry rollback failed: " + rollbackError);
+        static_cast<void>(cache_.Invalidate(rollbackAffected));
+        if (persist && !PersistOrder(previousOrder, rollbackError)) AppendError(error, "persistence rollback failed: " + rollbackError);
+        record.state = ModState::Failed;
+        record.diagnostic = error;
+        if (preparedScope) preparedScope->RequestStop(runtime::StopReason::ActivationFailed);
+        return false;
+    }
     const std::size_t invalidatedAfter = cache_.Invalidate(affected);
     static_cast<void>(invalidatedAfter);
     enabledOrder_ = std::move(candidateOrder);
     if (prepared) { prepared->Commit(); scriptScheduler_->Put(id, prepared); }
     record.scriptRuntime = std::move(prepared);
     record.serviceSupervisor = std::move(preparedServices);
+    if (record.runtimeScope) {
+        record.runtimeScope->RequestStop();
+        retiredScopes_.push_back(std::move(record.runtimeScope));
+    }
+    record.runtimeScope = std::move(preparedScope);
+    if (record.runtimeScope) record.runtimeScope->SetReadiness(true);
     record.scriptPatches = std::move(scriptPatches);
     record.state = ModState::Active;
     record.diagnostic.clear();
@@ -508,11 +607,13 @@ bool ModManager::DisableLocked(
         record.diagnostic = error;
         return false;
     }
+    if (record.runtimeScope) record.runtimeScope->RequestStop();
     scriptScheduler_->Remove(id);
     if (record.scriptRuntime) record.scriptRuntime->Stop();
     scriptScheduler_->Flush(id, record.scriptRuntime);
     record.scriptRuntime.reset();
     record.serviceSupervisor.reset();
+    // @summary Public-operation exit drains the stopped scope after releasing the manager lock.
     record.scriptPatches.clear();
     const std::size_t invalidatedAfter = cache_.Invalidate(affected);
     static_cast<void>(invalidatedAfter);
@@ -568,8 +669,10 @@ bool ModManager::SetEnabled(
     const ModId& id,
     bool enabled,
     std::string& error) noexcept {
+    const RetiredDrain drain{*this};
     try {
         const std::scoped_lock lock(mutex_);
+        if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         if (!initialized_) {
             error = "Mod manager is not initialized";
             return false;
@@ -595,9 +698,11 @@ bool ModManager::SetEnabled(
 }
 
 bool ModManager::Reload(const ModId& id, std::string& error, std::string_view expectedRevision) noexcept {
+    const RetiredDrain drain{*this};
     try {
         const std::scoped_lock lock(mutex_);
         error.clear();
+        if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         if (!RefreshLocked(error)) return false;
         const auto found = records_.find(id);
         if (found == records_.end() || !registry_.IsActive(id) || !found->second.pendingDefinition) {
@@ -617,10 +722,20 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
             return false;
         }
         const auto& pending = *record.pendingDefinition;
+        if (record.runtimeScope && retiredScopes_.size() >= MaxRetiredRuntimeScopes) {
+            error = "Retired runtime generations are still draining";
+            return false;
+        }
+        auto preparedScope = runtimeOwner_ ? std::make_shared<runtime::RuntimeScope>(runtimeOwner_, runtimeDomain_) : nullptr;
         std::shared_ptr<scripting::ScriptRuntime> prepared;
         if (pending.script) {
             try { prepared = std::make_shared<scripting::ScriptRuntime>(id, *pending.script, ScriptHost()); }
             catch (const std::exception& exception) { error = exception.what(); record.diagnostic = "Reload rejected: " + error; return false; }
+        }
+        if (preparedScope && prepared && !preparedScope->RetainResource(prepared)) {
+            error = "Cannot retain prepared reload runtime";
+            record.diagnostic = "Reload rejected: " + error;
+            return false;
         }
         auto scriptPatches = scripting::ReduceScriptPatches({}, prepared ? prepared->TakePatchCommands() : std::vector<scripting::ScriptPatchCommand>{});
         auto effective = pending.patches;
@@ -629,14 +744,33 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
         const auto newTargets = PatchTargets(effective);
         affected.insert(newTargets.begin(), newTargets.end());
         if (!ValidateScriptPatchesLocked(id, effective, error)) { record.diagnostic = "Reload rejected: " + error; return false; }
+        if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
+        const auto previousPatches = EffectivePatches(record);
         // /** @summary Invalidate around a single publication so in-flight old plans cannot commit. */
         static_cast<void>(cache_.Invalidate(affected));
         if (!registry_.Replace(id, effective, affected, error)) return false;
+        if (RuntimeStopping() || (preparedScope && !preparedScope->CommitActivation())) {
+            error = "Reload runtime scope activation rejected";
+            std::string rollbackError;
+            if (!registry_.Replace(id, previousPatches, affected, rollbackError))
+                AppendError(error, "registry rollback failed: " + rollbackError);
+            static_cast<void>(cache_.Invalidate(affected));
+            if (preparedScope) preparedScope->RequestStop(runtime::StopReason::ActivationFailed);
+            record.diagnostic = error;
+            RefreshRuntimeResourcesLocked(affected, record, "reload rollback");
+            return false;
+        }
+        if (record.runtimeScope) {
+            record.runtimeScope->RequestStop();
+            retiredScopes_.push_back(std::move(record.runtimeScope));
+        }
         scriptScheduler_->Remove(id);
         if (record.scriptRuntime) record.scriptRuntime->Stop();
         scriptScheduler_->Flush(id, record.scriptRuntime);
         if (prepared) { prepared->Commit(); scriptScheduler_->Put(id, prepared); }
         record.scriptRuntime = std::move(prepared);
+        record.runtimeScope = std::move(preparedScope);
+        if (record.runtimeScope) record.runtimeScope->SetReadiness(true);
         record.scriptPatches = std::move(scriptPatches);
         static_cast<void>(cache_.Invalidate(affected));
         record.definition = std::move(*record.pendingDefinition);
@@ -693,6 +827,7 @@ bool ModManager::DeveloperServicesActive() const {
 }
 
 bool ModManager::RequestAction(std::string action, ModId id, std::string revision) {
+    if (RuntimeStopping()) return false;
     if (action != "refresh" && action != "reload" && action != "enable" && action != "disable") return false;
     return actionWorker_->Submit({std::move(action), std::move(id), std::move(revision)});
 }
