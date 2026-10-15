@@ -12,7 +12,7 @@ rename does not establish an independent repository or compatible package.
 | Simoder-DevTools-MCP | Optional native MCP mod target. Current coupled C# executables remain legacy migration input, not a completed native package. |
 | Simoder-DevTools-Authoring | Authoring/compiler coordination and editor integration; existing host implementation still in original DevTools pending extraction. |
 | Simoder-DevTools-Diagnostics | Diagnostic mod target. Existing host utilities require classification; EA launcher compatibility stays host tooling, not runtime-mod responsibility. |
-| Simoder-SDK | Versioned public native ABI/declarations and editor contracts. Current handwritten Luau/legacy TS declarations await extraction; broad Simoder::Core implementation is not this SDK. |
+| Simoder-SDK | Existing Luau and legacy TS declarations now have a separate canonical repository and versioned manifest. Hash-verified vendored compatibility artifacts preserve current editor/compiler paths. Public native ABI remains unimplemented; broad Simoder::Core implementation is not this SDK. |
 | Simoder-Mod-Examples | First physical extraction: four existing example projects, new local Git history, independent source/package tests and original notices. No RoadBuilder/BusLine implementation is claimed. |
 | Simoder-Mod-Templates | Separate simple cloneable templates; existing examples are not silently relabeled templates. |
 | Simoder-Engineering | Shared engineering policy/schema/composition/conformance responsibility, not duplicated into every product. |
@@ -25,6 +25,14 @@ example package only through an explicit prepared checkout pinned by
 `cmake/simoder-examples.lock.cmake`; no implicit sibling lookup or fetch. Omitting
 that optional dependency omits examples from the DevTools assembly rather than
 copying a second authoritative source tree.
+
+DevTools and Examples retain exact SDK-derived declaration artifacts for offline
+source-checkout editor/compiler compatibility. Their SDK locks identify one
+canonical revision and payload hashes; these copies must not evolve separately.
+DevTools validates vendored hashes during CMake configuration and optionally
+checks an explicit clean canonical SDK checkout. Examples runs the equivalent
+provenance check in its package tests. This is prepared-source integrity, not
+signed publisher trust. SDK refreshes require compatibility regression and audit.
 
 Package/source extraction does not prove game compatibility, native mod loading,
 HTTP/TLS interoperability or public release readiness. Further cutovers need
