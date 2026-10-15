@@ -81,6 +81,7 @@ add_library(sc13_core STATIC
     src/runtime/runtime_resource_cache.cpp
     src/runtime/runtime_scope.cpp
     src/runtime/runtime_lifecycle.cpp
+    src/runtime/copied_value.cpp
     src/scripting/script_runtime.cpp
     src/scripting/script_patch_reducer.cpp
     src/scripting/luau_compiler.cpp
@@ -187,6 +188,12 @@ endif()
 
 if(SC13_BUILD_TESTS)
     enable_testing()
+    # @summary Exercise the private strict copied-value arena without enabling semantic providers.
+    add_executable(simoder-copied-value-tests tests/copied_value_tests.cpp)
+    target_link_libraries(simoder-copied-value-tests PRIVATE sc13_core)
+    sc13_enable_warnings(simoder-copied-value-tests)
+    add_test(NAME simoder-copied-value-tests COMMAND simoder-copied-value-tests)
+    set_tests_properties(simoder-copied-value-tests PROPERTIES TIMEOUT 30)
     # @summary Compile synthetic authority construction only into an independent, non-installed test library.
     add_library(sc13-runtime-test-support STATIC src/runtime/runtime_scope.cpp src/runtime/runtime_lifecycle.cpp
         src/platform/runtime_owner.cpp)
