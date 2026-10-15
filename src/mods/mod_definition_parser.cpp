@@ -454,6 +454,9 @@ bool LoadModDefinition(
             }
             const auto document = toml::parse(scripting::ReadBounded(
                 scripting::SourcePath(directory, "mod.toml"), 8U * 1024U * 1024U));
+            if (document["metadata"]["id"].value<std::string>() == "simoder.base") {
+                definition = {}; error = "Reserved base identity requires verified host"; return false;
+            }
             if (document["contract"].value<std::string>() == "simoder.raw-resources")
                 return LoadResourceProject(directory, definition, error);
             return scripting::LoadSourceProject(directory, definition, error);

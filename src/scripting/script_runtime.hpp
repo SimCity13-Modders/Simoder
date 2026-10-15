@@ -78,6 +78,14 @@ public:
     /** @summary Stops callbacks and records a host transaction failure while retaining the last committed overrides. */
     void Fail(std::string diagnostic);
 private:
+    friend class BaseHost;
+    /** @summary Native-only verified bootstrap role, inaccessible to ordinary callers. */
+    struct BaseBootstrap final {};
+    /** @summary Construct verified base using the shared lane and allocator. */
+    ScriptRuntime(BaseBootstrap, const ScriptDefinition& definition, ScriptHost host);
+    /** @summary Share lifecycle mechanics while enforcing private role identity. */
+    ScriptRuntime(std::string modId, const ScriptDefinition& definition, ScriptHost host, bool bootstrap);
+    bool bootstrap_{};
     friend class ScriptLane;
     friend class ScriptScheduler;
     /** @summary Initializes Lua only on the reserved script lane. */

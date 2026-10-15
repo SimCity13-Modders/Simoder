@@ -28,6 +28,11 @@ struct SourceProject final {
 [[nodiscard]] std::filesystem::path TypeScriptToolchainPath();
 /** @summary Validates paths and hashes declared inputs, including local script modules and originals. */
 [[nodiscard]] SourceProject InspectSourceProject(const std::filesystem::path& directory);
+/** @summary Parse the shared authoring metadata and script projection without filesystem effects.
+ * @param bytes Immutable bounded mod.toml bytes.
+ * @return Validated metadata and script configuration, not authority or content provenance.
+ */
+[[nodiscard]] SourceProject InspectSourceManifest(std::string_view bytes);
 /** @summary Loads a source mod through an immutable external cache generation without partial activation. */
 [[nodiscard]] bool LoadSourceProject(const std::filesystem::path& directory,
     mods::ModDefinition& definition, std::string& error) noexcept;

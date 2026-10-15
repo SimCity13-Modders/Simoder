@@ -191,11 +191,19 @@ std::filesystem::path SourcePath(const std::filesystem::path& root, std::string_
 
 std::string ReadBounded(const std::filesystem::path& path, std::size_t maximum) {
     Plain(path);
-    if (!std::filesystem::is_regular_file(NativePath(path)) || std::filesystem::file_size(NativePath(path)) > maximum)
-        throw std::runtime_error("Input file exceeds its limit: " + path.string());
-    std::ifstream input(NativePath(path), std::ios::binary);
-    std::string result{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    if (input.bad() || result.size() > maximum) throw std::runtime_error("Failed or oversized source read");
+    Handle input{CreateFileW(NativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (input.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(input.value, &info) ||
+        GetFileType(input.value) != FILE_TYPE_DISK ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+        throw std::runtime_error("Input must be an accessible plain file");
+    const auto length = (std::uint64_t(info.nFileSizeHigh) << 32U) | info.nFileSizeLow;
+    if (length > maximum || length > MAXDWORD) throw std::runtime_error("Input file exceeds its limit");
+    std::string result(static_cast<std::size_t>(length), '\0');
+    DWORD read{};
+    if (length && (!ReadFile(input.value, result.data(), static_cast<DWORD>(length), &read, nullptr) || read != length))
+        throw std::runtime_error("Failed or truncated source read");
     return result;
 }
 
@@ -205,12 +213,10 @@ std::string HashText(std::string_view bytes) {
     return core::ToHex(hash);
 }
 
-SourceProject InspectSourceProject(const std::filesystem::path& directory) {
+namespace {
+/** @summary Project metadata and script configuration from one already parsed authoring document. */
+SourceProject SourceProjection(const toml::table& document) {
     SourceProject result;
-    result.directory = std::filesystem::absolute(directory).lexically_normal();
-    const auto manifest = SourcePath(result.directory, "mod.toml");
-    const auto manifestBytes = ReadBounded(manifest, 8U * 1024U * 1024U);
-    const auto document = toml::parse(manifestBytes);
     if (document["schemaVersion"].value<std::int64_t>() != 2 ||
         document["format"].value<std::string>() != "simoder.authoring")
         throw std::runtime_error("Unsupported mod.toml authoring schema");
@@ -220,6 +226,46 @@ SourceProject InspectSourceProject(const std::filesystem::path& directory) {
     result.metadata.author = document["metadata"]["author"].value_or(std::string{});
     result.metadata.description = document["metadata"]["description"].value_or(std::string{});
     if (!mods::IsValidModId(result.metadata.id)) throw std::runtime_error("Invalid source mod ID");
+    if (document.contains("scripts")) {
+        if (!document["scripts"].is_table()) throw std::runtime_error("scripts must be a table");
+        for (const auto& [key, value] : *document["scripts"].as_table()) {
+            static_cast<void>(value);
+            if (key != "language" && key != "entry" && key != "memoryMiB" && key != "budgetMs")
+                throw std::runtime_error("Unknown script configuration field: " + std::string(key.str()));
+        }
+        result.language = Text(document["scripts"]["language"]);
+        result.entry = Text(document["scripts"]["entry"]);
+        if (result.language != "luau" && result.language != "typescript") throw std::runtime_error("Unsupported script language");
+        if (!result.entry.starts_with("scripts/") ||
+            !result.entry.ends_with(result.language == "luau" ? ".luau" : ".ts"))
+            throw std::runtime_error("Script entry must be under scripts/ with the language extension");
+        const auto memory = document["scripts"]["memoryMiB"].value_or(std::int64_t(8));
+        const auto budget = document["scripts"]["budgetMs"].value_or(std::int64_t(2));
+        if ((document["scripts"]["memoryMiB"] && !document["scripts"]["memoryMiB"].is_integer()) ||
+            (document["scripts"]["budgetMs"] && !document["scripts"]["budgetMs"].is_integer()))
+            throw std::runtime_error("Script budgets must be integers");
+        if (memory < 2 || memory > 64 || budget < 1 || budget > 20) throw std::runtime_error("Script limits: memoryMiB 2..64, budgetMs 1..20");
+        result.memoryBytes = static_cast<std::size_t>(memory) * 1024U * 1024U;
+        result.budgetMs = static_cast<unsigned>(budget);
+    }
+    return result;
+}
+}
+
+SourceProject InspectSourceManifest(std::string_view bytes) {
+    if (bytes.size() > 8U * 1024U * 1024U) throw std::runtime_error("Manifest exceeds limit");
+    return SourceProjection(toml::parse(bytes));
+}
+
+SourceProject InspectSourceProject(const std::filesystem::path& directory) {
+    SourceProject result;
+    result.directory = std::filesystem::absolute(directory).lexically_normal();
+    const auto manifest = SourcePath(result.directory, "mod.toml");
+    const auto manifestBytes = ReadBounded(manifest, 8U * 1024U * 1024U);
+    const auto document = toml::parse(manifestBytes);
+    result = SourceProjection(document);
+    result.directory = std::filesystem::absolute(directory).lexically_normal();
+    if (result.metadata.id == "simoder.base") throw std::runtime_error("Reserved base identity requires verified host");
     std::string patchError;
     if (!mods::LoadAuthoringPatches(result.directory, result.patches, patchError)) throw std::runtime_error(patchError);
     std::set<std::filesystem::path> inputs{manifest};
@@ -246,29 +292,7 @@ SourceProject InspectSourceProject(const std::filesystem::path& directory) {
             inputs.insert(SourcePath(result.directory, Text((*table)["source"])));
         }
     } else if (document.contains("resources")) throw std::runtime_error("resources must be a table");
-    if (document.contains("scripts")) {
-        if (!document["scripts"].is_table()) throw std::runtime_error("scripts must be a table");
-        for (const auto& [key, value] : *document["scripts"].as_table()) {
-            static_cast<void>(value);
-            if (key != "language" && key != "entry" && key != "memoryMiB" && key != "budgetMs")
-                throw std::runtime_error("Unknown script configuration field: " + std::string(key.str()));
-        }
-        result.language = Text(document["scripts"]["language"]);
-        result.entry = Text(document["scripts"]["entry"]);
-        if (result.language != "luau" && result.language != "typescript") throw std::runtime_error("Unsupported script language");
-        if (!result.entry.starts_with("scripts/") ||
-            !result.entry.ends_with(result.language == "luau" ? ".luau" : ".ts"))
-            throw std::runtime_error("Script entry must be under scripts/ with the language extension");
-        inputs.insert(SourcePath(result.directory, result.entry));
-        const auto memory = document["scripts"]["memoryMiB"].value_or(std::int64_t(8));
-        const auto budget = document["scripts"]["budgetMs"].value_or(std::int64_t(2));
-        if ((document["scripts"]["memoryMiB"] && !document["scripts"]["memoryMiB"].is_integer()) ||
-            (document["scripts"]["budgetMs"] && !document["scripts"]["budgetMs"].is_integer()))
-            throw std::runtime_error("Script budgets must be integers");
-        if (memory < 2 || memory > 64 || budget < 1 || budget > 20) throw std::runtime_error("Script limits: memoryMiB 2..64, budgetMs 1..20");
-        result.memoryBytes = static_cast<std::size_t>(memory) * 1024U * 1024U;
-        result.budgetMs = static_cast<unsigned>(budget);
-    }
+    if (!result.entry.empty()) inputs.insert(SourcePath(result.directory, result.entry));
     if (!result.hasResources && result.language.empty() && !result.services && result.patches.empty()) throw std::runtime_error("Mod contains no resources, script, patches or services");
     for (const auto* subtree : {".simoder", "scripts"}) {
         const auto root = result.directory / subtree;

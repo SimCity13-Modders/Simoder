@@ -7,9 +7,9 @@
 #include <stdexcept>
 
 namespace sc13::scripting {
-namespace {
 /** @summary Compile bounded source for the pinned VM while preserving module-local require. */
-std::string Compile(std::string_view source) {
+std::string CompileLuauSource(std::string_view source) {
+    if (source.size() > 8U * 1024U * 1024U) throw std::runtime_error("Luau source exceeds 8 MiB");
     Luau::CompileOptions options;
     options.optimizationLevel = 1;
     options.debugLevel = 1;
@@ -21,6 +21,7 @@ std::string Compile(std::string_view source) {
     if (result.size() > 8U * 1024U * 1024U) throw std::runtime_error("Bytecode exceeds 8 MiB");
     return result;
 }
+namespace {
 /** @summary Reject partial output before publishing a generation. */
 void Write(const std::filesystem::path& path, std::string_view text) {
     std::ofstream output(NativePath(path), std::ios::binary | std::ios::trunc);
@@ -46,7 +47,7 @@ void CompileLuauGeneration(const SourceProject& source, const std::filesystem::p
     Staging staging{generation.parent_path() / ("staging-" + std::to_string(GetCurrentProcessId()) +
         "-" + std::to_string(GetTickCount64()) + "-" + std::to_string(sequence.fetch_add(1)))};
     if (!std::filesystem::create_directory(NativePath(staging.path))) throw std::runtime_error("Cannot create compiler staging");
-    const auto bytecode = Compile(ReadBounded(SourcePath(source.directory, source.entry), 8U * 1024U * 1024U));
+    const auto bytecode = CompileLuauSource(ReadBounded(SourcePath(source.directory, source.entry), 8U * 1024U * 1024U));
     Write(staging.path / "script.luau.bin", bytecode);
     std::string descriptor = "schemaVersion = 1\nsourceFingerprint = " + core::JsonString(source.fingerprint) +
         "\nbytecodeSha256 = " + core::JsonString(HashText(bytecode)) + "\n";
@@ -56,7 +57,7 @@ void CompileLuauGeneration(const SourceProject& source, const std::filesystem::p
         if (!file.is_regular_file() || file.path().extension() != ".luau") continue;
         const auto relative = file.path().lexically_relative(source.directory).generic_u8string();
         const std::string name(reinterpret_cast<const char*>(relative.data()), relative.size());
-        const auto compiled = Compile(ReadBounded(SourcePath(source.directory, name), 8U * 1024U * 1024U));
+        const auto compiled = CompileLuauSource(ReadBounded(SourcePath(source.directory, name), 8U * 1024U * 1024U));
         total += compiled.size();
         if (total > 8U * 1024U * 1024U) throw std::runtime_error("Compiled scripts exceed 8 MiB");
         const auto payload = "modules/" + HashText(name) + ".bin";

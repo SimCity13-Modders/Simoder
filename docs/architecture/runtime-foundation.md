@@ -8,6 +8,8 @@ baseline. No new game operation is admitted through these primitives.
 The [script lane and lifecycle](script-scheduler.md) guide describes the U3c
 interpreter ownership and staged ModManager migration layered on this foundation.
 The [private copied-value codec](copied-values.md) remains a separate Core primitive.
+The [verified Base host](base-host.md) adds U3d source integrity and isolated
+bootstrap execution without publishing production service readiness.
 
 ## Boundaries
 

@@ -346,9 +346,16 @@ int ScriptRuntime::Callback(const char* name) {
 }
 
 ScriptRuntime::ScriptRuntime(std::string modId, const ScriptDefinition& definition, ScriptHost host)
-    : modId_(std::move(modId)), maximum_(definition.memoryBytes), budgetMs_(definition.budgetMs),
+    : ScriptRuntime(std::move(modId), definition, std::move(host), false) {}
+
+ScriptRuntime::ScriptRuntime(BaseBootstrap, const ScriptDefinition& definition, ScriptHost host)
+    : ScriptRuntime("simoder.base", definition, std::move(host), true) {}
+
+ScriptRuntime::ScriptRuntime(std::string modId, const ScriptDefinition& definition, ScriptHost host, bool bootstrap)
+    : bootstrap_(bootstrap), modId_(std::move(modId)), maximum_(definition.memoryBytes), budgetMs_(definition.budgetMs),
       modules_(definition.modules), resourceAliases_(definition.resourceAliases),
       propertyAliases_(definition.propertyAliases), host_(std::move(host)) {
+    if (modId_ == "simoder.base" && !bootstrap_) throw std::runtime_error("Reserved base identity");
     lane_ = AcquireScriptLane();
     laneSlot_ = lane_->Reserve(this);
     try { lane_->Invoke(laneSlot_, [this, &definition] { Initialize(definition); }); }
@@ -384,11 +391,13 @@ void ScriptRuntime::Initialize(const ScriptDefinition& definition) {
         lua_pushcfunction(state_, &Log, "simoder.log"); lua_setfield(state_, -2, "log");
         lua_pushcfunction(state_, &Time, "simoder.time"); lua_setfield(state_, -2, "time");
         lua_pushcfunction(state_, &HasCapability, "simoder.hasCapability"); lua_setfield(state_, -2, "hasCapability");
+        if (!bootstrap_) {
         lua_newtable(state_);
         lua_pushcfunction(state_, &GetFloat, "simoder.props.getFloat"); lua_setfield(state_, -2, "getFloat");
         lua_pushcfunction(state_, &SetFloat, "simoder.props.setFloat"); lua_setfield(state_, -2, "setFloat");
         lua_pushcfunction(state_, &ClearFloat, "simoder.props.clearFloat"); lua_setfield(state_, -2, "clearFloat");
         lua_setreadonly(state_, -1, true); lua_setfield(state_, -2, "props");
+        }
         lua_setreadonly(state_, -1, true); lua_setglobal(state_, "simoder");
         lua_pushcfunction(state_, &Log, "print"); lua_setglobal(state_, "print");
         lua_pushlstring(state_, definition.entry.data(), definition.entry.size());

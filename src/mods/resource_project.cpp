@@ -88,6 +88,7 @@ bool LoadResourceProject(const std::filesystem::path& directory, ModDefinition& 
         ModDefinition parsed;
         parsed.directory = directory;
         parsed.manifest.id = Text(document["metadata"]["id"]);
+        if (parsed.manifest.id == "simoder.base") throw std::runtime_error("Reserved base identity requires verified host");
         parsed.manifest.name = Text(document["metadata"]["name"]);
         parsed.manifest.version = Text(document["metadata"]["version"]);
         parsed.manifest.author = document["metadata"]["author"].value_or(std::string{});

@@ -83,6 +83,7 @@ add_library(sc13_core STATIC
     src/runtime/runtime_lifecycle.cpp
     src/runtime/copied_value.cpp
     src/scripting/script_runtime.cpp
+    src/scripting/base_host.cpp
     src/scripting/script_patch_reducer.cpp
     src/scripting/luau_compiler.cpp
     src/scripting/source_project.cpp
@@ -188,6 +189,17 @@ endif()
 
 if(SC13_BUILD_TESTS)
     enable_testing()
+    # @summary Exercise verified private base hosting without production service readiness.
+    add_executable(simoder-base-host-tests tests/base_host_tests.cpp)
+    target_link_libraries(simoder-base-host-tests PRIVATE sc13_core)
+    sc13_enable_warnings(simoder-base-host-tests)
+    add_test(NAME simoder-base-host-tests COMMAND simoder-base-host-tests)
+    set_tests_properties(simoder-base-host-tests PROPERTIES TIMEOUT 30)
+    set(SC13_BASE_SOURCE_DIR "" CACHE PATH "Optional separately checked-out Base source for integration tests")
+    if(SC13_BASE_SOURCE_DIR)
+        add_test(NAME simoder-base-package-tests COMMAND simoder-base-host-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-base-package-tests PROPERTIES TIMEOUT 30)
+    endif()
     # @summary Exercise the private strict copied-value arena without enabling semantic providers.
     add_executable(simoder-copied-value-tests tests/copied_value_tests.cpp)
     target_link_libraries(simoder-copied-value-tests PRIVATE sc13_core)

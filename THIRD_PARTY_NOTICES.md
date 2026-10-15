@@ -7,7 +7,7 @@ does not replace the licenses or copyright notices of external components.
 | --- | --- | --- |
 | MinHook v1.3.4, including Hacker Disassembler Engine | Downloaded by CMake and linked into the loader | BSD-2-Clause; retain the complete upstream LICENSE.txt, including HDE notices. https://github.com/TsudaKageyu/minhook |
 | Dear ImGui v1.92.9 and Win32/DX9 backends | Downloaded by CMake and linked into the overlay | MIT, copyright Omar Cornut. https://github.com/ocornut/imgui |
-| Luau 0.695 (`1f6ff5d6f0072f2fab2adf35d1ffbaae7d848ad0`) | VM linked into the core; compiler linked only into `simoder-build.exe` | MIT; full `LICENSE.txt` installed as `simoder/licenses/luau-LICENSE.txt`. https://github.com/luau-lang/luau/tree/0.695 |
+| Luau 0.695 (`1f6ff5d6f0072f2fab2adf35d1ffbaae7d848ad0`) | VM and compiler statically linked into Core for source-generation and verified Base compilation | MIT; full `LICENSE.txt` installed as `licenses/luau-LICENSE.txt`. https://github.com/luau-lang/luau/tree/0.695 |
 | TypeScript 6.0.2 and TypeScriptToLua 1.37.1 | Optional external TypeScript toolchain, pinned in `tools/scripts/typescript/package-lock.json` | Apache-2.0 (TypeScript), MIT (TypeScriptToLua); all dependency licenses retained in the installed toolchain. https://github.com/TypeScriptToLua/TypeScriptToLua |
 | Node.js | Optional single-file authoring bundle only (`SC13_BUNDLE_TYPESCRIPT=ON`); excluded from the default runtime distribution | Preserve the complete official LICENSE for the executable's exact release as `licenses/node-LICENSE.txt`. https://github.com/nodejs/node |
 
