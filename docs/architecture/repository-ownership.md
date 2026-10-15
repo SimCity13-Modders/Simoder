@@ -12,13 +12,14 @@ rename does not establish an independent repository or compatible package.
 | Simoder-DevTools-MCP | Separate source owner of the existing coherent C# MCP/DevBridge/Core stack and tests. DevTools consumes an explicit clean pinned checkout. Native MCP mod migration remains unimplemented; physical extraction does not establish the target lifecycle/transport/plugin architecture. |
 | Simoder-DevTools-Authoring | Separate existing authoring compiler, TypeScript-to-Luau adapter, authoring tests and declarative snippets. DevTools consumes a clean pinned checkout; internal Core and prepared external compiler dependencies remain explicit. |
 | Simoder-DevTools-Diagnostics | Diagnostic mod target; current MCP/REA paths provide existing diagnostic operations. Standalone PE/memory probe products are retired; no claim of complete MCP PE feature parity. |
-| Simoder-DevTools-REA | Separate optional host wrapper, evidence schema and historical guide for externally installed REA. Provider-neutral source ownership only; not third-party REA itself, a provider-specific adapter, or the native Diagnostics mod. DevTools consumes a clean pinned checkout and preserves ordinary `Reverse/` installation. |
+| Simoder-DevTools-REA | Separate optional host wrapper, reviewed evidence schema and integration guide for externally installed REA. Provider-neutral source ownership only; not third-party REA itself, a provider-specific adapter, or the native Diagnostics mod. DevTools consumes a clean pinned checkout and preserves ordinary `Reverse/` installation. |
 | Simoder-SDK | Existing Luau and legacy TS declarations now have a separate canonical repository and versioned manifest. Hash-verified vendored compatibility artifacts preserve current editor/compiler paths. Public native ABI remains unimplemented; broad Simoder::Core implementation is not this SDK. |
 | Simoder-Mod-Examples | First physical extraction: four existing example projects, new local Git history, independent source/package tests and original notices. No RoadBuilder/BusLine implementation is claimed. |
 | Simoder-Mod-Templates | Separate simple cloneable templates; existing examples are not silently relabeled templates. |
-| Simoder-Engineering | Shared engineering policy/schema/composition/conformance responsibility, not duplicated into every product. |
+| Simoder-Engineering | Separate canonical source repository for seven shared engineering policy documents. Machine-readable schema, composition and conformance tooling remain planned; the documents do not implement those tools. |
 | Simoder-Workspace | Planned Rust workspace CLI consuming Engineering; no new CLI is introduced by cleanup. |
-| Simoder-Adapter-Codex / Simoder-Adapter-Claude | Provider-specific integration responsibility, separate from product runtime. |
+| Simoder-Adapter-Codex | Separate canonical source repository for nineteen Codex files (eight skills, eight agent definitions and three routing/provider documents), plus seven read-only Engineering projections bound by an exact dependency lock. |
+| Simoder-Adapter-Claude | Planned provider-specific integration; no implemented or qualified Claude adapter is claimed. |
 
 Original DevTools history and published `dirty` checkpoints remain recoverable
 reference. Extracted components start new histories. Active DevTools consumes the
@@ -45,3 +46,12 @@ The prototype/alpha does not require format/API migration support. The first
 real Beta release establishes the backwards-compatibility baseline; see
 [compatibility policy](compatibility.md). Retaining current input validation,
 integrity and permission checks is independent of historical format support.
+
+Engineering and Adapter-Codex compose 26 source files. Their initial inactive
+snapshots and semantic correction ancestry remain historical provenance. The
+reviewed 35-file activation in Simoder, including consumer-specific projections,
+was explicitly accepted by the user. That acceptance does not activate another
+consumer or approve future payload changes: each needs exact-content review and
+explicit human acceptance. Source manifests, provenance and Engineering locks
+identify content; they do not grant instruction trust or permissions. This
+ownership reference changes no active policy or agent configuration.
