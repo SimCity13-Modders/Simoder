@@ -1,4 +1,5 @@
 #include "scripting/script_runtime.hpp"
+#include "scripting/semantic_lua.hpp"
 #include <lua.h>
 #include <lualib.h>
 #include <cstdlib>
@@ -402,6 +403,16 @@ void ScriptRuntime::Initialize(const ScriptDefinition& definition) {
         lua_pushcfunction(state_, &Log, "print"); lua_setglobal(state_, "print");
         lua_pushlstring(state_, definition.entry.data(), definition.entry.size());
         lua_pushcclosure(state_, &Require, "require", 1); lua_setglobal(state_, "require");
+        if (host_.semantic) {
+            for (const auto& [name,code]:host_.semanticModules) {
+                if (modules_.contains(name)) throw std::runtime_error("Mod cannot replace verified base presentation modules");
+                modules_.emplace(name,code);
+            }
+            runtime::copied::Reservation accounting;
+            if (host_.semantic->bridge->Values()->Account(host_.semantic->storageOwner,sizeof(SemanticLua)+64,accounting)!=runtime::copied::Status::Ok)
+                throw std::runtime_error("Semantic VM binding storage exhausted");
+            semantics_=std::make_unique<SemanticLua>(*this,std::move(accounting)); semantics_->Install();
+        }
         luaL_sandbox(state_);
         luaL_sandboxthread(state_);
         const auto chunk = "@" + definition.entry;
@@ -411,14 +422,17 @@ void ScriptRuntime::Initialize(const ScriptDefinition& definition) {
         }
         Observe(ScriptPhase::Entry); Call(0, 1);
         if (!lua_istable(state_, -1)) throw std::runtime_error("Script must return a lifecycle table");
+        const int lifecycleRef=lua_ref(state_,-1);
         tickRef_ = Callback("onTick");
         disableRef_ = Callback("onDisable");
         const int enable = Callback("onEnable");
         lua_pop(state_, 1);
         if (enable != -1) { Observe(ScriptPhase::Enable); lua_getref(state_, enable); Call(0, 0); lua_unref(state_, enable); }
+        if (semantics_ && bootstrap_) semanticQualified_=semantics_->Qualify(lifecycleRef);
+        lua_unref(state_,lifecycleRef);
         running_ = true;
         PublishStatus();
-    } catch (...) { lua_close(state_); state_ = nullptr; reservedScriptMemory.fetch_sub(maximum_); reservedMemory_ = false; Observe(ScriptPhase::Close); throw; }
+    } catch (...) { semantics_.reset(); lua_close(state_); state_ = nullptr; reservedScriptMemory.fetch_sub(maximum_); reservedMemory_ = false; Observe(ScriptPhase::Close); throw; }
 }
 
 ScriptRuntime::~ScriptRuntime() {
@@ -434,7 +448,7 @@ void ScriptRuntime::Close() noexcept {
     {
         const std::scoped_lock lock(mutex_);
         committed_ = false; running_ = false; stopping_ = true; commands_.clear();
-        if (state_) { lua_close(state_); state_ = nullptr; closed = true; }
+        if (state_) { semantics_.reset(); lua_close(state_); state_ = nullptr; closed = true; }
         if (reservedMemory_) { reservedScriptMemory.fetch_sub(maximum_); reservedMemory_ = false; }
         PublishStatus();
     }
@@ -443,6 +457,7 @@ void ScriptRuntime::Close() noexcept {
 void ScriptRuntime::Commit() {
     const std::scoped_lock lock(mutex_);
     committed_ = true;
+    if (semanticQualified_ && host_.semantic) host_.semantic->bridge->Publish(vmGeneration_);
     const std::scoped_lock statusLock(statusMutex_);
     publishedStatus_.running = running_;
 }
@@ -452,6 +467,10 @@ void ScriptRuntime::Tick(double deltaSeconds) {
         const std::scoped_lock control(controlMutex_);
         lane_->Invoke(laneSlot_, [this, deltaSeconds] { Tick(deltaSeconds); }); return;
     }
+    { const std::scoped_lock lock(mutex_); if (semantics_ && running_ && committed_) {
+        try {semantics_->Pump();}
+        catch (...) {lua_settop(state_,0);CaptureDiagnostic("SEMANTIC_PUMP_FAILED");running_=false;semantics_->Stop();PublishStatus();}
+    } }
     const std::scoped_lock lock(mutex_);
     if (!running_ || !committed_ || tickRef_ == -1) return;
     const auto now = std::chrono::steady_clock::now();
@@ -459,8 +478,8 @@ void ScriptRuntime::Tick(double deltaSeconds) {
     lastTick_ = now;
     try {
         Observe(ScriptPhase::Tick); lua_getref(state_, tickRef_); lua_pushnumber(state_, deltaSeconds); Call(1, 0);
-    } catch (const std::exception& error) { running_ = false; CaptureDiagnostic(error.what()); }
-    catch (...) { running_ = false; CaptureDiagnostic("Script callback failed with a nonstandard exception"); }
+    } catch (const std::exception& error) { running_ = false; CaptureDiagnostic(error.what()); if (semantics_) semantics_->Stop(); }
+    catch (...) { running_ = false; CaptureDiagnostic("Script callback failed with a nonstandard exception"); if (semantics_) semantics_->Stop(); }
     PublishStatus();
 }
 
@@ -475,12 +494,14 @@ void ScriptRuntime::Stop() {
     committed_ = false;
     running_ = false;
     stopping_ = true;
+    if(host_.semantic){host_.semantic->closed=true;host_.semantic->scope->RequestStop(runtime::StopReason::ExplicitShutdown);if(bootstrap_)host_.semantic->bridge->Close();}
     commands_.clear();
     if (disableRef_ != -1) {
         try { Observe(ScriptPhase::Disable); lua_getref(state_, disableRef_); Call(0, 0); }
         catch (const std::exception& error) { CaptureDiagnostic(error.what()); }
         catch (...) { CaptureDiagnostic("Script onDisable failed with a nonstandard exception"); }
     }
+    if (semantics_) semantics_->Stop();
     PublishStatus();
 }
 
@@ -515,6 +536,9 @@ std::vector<std::string> ScriptRuntime::DrainLogs() {
     if (!committed_ && running_) return {};
     auto logs = std::move(logs_); logs_.clear(); return logs;
 }
+std::vector<SemanticDiagnostic> ScriptRuntime::SemanticDiagnostics() const {
+    const std::scoped_lock lock(mutex_);return semantics_?semantics_->Diagnostics():std::vector<SemanticDiagnostic>{};
+}
 
 std::vector<ScriptPatchCommand> ScriptRuntime::TakePatchCommands() {
     const std::scoped_lock lock(mutex_);
@@ -522,6 +546,8 @@ std::vector<ScriptPatchCommand> ScriptRuntime::TakePatchCommands() {
 }
 void ScriptRuntime::Fail(std::string diagnostic) {
     const std::scoped_lock lock(mutex_); running_ = false; commands_.clear(); CaptureDiagnostic(diagnostic);
+    // @summary Non-Lua admission closes immediately; registry references remain until the existing lane retires them.
+    if (host_.semantic) {host_.semantic->closed=true;host_.semantic->scope->RequestStop(runtime::StopReason::ActivationFailed);if(bootstrap_)host_.semantic->bridge->Close();}
     PublishStatus();
 }
 

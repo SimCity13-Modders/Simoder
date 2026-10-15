@@ -147,14 +147,31 @@ int main(int argc, char** argv) {
             const std::filesystem::path package(argv[1]);
             BasePackagePin production;
             production.version = InspectSourceManifest(ReadBounded(package / "mod.toml", 4096)).metadata.version;
-            for (const auto* name : {"mod.toml", "scripts/init.luau", "scripts/lib/dag.luau"})
-                production.files.emplace(name, HashText(ReadBounded(package / name, 4U * 1024U * 1024U)));
-            bool unavailable{};
-            try { BaseHost host(package, production); }
-            catch (const std::exception& failure) {
-                unavailable = std::string(failure.what()).find("BASE_DAG_REQUIRED_MISSING:lifecycle") != std::string::npos;
+            production.files.emplace("mod.toml", HashText(ReadBounded(package / "mod.toml", 4096)));
+            for (const auto& file : std::filesystem::recursive_directory_iterator(package / "scripts")) {
+                if (file.is_regular_file()) production.files.emplace(
+                    file.path().lexically_relative(package).generic_string(), HashText(ReadBounded(file.path(), 4U * 1024U * 1024U)));
             }
-            Check(unavailable, "Real base package failed to deny readiness with exact missing critical service");
+            {
+                BaseHost host(package, production);
+                Check(host.Status().running && host.Ready(), "Real critical service graph did not qualify");
+                auto scope = std::make_shared<sc13::runtime::RuntimeScope>();
+                ScriptDefinition denial;
+                denial.entry = "scripts/init.luau"; denial.budgetMs = 20;
+                denial.bytecode = CompileLuauSource(R"(
+                    return { onTick = function()
+                        assert(table.isfrozen(base) and #base.descriptors() == 0)
+                        local value = assert(base.values.validate('{"v":1,"schema":"fixture.v1","value":["null"]}', 'fixture.v1'))
+                        local task, reason = base.request('fixture.unavailable', value)
+                        assert(task == nil and reason == 'NotReady')
+                    end }
+                )");
+                ScriptRuntime denied("fixture.production-denial", denial, host.Bind(scope));
+                denied.Commit();
+                denied.Tick(0);
+                Check(denied.Status().running, "Base readiness granted unavailable production authority");
+                denied.Stop();
+            }
             // Test-only identity: source fixture is reviewed local test code, not a production pin supplier.
             ScriptDefinition dagFixture;
             dagFixture.entry = "scripts/init.luau"; dagFixture.budgetMs = 20;
@@ -164,6 +181,18 @@ int main(int argc, char** argv) {
             dag.Commit();
             Check(dag.Status().running, "Real DAG regression battery failed");
             dag.Stop();
+            // @summary Run authored service units separately; their explicit primitive doubles are not native conformance evidence.
+            ScriptDefinition servicesFixture;
+            servicesFixture.entry = "scripts/init.luau"; servicesFixture.budgetMs = 20;
+            servicesFixture.bytecode = CompileLuauSource(ReadBounded(package / "tests/services.luau", 1024U * 1024U));
+            for (const auto& file : std::filesystem::recursive_directory_iterator(package / "scripts")) {
+                if (file.is_regular_file() && file.path().extension() == ".luau") servicesFixture.modules.emplace(
+                    file.path().lexically_relative(package).generic_string(), CompileLuauSource(ReadBounded(file.path(), 1024U * 1024U)));
+            }
+            ScriptRuntime services("fixture.service-units", servicesFixture);
+            services.Commit();
+            Check(services.Status().running, "Authored service unit battery failed");
+            services.Stop();
         }
         std::filesystem::remove_all(root);
         std::cout << checks << " base host checks passed\n";

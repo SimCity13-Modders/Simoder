@@ -157,6 +157,33 @@ void AllocationFailure() {
     Require(storage.Decode(valid, "test.echo@1", 1, value) == Status::ResourceLimit && !value && !storage.Used() && allocation_probe::attempts == 1, "failed allocation leaked quota");
     Require(storage.Decode(valid, "test.echo@1", 1, value) == Status::Ok && storage.Used() == value.Charge(), "failed allocation poisoned pool");
 }
+/** @summary Verifies physical result arenas, shared ownership, accounting-only leases and allocation-free decode. */
+void ReservedStorage() {
+    Storage storage, foreign;
+    const auto wire = Wire(R"(["u64","18446744073709551615"])");
+    Reservation arena;
+    const auto capacity = Storage::DecodeCapacity(wire.size());
+    Require(storage.Allocate(17, capacity, arena) == Status::Ok && arena.Bytes().size() == capacity && storage.Used(17) == capacity, "physical arena reservation");
+    Envelope output;
+    Require(foreign.DecodeReserved(wire, "test.echo@1", arena, output) == Status::Invalid && arena && !output, "foreign reservation");
+    Require(storage.DecodeReserved(Wire(R"(["bad"])"), "test.echo@1", arena, output) == Status::Invalid && arena && !output, "invalid leaves reservation");
+    allocation_probe::attempts = 0;
+    Require(storage.DecodeReserved(wire, "test.echo@1", arena, output) == Status::Ok && !arena && output.At(0)->bits == UINT64_MAX && allocation_probe::attempts == 0, "reserved decode allocated");
+    Require(output.Charge() == capacity && output.Owner() == 17 && storage.Owns(output, 17) && !storage.Owns(output, 18) && !foreign.Owns(output, 17), "charged arena identity");
+    auto retained = output; output = {}; Require(storage.Used(17) == capacity, "shared reserved lease");
+    retained = {}; Require(!storage.Used(), "reserved final release");
+    Reservation account;
+    Require(storage.Account(17, 1234, account) == Status::Ok && account && account.Bytes().empty() && storage.Used() == 1234, "external capacity accounting");
+    Require(storage.DecodeReserved(wire, "test.echo@1", account, output) == Status::Invalid, "accounting lease is not arena");
+    account = {}; Require(!storage.Used(), "account release");
+    Require(storage.Allocate(17, capacity, arena) == Status::Ok, "alias arena");
+    const auto bytes = arena.Bytes();
+    const std::string_view alias(reinterpret_cast<const char*>(bytes.data()), wire.size());
+    Require(storage.DecodeReserved(alias, "test.echo@1", arena, output) == Status::Invalid && arena, "arena wire alias");
+    arena = {};
+    Require(storage.Allocate(17, 1, arena) == Status::Ok && storage.DecodeReserved(wire, "test.echo@1", arena, output) == Status::ResourceLimit && arena, "too small arena");
+    arena = {}; Require(!storage.Used(), "failed reserved decode cleanup");
+}
 }
 /** @summary Runs private codec conformance and adversarial storage tests. @return Zero on success. */
-int main() { try { Values(); Invalid(); Bounds(); Concurrent(); AllocationFailure(); std::cout << "copied-value conformance PASS\n"; return 0; } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; } }
+int main() { try { Values(); Invalid(); Bounds(); Concurrent(); AllocationFailure(); ReservedStorage(); std::cout << "copied-value conformance PASS\n"; return 0; } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; } }

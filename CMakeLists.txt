@@ -22,6 +22,8 @@ include(FetchContent)
 set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
 set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LUAU_STATIC_CRT ON CACHE BOOL "" FORCE)
+# @summary Native ownership guards require Luau's C++ exception path; longjmp would bypass retained-object cleanup.
+set(LUAU_EXTERN_C OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(luau
     GIT_REPOSITORY https://github.com/luau-lang/luau.git
     GIT_TAG 1f6ff5d6f0072f2fab2adf35d1ffbaae7d848ad0
@@ -82,14 +84,30 @@ add_library(sc13_core STATIC
     src/runtime/runtime_scope.cpp
     src/runtime/runtime_lifecycle.cpp
     src/runtime/copied_value.cpp
+    src/runtime/semantic_tasks.cpp
     src/scripting/script_runtime.cpp
     src/scripting/base_host.cpp
+    src/scripting/semantic_bridge.cpp
+    src/scripting/semantic_lua.cpp
     src/scripting/script_patch_reducer.cpp
     src/scripting/luau_compiler.cpp
     src/scripting/source_project.cpp
 )
 target_include_directories(sc13_core PUBLIC src)
 target_compile_definitions(sc13_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+# @summary Identify diagnostic records by reviewed source/toolchain inputs; binary hashes remain separate release evidence.
+file(GLOB_RECURSE sc13_identity_sources CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
+list(APPEND sc13_identity_sources CMakeLists.txt cmake/simoder-native-sdk.lock.cmake cmake/VerifyNativeSdk.cmake)
+list(SORT sc13_identity_sources)
+set(sc13_identity_material "${PROJECT_VERSION}|${CMAKE_CXX_COMPILER_ID}|${CMAKE_CXX_COMPILER_VERSION}|${CMAKE_SIZEOF_VOID_P}|1f6ff5d6f0072f2fab2adf35d1ffbaae7d848ad0\n")
+foreach(sc13_identity_source IN LISTS sc13_identity_sources)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${sc13_identity_source}")
+    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${sc13_identity_source}" sc13_identity_hash)
+    string(APPEND sc13_identity_material "${sc13_identity_source}:${sc13_identity_hash}\n")
+endforeach()
+string(SHA256 SC13_SEMANTIC_BUILD_ID "${sc13_identity_material}")
+target_compile_definitions(sc13_core PRIVATE SC13_SEMANTIC_BUILD_ID="${SC13_SEMANTIC_BUILD_ID}" SC13_SEMANTIC_BUILD_CONFIG="$<CONFIG>")
 target_link_libraries(sc13_core PUBLIC bcrypt version advapi32 user32 Luau.VM Luau.Compiler)
 sc13_enable_warnings(sc13_core)
 
@@ -189,13 +207,29 @@ endif()
 
 if(SC13_BUILD_TESTS)
     enable_testing()
+    set(SC13_BASE_SOURCE_DIR "" CACHE PATH "Optional separately checked-out Base source for integration tests")
+    set(SC13_BASE_SOURCE_DIR "" CACHE PATH "Optional separately checked-out Base source for integration tests")
+    # @summary Compile the identical Core sources with fixture issuers only into a separate non-installed acceptance host.
+    get_target_property(sc13_semantic_test_sources sc13_core SOURCES)
+    add_library(sc13-semantic-test-support STATIC ${sc13_semantic_test_sources})
+    target_include_directories(sc13-semantic-test-support PUBLIC src)
+    target_compile_definitions(sc13-semantic-test-support PUBLIC SIMODER_RUNTIME_TEST_AUTHORITY UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(sc13-semantic-test-support PRIVATE SC13_SEMANTIC_BUILD_ID="${SC13_SEMANTIC_BUILD_ID}" SC13_SEMANTIC_BUILD_CONFIG="$<CONFIG>")
+    target_link_libraries(sc13-semantic-test-support PUBLIC bcrypt version advapi32 user32 Luau.VM Luau.Compiler)
+    sc13_enable_warnings(sc13-semantic-test-support)
+    add_executable(simoder-semantic-bridge-tests tests/semantic_bridge_tests.cpp)
+    target_link_libraries(simoder-semantic-bridge-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-semantic-bridge-tests)
+    if(SC13_BASE_SOURCE_DIR)
+        add_test(NAME simoder-semantic-bridge-tests COMMAND simoder-semantic-bridge-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-semantic-bridge-tests PROPERTIES TIMEOUT 60)
+    endif()
     # @summary Exercise verified private base hosting without production service readiness.
     add_executable(simoder-base-host-tests tests/base_host_tests.cpp)
     target_link_libraries(simoder-base-host-tests PRIVATE sc13_core)
     sc13_enable_warnings(simoder-base-host-tests)
     add_test(NAME simoder-base-host-tests COMMAND simoder-base-host-tests)
     set_tests_properties(simoder-base-host-tests PROPERTIES TIMEOUT 30)
-    set(SC13_BASE_SOURCE_DIR "" CACHE PATH "Optional separately checked-out Base source for integration tests")
     if(SC13_BASE_SOURCE_DIR)
         add_test(NAME simoder-base-package-tests COMMAND simoder-base-host-tests "${SC13_BASE_SOURCE_DIR}")
         set_tests_properties(simoder-base-package-tests PROPERTIES TIMEOUT 30)
@@ -208,13 +242,14 @@ if(SC13_BUILD_TESTS)
     set_tests_properties(simoder-copied-value-tests PROPERTIES TIMEOUT 30)
     # @summary Compile synthetic authority construction only into an independent, non-installed test library.
     add_library(sc13-runtime-test-support STATIC src/runtime/runtime_scope.cpp src/runtime/runtime_lifecycle.cpp
+        src/runtime/copied_value.cpp src/runtime/semantic_tasks.cpp
         src/platform/runtime_owner.cpp)
     target_include_directories(sc13-runtime-test-support PUBLIC src)
     target_compile_definitions(sc13-runtime-test-support PUBLIC SIMODER_RUNTIME_TEST_AUTHORITY
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(sc13-runtime-test-support PUBLIC bcrypt advapi32)
     sc13_enable_warnings(sc13-runtime-test-support)
-    foreach(suite runtime_scope runtime_lifecycle runtime_owner)
+    foreach(suite runtime_scope runtime_lifecycle runtime_owner semantic_task)
         string(REPLACE "_" "-" suite_name "${suite}")
         add_executable(simoder-${suite_name}-tests tests/${suite}_tests.cpp)
         target_link_libraries(simoder-${suite_name}-tests PRIVATE sc13-runtime-test-support)

@@ -12,21 +12,42 @@
 #include "mods/mod_types.hpp"
 #include "scripting/script_patch_command.hpp"
 #include "runtime/runtime_resource_cache.hpp"
+#include "runtime/runtime_scope.hpp"
 #include <optional>
 #include <atomic>
 #include <array>
 
 struct lua_State;
 namespace sc13::scripting {
+class SemanticLua;
+class SemanticBridge;
+struct SemanticEndpoint;
 /** @summary Carries an owned historical float observation without game addresses or borrowed storage. */
 using FloatObservation = runtime::RuntimeFloatObservation;
 /** @summary Identifies host-authored lifecycle evidence without Lua pointers or mod-owned text. */
 enum class ScriptPhase { Create, Require, Entry, Enable, Tick, Disable, Close };
+/** @summary Host-authored semantic phases; codes never include arbitrary mod paths, payloads or error text. */
+enum class SemanticPhase { Admit,Dispatch,Delivery,Callback,Await,Stop,Fault };
+/** @summary Bounded local correlation record; a build source fingerprint is not a crash symbol-match assertion. */
+struct SemanticDiagnostic final {
+    std::array<char,65> buildIdentity{};
+    std::uint64_t sequence{},monotonicNs{},vmGeneration{},scopeGeneration{},runtimeEpoch{},baseEpoch{},operation{},dropped{};
+    std::array<std::uint64_t,4> contextEpochs{};
+    SemanticPhase phase{};
+    runtime::ScopeResult reason{runtime::ScopeResult::Ok};
+};
 /** @summary Connects a sandbox to copied resource evidence; mutations are drained outside the VM lock. */
 struct ScriptHost final {
+    /** @summary Native host selects whole-mod isolation by default; development isolates only the failed semantic function. */
+    enum class ErrorMode { Regular, Development };
     std::function<std::optional<FloatObservation>(const core::Tgi&, std::uint32_t)> readFloat;
     /** @summary Optional nonreentrant native diagnostics observer; receives only a host phase and private generation ID. */
     std::function<void(ScriptPhase, std::uint64_t)> lifecycle;
+    /** @summary Native-only origin binding, never accepted from a mod manifest or public mod ID. */
+    std::shared_ptr<SemanticEndpoint> semantic;
+    /** @summary Compiler-produced, pin-verified base presentation modules copied into an independent mod VM. */
+    std::map<std::string, std::string> semanticModules;
+    ErrorMode errorMode{ErrorMode::Regular};
 };
 /** @summary Keeps bytecode, source identity and limits in one immutable, compiler-produced generation. */
 struct ScriptDefinition final {
@@ -73,11 +94,16 @@ public:
     [[nodiscard]] ScriptStatus Status() const;
     /** @summary Drains bounded messages; logging happens outside the VM lock. */
     [[nodiscard]] std::vector<std::string> DrainLogs();
+    /** @summary Copies bounded local correlation records through the native host; performs no export or logging file I/O. */
+    [[nodiscard]] std::vector<SemanticDiagnostic> SemanticDiagnostics() const;
     /** @summary Transfers staged or committed requests after a successful callback, without publishing effects. */
     [[nodiscard]] std::vector<ScriptPatchCommand> TakePatchCommands();
     /** @summary Stops callbacks and records a host transaction failure while retaining the last committed overrides. */
     void Fail(std::string diagnostic);
 private:
+    friend class SemanticLua;
+    std::unique_ptr<SemanticLua> semantics_;
+    bool semanticQualified_{};
     friend class BaseHost;
     /** @summary Native-only verified bootstrap role, inaccessible to ordinary callers. */
     struct BaseBootstrap final {};

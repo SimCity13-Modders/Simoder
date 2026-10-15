@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <span>
 
 namespace sc13::runtime::copied {
 /** @summary Private transport tags; references carry no resolved authority. */
@@ -18,6 +19,30 @@ enum class Status { Ok, Invalid, ResourceLimit };
 struct State;
 struct Block;
 class Storage;
+/** @summary Move-only preallocated charged native storage; acquired before effects. */
+class Reservation final {
+public:
+    /** @summary Creates an empty reservation. */
+    Reservation() noexcept = default;
+    /** @summary Transfers reservation ownership. @param other Source. */
+    Reservation(Reservation&& other) noexcept;
+    /** @summary Replaces this reservation. @param other Source. @return This reservation. */
+    Reservation& operator=(Reservation&& other) noexcept;
+    /** @summary Frees allocated capacity and releases its accounting lease. */
+    ~Reservation();
+    Reservation(const Reservation&) = delete;
+    Reservation& operator=(const Reservation&) = delete;
+    /** @summary Borrows reserved bytes. @return Writable capacity. */
+    std::span<std::byte> Bytes() noexcept;
+    /** @summary Tests allocated reservation. @return Presence. */
+    explicit operator bool() const noexcept { return size_ != 0; }
+private:
+    void* memory_{};
+    std::size_t size_{};
+    std::uint64_t owner_{};
+    std::shared_ptr<State> state_;
+    friend class Storage;
+};
 /** @summary Immutable intrusive storage lease; copies share one charged allocation. */
 class Envelope final {
 public:
@@ -45,6 +70,8 @@ public:
     std::string_view Key(const Node& node) const noexcept;
     /** @summary Returns exact requested allocation charge. @return Bytes including header, nodes, wire and decoded payload. */
     std::size_t Charge() const noexcept;
+    /** @summary Reads native charged owner; never establishes authority. @return Accounting generation. */
+    std::uint64_t Owner() const noexcept;
 private:
     explicit Envelope(Block* block) noexcept : block_(block) {}
     Block* block_{};
@@ -63,6 +90,16 @@ public:
         Envelope& output, std::size_t methodLimit = EnvelopeLimit) const noexcept;
     /** @summary Reads aggregate live retained allocation charges. @return Reserved bytes. */
     std::size_t Used() const noexcept;
+    /** @summary Allocates quota-accounted native capacity before effects. @param owner Native generation. @param bytes Capacity. @param output Cleared reservation. @return Allocation status. */
+    Status Allocate(std::uint64_t owner, std::size_t bytes, Reservation& output) const noexcept;
+    /** @summary Charges externally allocated native container capacity before allocation. @param owner Native generation. @param bytes Conservative requested allocation bound. @param output Accounting lease without a backing buffer. @return Reservation status. */
+    Status Account(std::uint64_t owner, std::size_t bytes, Reservation& output) const noexcept;
+    /** @summary Bounds any valid decoded envelope for a wire limit. @param wireLimit Maximum JSON bytes. @return Required arena capacity. */
+    static std::size_t DecodeCapacity(std::size_t wireLimit) noexcept;
+    /** @summary Decodes using already allocated storage without allocation. @param wire Stable JSON. @param schema Exact schema. @param reservation Reserved arena, consumed only on success. @param output Result. @param methodLimit Maximum wire bytes. @return Strict status. */
+    Status DecodeReserved(std::string_view wire, std::string_view schema, Reservation& reservation, Envelope& output, std::size_t methodLimit = EnvelopeLimit) const noexcept;
+    /** @summary Checks exact accounting-pool and owner identity. @param value Lease. @param owner Native generation. @return Matching origin. */
+    bool Owns(const Envelope& value, std::uint64_t owner) const noexcept;
     /** @summary Reads one generation's live charge. @param owner Host-issued identity. @return Reserved bytes. */
     std::size_t Used(std::uint64_t owner) const noexcept;
 private:

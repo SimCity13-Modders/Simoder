@@ -26,6 +26,14 @@ struct ActiveCommit final {
     ActiveCommit* previous;
 };
 thread_local ActiveCommit* activeCommit{};
+/** @summary Stack-only writer identity guard shared by byte and copied-value commits. */
+struct ActiveReservation final {
+    ActiveCommit entry;
+    /** @summary Registers the already locked writer domain. @param domain Native domain identity. */
+    explicit ActiveReservation(const void* domain) : entry{domain, activeCommit} { activeCommit = &entry; }
+    /** @summary Restores the enclosing writer identity. */
+    ~ActiveReservation() { activeCommit = entry.previous; }
+};
 /** @summary Allocates without wraparound reuse. @return Unique nonzero generation or zero. */
 std::uint64_t AllocateGeneration() noexcept {
     auto value = nextGeneration.load();
@@ -48,12 +56,17 @@ struct RuntimeScope::State final {
     };
     /** @summary Retained copied operation with explicit nonreplayable completion. */
     struct Operation final {
-        enum class Phase { Queued, Running, Completed, Cancelled };
+        enum class Phase { Queued, Preparing, Running, Completed, Cancelled };
         OperationContext context;
         std::vector<std::byte> input;
         std::vector<std::byte> result;
         Phase phase{Phase::Queued};
         ScopeResult outcome{ScopeResult::Busy};
+        std::shared_ptr<copied::Storage> storage;
+        copied::Envelope valueInput, valueResult;
+        copied::Reservation resultArena, resultWire, metadata;
+        bool valueOperation{};
+        bool committed{};
     };
     mutable std::mutex mutex;
     std::shared_ptr<RuntimeCommitDomain> domain;
@@ -67,6 +80,7 @@ struct RuntimeScope::State final {
     std::uint64_t nextOperation{1};
     std::uint64_t nextSession{1};
     std::size_t running{};
+    std::size_t registrations{};
     std::uint32_t readiness{};
     bool ownerAvailable{};
     bool authorityAvailable{};
@@ -107,7 +121,7 @@ void RuntimeScope::RequestStop(StopReason reason) noexcept {
     for (auto& [id, grant] : state->grants) { (void)id; grant.revoked = true; }
     for (auto& [id, operation] : state->operations) {
         (void)id;
-        if (operation.phase == State::Operation::Phase::Queued) {
+        if (operation.phase == State::Operation::Phase::Queued || operation.phase == State::Operation::Phase::Preparing) {
             --state->domain->pending_;
             operation.phase = State::Operation::Phase::Cancelled;
             operation.outcome = ScopeResult::Cancelled;
@@ -133,9 +147,20 @@ bool RuntimeScope::DrainFor(std::chrono::milliseconds timeout) {
 bool RuntimeScope::RetainResource(std::shared_ptr<void> resource) {
     if (!resource) return false;
     const std::lock_guard lock(state_->mutex);
-    if (state_->stopping || state_->domain->IsStopping() || state_->resources.size() >= MaxRetainedResources) return false;
+    if (state_->stopping || state_->domain->IsStopping() || state_->resources.size() + state_->registrations >= MaxRetainedResources) return false;
     state_->resources.push_back(std::move(resource));
     return true;
+}
+bool RuntimeScope::ReserveRegistration() {
+    const std::lock_guard lock(state_->mutex);
+    if (state_->stopping || state_->domain->IsStopping() ||
+        state_->resources.size() + state_->registrations >= MaxRetainedResources) return false;
+    ++state_->registrations;
+    return true;
+}
+void RuntimeScope::ReleaseRegistration() noexcept {
+    const std::lock_guard lock(state_->mutex);
+    if (state_->registrations) --state_->registrations;
 }
 ScopeSnapshot RuntimeScope::Current() const {
     const std::lock_guard lock(state_->mutex);
@@ -193,14 +218,7 @@ ScopeResult RuntimeScope::Commit(const OperationContext& context, ScopeHandle op
         if (active->domain == state->domain.get()) return ScopeResult::Busy;
     std::unique_lock lane(state->domain->lane_, std::try_to_lock);
     if (!lane.owns_lock()) return ScopeResult::Busy;
-    /** @summary Restore the active domain stack on every return/exception without heap allocation. */
-    struct Reservation final {
-        ActiveCommit entry;
-        /** @summary Registers this thread's already locked domain. @param domain Owned lane identity. */
-        explicit Reservation(const void* domain) : entry{domain, activeCommit} { activeCommit = &entry; }
-        /** @summary Restores enclosing different-domain reservation. */
-        ~Reservation() { activeCommit = entry.previous; }
-    } reservation(state->domain.get());
+    ActiveReservation reservation(state->domain.get());
     std::vector<std::byte> input;
     {
         const std::lock_guard lock(state->mutex);
@@ -208,6 +226,7 @@ ScopeResult RuntimeScope::Commit(const OperationContext& context, ScopeHandle op
         const auto found = state->operations.find(operation.serial);
         if (found == state->operations.end()) return ScopeResult::Stale;
         if (!(found->second.context == context)) return ScopeResult::Denied;
+        if (found->second.valueOperation) return ScopeResult::Invalid;
         if (found->second.phase == State::Operation::Phase::Cancelled) return ScopeResult::Cancelled;
         if (found->second.phase != State::Operation::Phase::Queued) return ScopeResult::Stale;
         const auto valid = Validate(*state, context, true);
@@ -278,11 +297,151 @@ ScopeResult RuntimeScope::Release(std::uint64_t owner, ScopeHandle operation) {
     if (found == state_->operations.end()) return ScopeResult::Stale;
     if (found->second.phase == State::Operation::Phase::Running) return ScopeResult::Busy;
     if (found->second.phase == State::Operation::Phase::Queued) --state_->domain->pending_;
+    if (found->second.phase == State::Operation::Phase::Preparing) --state_->domain->pending_;
     state_->operations.erase(found);
     return ScopeResult::Ok;
 }
 
+ScopeResult RuntimeScope::QueueValue(const OperationContext& context, const copied::Envelope& input,
+                                    const std::shared_ptr<copied::Storage>& storage,
+                                    std::size_t maxResultWire, ScopeHandle& output) {
+    output = {};
+    if (!storage || !storage->Owns(input, context.owner) || !maxResultWire || maxResultWire > copied::Storage::EnvelopeLimit)
+        return ScopeResult::Invalid;
+    const std::lock_guard lock(state_->mutex);
+    const auto valid = Validate(*state_, context, true);
+    if (valid != ScopeResult::Ok) return valid;
+    if (state_->operations.size() >= MaxRetainedOperations || state_->nextOperation == UINT64_MAX) return ScopeResult::Busy;
+    State::Operation operation;
+    // @summary Map node payload plus links/alignment is conservatively accounted before emplace.
+    if (storage->Account(context.owner, sizeof(State::Operation) + 128, operation.metadata) != copied::Status::Ok ||
+        storage->Allocate(context.owner, copied::Storage::DecodeCapacity(maxResultWire), operation.resultArena) != copied::Status::Ok ||
+        storage->Allocate(context.owner, maxResultWire, operation.resultWire) != copied::Status::Ok) return ScopeResult::Busy;
+    operation.context = context; operation.valueInput = input; operation.storage = storage; operation.valueOperation = true;
+    auto pending = state_->domain->pending_.load();
+    do { if (pending >= MaxPendingOperations) return ScopeResult::Busy; }
+    while (!state_->domain->pending_.compare_exchange_weak(pending, pending + 1));
+    const auto serial = state_->nextOperation++;
+    try { state_->operations.emplace(serial, std::move(operation)); }
+    catch (...) { --state_->domain->pending_; return ScopeResult::Busy; }
+    output = {state_->generation, serial};
+    return ScopeResult::Ok;
+}
+ScopeResult RuntimeScope::BeginValue(ScopeHandle operation) {
+    const std::lock_guard lock(state_->mutex);
+    if (operation.owner != state_->generation) return ScopeResult::Stale;
+    const auto found = state_->operations.find(operation.serial);
+    if (found == state_->operations.end() || !found->second.valueOperation) return ScopeResult::Stale;
+    auto& retained = found->second;
+    const auto valid = Validate(*state_, retained.context, true);
+    if (valid != ScopeResult::Ok) return valid;
+    if (retained.phase == State::Operation::Phase::Cancelled) return ScopeResult::Cancelled;
+    if (retained.phase != State::Operation::Phase::Queued) return ScopeResult::Stale;
+    retained.phase = State::Operation::Phase::Preparing;
+    return ScopeResult::Ok;
+}
+ScopeResult RuntimeScope::CommitValue(ScopeHandle operation, const ValueCallback& callback,
+                                    const std::function<ScopeResult()>& precommit) {
+    if (!callback) return ScopeResult::Invalid;
+    const auto state = state_;
+    for (const auto* active = activeCommit; active; active = active->previous)
+        if (active->domain == state->domain.get()) return ScopeResult::Busy;
+    std::unique_lock lane(state->domain->lane_, std::try_to_lock);
+    if (!lane.owns_lock()) return ScopeResult::Busy;
+    ActiveReservation guard(state->domain.get());
+    State::Operation* retained{};
+    {
+        const std::lock_guard lock(state->mutex);
+        if (operation.owner != state->generation) return ScopeResult::Stale;
+        const auto found = state->operations.find(operation.serial);
+        if (found == state->operations.end() || !found->second.valueOperation) return ScopeResult::Stale;
+        retained = &found->second;
+        if (retained->phase == State::Operation::Phase::Cancelled) return ScopeResult::Cancelled;
+        if (retained->phase != State::Operation::Phase::Preparing) return ScopeResult::Stale;
+        const auto valid = Validate(*state, retained->context, true);
+        if (valid != ScopeResult::Ok) return valid;
+        // @summary Trusted preflight reads only native atomic fences; no Lua, allocation or reentrant lock acquisition is permitted.
+        if (precommit) {
+            ScopeResult fenced = ScopeResult::Denied;
+            try { fenced = precommit(); } catch (...) { return ScopeResult::Denied; }
+            if (fenced != ScopeResult::Ok) return fenced;
+        }
+        if (state->domain->revision_.load() == UINT64_MAX) return ScopeResult::Conflict;
+        retained->phase = State::Operation::Phase::Running;
+        retained->committed = true;
+        ++state->running; ++state->domain->revision_;
+    }
+    ScopeResult outcome = ScopeResult::Indeterminate;
+    copied::Envelope result;
+    try {
+        const auto bytes = retained->resultWire.Bytes();
+        std::span<char> wire(reinterpret_cast<char*>(bytes.data()), bytes.size());
+        std::size_t written{};
+        const bool verified = callback(retained->valueInput, wire, written);
+        if (verified && written <= wire.size() &&
+            retained->storage->DecodeReserved({wire.data(), written}, retained->valueInput.Schema(), retained->resultArena, result, wire.size()) == copied::Status::Ok)
+            outcome = ScopeResult::Ok;
+    } catch (...) { outcome = ScopeResult::Indeterminate; }
+    {
+        const std::lock_guard lock(state->mutex);
+        retained->valueResult = std::move(result);
+        retained->outcome = outcome;
+        retained->phase = State::Operation::Phase::Completed;
+        retained->valueInput = {}; retained->resultArena = {}; retained->resultWire = {};
+        --state->running; --state->domain->pending_;
+        state->drained.notify_all();
+    }
+    return outcome;
+}
+ScopeResult RuntimeScope::FinishValue(ScopeHandle operation, ScopeResult reason) {
+    if (reason == ScopeResult::Ok || reason == ScopeResult::Indeterminate) return ScopeResult::Invalid;
+    const std::lock_guard lock(state_->mutex);
+    if (operation.owner != state_->generation) return ScopeResult::Stale;
+    const auto found = state_->operations.find(operation.serial);
+    if (found == state_->operations.end() || !found->second.valueOperation) return ScopeResult::Stale;
+    auto& retained = found->second;
+    // @summary Owner-bound native failure cleanup cannot disclose payloads or execute effects; revoked work must release pending capacity.
+    if (reason == ScopeResult::Cancelled && retained.committed) return ScopeResult::Busy;
+    if (retained.phase == State::Operation::Phase::Running) return ScopeResult::Busy;
+    if (retained.phase == State::Operation::Phase::Completed || retained.phase == State::Operation::Phase::Cancelled) return ScopeResult::Stale;
+    retained.outcome = reason;
+    retained.phase = reason == ScopeResult::Cancelled ? State::Operation::Phase::Cancelled : State::Operation::Phase::Completed;
+    retained.valueInput = {}; retained.resultArena = {}; retained.resultWire = {};
+    --state_->domain->pending_;
+    return ScopeResult::Ok;
+}
+ScopeResult RuntimeScope::PollValue(ScopeHandle operation, TaskSnapshot& output) const {
+    output = {};
+    const std::lock_guard lock(state_->mutex);
+    if (operation.owner != state_->generation) return ScopeResult::Stale;
+    const auto found = state_->operations.find(operation.serial);
+    if (found == state_->operations.end() || !found->second.valueOperation) return ScopeResult::Stale;
+    const auto& retained = found->second;
+    const auto valid = Validate(*state_, retained.context, false);
+    if (valid != ScopeResult::Ok) return valid;
+    output.committed = retained.committed; output.outcome = retained.outcome;
+    switch (retained.phase) {
+    case State::Operation::Phase::Queued: output.state = TaskState::Queued; break;
+    case State::Operation::Phase::Preparing: case State::Operation::Phase::Running: output.state = TaskState::Running; break;
+    case State::Operation::Phase::Cancelled: output.state = TaskState::Cancelled; break;
+    case State::Operation::Phase::Completed:
+        output.state = retained.outcome == ScopeResult::Ok ? TaskState::Succeeded : retained.outcome == ScopeResult::Indeterminate ? TaskState::Indeterminate : TaskState::Failed;
+        output.value = retained.valueResult; break;
+    }
+    return ScopeResult::Ok;
+}
+ScopeResult RuntimeScope::CancelValue(ScopeHandle operation) {
+    TaskSnapshot snapshot;
+    const auto access = PollValue(operation, snapshot);
+    if (access != ScopeResult::Ok) return access;
+    return FinishValue(operation, ScopeResult::Cancelled);
+}
+
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+std::size_t RuntimeScopeTestAccess::Registrations(const RuntimeScope& scope) {
+    const std::lock_guard lock(scope.state_->mutex);
+    return scope.state_->registrations;
+}
 std::unique_ptr<RuntimeScope> RuntimeScopeTestAccess::Create(std::shared_ptr<RuntimeCommitDomain> domain) {
     auto scope = std::make_unique<RuntimeScope>(nullptr, std::move(domain));
     scope->state_->ownerAvailable = true;

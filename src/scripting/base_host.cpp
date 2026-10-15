@@ -1,4 +1,5 @@
 #include "scripting/base_host.hpp"
+#include "scripting/semantic_bridge.hpp"
 #include "scripting/source_project.hpp"
 #include "scripting/luau_compiler.hpp"
 #include "../../third_party/tomlplusplus/toml.hpp"
@@ -92,13 +93,17 @@ ScriptDefinition Capture(const std::filesystem::path& root, const BasePackagePin
 }
 
 BaseHost::BaseHost(const std::filesystem::path& directory, BasePackagePin pin,
-    std::function<void(ScriptPhase, std::uint64_t)> observer) {
+    std::function<void(ScriptPhase, std::uint64_t)> observer, std::shared_ptr<SemanticBridge> bridge) {
     bool expected{};
     if (!occupied.compare_exchange_strong(expected, true)) throw std::runtime_error("Base host already exists");
     ownsSlot_ = true;
     try {
         const auto definition = Capture(std::filesystem::absolute(directory).lexically_normal(), pin);
-        ScriptHost host; host.lifecycle = std::move(observer);
+        bridge_=bridge ? std::move(bridge) : std::make_shared<SemanticBridge>();
+        for (const auto& [name,code]:definition.modules)
+            if (name.starts_with("scripts/lib/") && name != "scripts/lib/dag.luau")
+                presentationModules_.emplace("scripts/.simoder-base/"+name.substr(12),code);
+        ScriptHost host; host.lifecycle = std::move(observer); host.semantic=bridge_->Bind({});
         runtime_.reset(new ScriptRuntime(ScriptRuntime::BaseBootstrap{}, definition, std::move(host)));
         runtime_->Commit();
     } catch (...) { occupied.store(false); ownsSlot_ = false; throw; }
@@ -109,4 +114,9 @@ BaseHost::~BaseHost() {
 }
 ScriptStatus BaseHost::Status() const { return runtime_->Status(); }
 std::vector<std::string> BaseHost::DrainLogs() { return runtime_->DrainLogs(); }
+ScriptHost BaseHost::Bind(std::shared_ptr<runtime::RuntimeScope> scope) const {
+    ScriptHost host; host.semantic=bridge_->Bind(std::move(scope)); host.semanticModules=presentationModules_; return host;
+}
+void BaseHost::Pump() { runtime_->Tick(0); }
+bool BaseHost::Ready() const noexcept { return bridge_ && bridge_->ReadyGeneration()!=0; }
 }

@@ -284,6 +284,13 @@ private:
 };
 }
 
+Reservation::Reservation(Reservation&& other) noexcept : memory_(std::exchange(other.memory_, nullptr)), size_(std::exchange(other.size_, 0)), owner_(other.owner_), state_(std::move(other.state_)) {}
+Reservation& Reservation::operator=(Reservation&& other) noexcept {
+    if (this != &other) { Reservation previous(std::move(*this)); memory_ = std::exchange(other.memory_, nullptr); size_ = std::exchange(other.size_, 0); owner_ = other.owner_; state_ = std::move(other.state_); }
+    return *this;
+}
+Reservation::~Reservation() { if (size_) { ::operator delete(memory_); Release(*state_, owner_, size_); } }
+std::span<std::byte> Reservation::Bytes() noexcept { return memory_ ? std::span<std::byte>(static_cast<std::byte*>(memory_), size_) : std::span<std::byte>{}; }
 Envelope::Envelope(const Envelope& other) noexcept : block_(other.block_) { if (block_) block_->refs.fetch_add(1, std::memory_order_relaxed); }
 Envelope::Envelope(Envelope&& other) noexcept : block_(std::exchange(other.block_, nullptr)) {}
 Envelope& Envelope::operator=(Envelope other) noexcept { std::swap(block_, other.block_); return *this; }
@@ -299,6 +306,53 @@ const Node* Envelope::At(std::uint32_t index) const noexcept { return block_ && 
 std::string_view Envelope::Text(const Node& node) const noexcept { return block_ && node.offset <= block_->textSize && node.size <= block_->textSize - node.offset ? std::string_view(Texts(block_) + node.offset, node.size) : std::string_view{}; }
 std::string_view Envelope::Key(const Node& node) const noexcept { return block_ && node.keyOffset <= block_->textSize && node.keySize <= block_->textSize - node.keyOffset ? std::string_view(Texts(block_) + node.keyOffset, node.keySize) : std::string_view{}; }
 std::size_t Envelope::Charge() const noexcept { return block_ ? block_->charge : 0; }
+std::uint64_t Envelope::Owner() const noexcept { return block_ ? block_->owner : 0; }
+Status Storage::Allocate(std::uint64_t owner, std::size_t bytes, Reservation& output) const noexcept {
+    output = {};
+    if (!owner || !bytes) return Status::Invalid;
+    if (!Reserve(*state_, owner, bytes)) return Status::ResourceLimit;
+    auto* memory = ::operator new(bytes, std::nothrow);
+    if (!memory) { Release(*state_, owner, bytes); return Status::ResourceLimit; }
+    output.memory_ = memory; output.size_ = bytes; output.owner_ = owner; output.state_ = state_;
+    return Status::Ok;
+}
+Status Storage::Account(std::uint64_t owner, std::size_t bytes, Reservation& output) const noexcept {
+    output = {};
+    if (!owner || !bytes) return Status::Invalid;
+    if (!Reserve(*state_, owner, bytes)) return Status::ResourceLimit;
+    output.size_ = bytes; output.owner_ = owner; output.state_ = state_;
+    return Status::Ok;
+}
+std::size_t Storage::DecodeCapacity(std::size_t wireLimit) noexcept {
+    return wireLimit <= EnvelopeLimit ? sizeof(Block) + 4096 * sizeof(Node) + 2 * wireLimit : 0;
+}
+bool Storage::Owns(const Envelope& value, std::uint64_t owner) const noexcept {
+    return value.block_ && value.block_->state == state_ && value.block_->owner == owner;
+}
+Status Storage::DecodeReserved(std::string_view wire, std::string_view schema, Reservation& reservation, Envelope& output, std::size_t methodLimit) const noexcept {
+    Envelope previous(std::move(output));
+    if (!reservation.memory_ || reservation.state_ != state_ || !reservation.owner_ || schema.empty() || schema.size() > 65536) return Status::Invalid;
+    if (wire.size() > EnvelopeLimit || wire.size() > methodLimit) return Status::ResourceLimit;
+    // @summary Arena writes cannot overlap either borrowed input; pointer comparisons use integer address distances.
+    const auto overlaps = [&](std::string_view input) noexcept {
+        if (input.empty()) return false;
+        const auto start = reinterpret_cast<std::uintptr_t>(input.data());
+        const auto arena = reinterpret_cast<std::uintptr_t>(reservation.memory_);
+        return start >= arena ? start - arena < reservation.size_ : arena - start < input.size();
+    };
+    if (overlaps(wire) || overlaps(schema)) return Status::Invalid;
+    Parser count(wire, schema); const auto status = count.Parse(); if (status != Status::Ok) return status;
+    const auto required = sizeof(Block) + count.nodes_ * sizeof(Node) + count.text_ + wire.size();
+    if (required > reservation.size_) return Status::ResourceLimit;
+    auto* block = new (reservation.memory_) Block;
+    block->state = state_; block->charge = reservation.size_; block->wireSize = wire.size(); block->textSize = count.text_; block->owner = reservation.owner_; block->nodes = static_cast<std::uint32_t>(count.nodes_);
+    for (std::size_t i = 0; i < count.nodes_; ++i) new (Nodes(block) + i) Node;
+    Parser write(wire, schema, block); const auto written = write.Parse();
+    if (written != Status::Ok || write.nodes_ != count.nodes_ || write.text_ != count.text_) { block->~Block(); return Status::Invalid; }
+    std::memcpy(Texts(block) + count.text_, wire.data(), wire.size());
+    reservation.memory_ = nullptr; reservation.size_ = 0; reservation.state_.reset();
+    output = Envelope(block); return Status::Ok;
+}
 Storage::Storage() : state_(std::make_shared<State>()) {}
 Status Storage::Decode(std::string_view wire, std::string_view schema, std::uint64_t owner, Envelope& output, std::size_t methodLimit) const noexcept {
     Envelope previous(std::move(output));

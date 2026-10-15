@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include "runtime/copied_value.hpp"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -49,6 +50,15 @@ struct ScopeSnapshot final {
     bool activationCommitted{};
     bool stopping{};
     bool drained{};
+};
+/** @summary Task phase is independent of its irreversible commit marker. */
+enum class TaskState { Queued, Running, Succeeded, Failed, Cancelled, Indeterminate };
+/** @summary Copied delivery view; denial clears the view without changing retained outcome. */
+struct TaskSnapshot final {
+    TaskState state{TaskState::Queued};
+    bool committed{};
+    ScopeResult outcome{ScopeResult::Busy};
+    copied::Envelope value;
 };
 
 /** @summary One core-owned writer lane/revision shared across independently revocable module scopes. */
@@ -100,6 +110,11 @@ public:
     bool DrainFor(std::chrono::milliseconds timeout);
     /** @summary Retains a dependency until safe drain. @param resource Core-owned resource. @return False at capacity or after stop. */
     bool RetainResource(std::shared_ptr<void> resource);
+    /** @summary Reserve one continuation slot in the same generation budget as retained native dependencies.
+     * @return False after stop or when the shared 64-resource ceiling is reached. */
+    bool ReserveRegistration();
+    /** @summary Return one reserved continuation slot without disclosing any task result. */
+    void ReleaseRegistration() noexcept;
     /** @summary Copies current state. @return Snapshot without principal or credential secrets. */
     ScopeSnapshot Current() const;
     /** @summary Copies bounded input only after all current mandatory and permission gates.
@@ -120,6 +135,24 @@ public:
     /** @summary Releases owned retained data even after revocation, without revealing it.
      * @param owner Issuing scope generation. @param operation Issued operation. @return Stale/denied/busy or successful cleanup. */
     ScopeResult Release(std::uint64_t owner, ScopeHandle operation);
+    /** @summary Trusted bounded effect writes JSON and verifies its postcondition. */
+    using ValueCallback = std::function<bool(const copied::Envelope&, std::span<char>, std::size_t&)>;
+    /** @summary Reserves authority-bound task and native capacity before effects. @param context Host context. @param input Retained value. @param storage Shared pool. @param maxResultWire Reviewed limit. @param output Issued handle. @return Admission result. */
+    ScopeResult QueueValue(const OperationContext& context, const copied::Envelope& input, const std::shared_ptr<copied::Storage>& storage, std::size_t maxResultWire, ScopeHandle& output);
+    /** @summary Starts cancelable preparation. @param operation Native handle. @return Current gate. */
+    ScopeResult BeginValue(ScopeHandle operation);
+    /** @summary Revalidates then commits once on the existing writer domain. @param operation Native handle. @param callback Trusted effect.
+     * @param guard Optional private atomic context fence; must not allocate, enter Lua or acquire locks.
+     * @return Terminal outcome or precommit rejection without effects. */
+    ScopeResult CommitValue(ScopeHandle operation, const ValueCallback& callback,
+        const std::function<ScopeResult()>& guard = {});
+    /** @summary Settles native owner-bound uncommitted work even after revocation; neither executes effects nor discloses payloads.
+     * @param operation Native handle. @param reason Failure status. @return Completion status. */
+    ScopeResult FinishValue(ScopeHandle operation, ScopeResult reason);
+    /** @summary Revalidates delivery and shares a charged immutable result. @param operation Native handle. @param output Cleared on denial. @return Delivery status. */
+    ScopeResult PollValue(ScopeHandle operation, TaskSnapshot& output) const;
+    /** @summary Cancels queued/running-uncommitted task. @param operation Native handle. @return Cancellation status. */
+    ScopeResult CancelValue(ScopeHandle operation);
 private:
     struct State;
     std::shared_ptr<State> state_;
@@ -136,6 +169,8 @@ private:
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 /** @summary Synthetic authority exists only in separately compiled test targets, never runtime/Core. */
 struct RuntimeScopeTestAccess final {
+    /** @summary Inspect fixture cleanup without reopening a stopped generation. @param scope Fixture owner. @return Retained continuation slots. */
+    static std::size_t Registrations(const RuntimeScope& scope);
     /** @summary Constructs a closed synthetic owner, never touching the production Global object.
      * @param domain Optional shared test writer lane. @return Test scope with deliberately local authority store. */
     static std::unique_ptr<RuntimeScope> Create(std::shared_ptr<RuntimeCommitDomain> domain = {});
