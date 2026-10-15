@@ -15,6 +15,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+include(cmake/VerifyNativeSdk.cmake)
 
 # @summary Pin the statically linked bytecode compiler and VM to one revision.
 include(FetchContent)
@@ -72,6 +73,7 @@ add_library(sc13_core STATIC
     src/mods/mod_manager.cpp
     src/mods/mod_state_store.cpp
     src/mods/mod_types.cpp
+    src/mods/native/native_module_loader.cpp
     src/mods/resource_project.cpp
     src/mods/patch_registry.cpp
     src/reverse/pe_file.cpp

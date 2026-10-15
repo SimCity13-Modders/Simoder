@@ -5,6 +5,8 @@ separation of responsibilities and actual extraction status. Internal source
 libraries, future public SDKs and optional example packages are distinct boundaries.
 See the [internal U1 runtime foundation](architecture/runtime-foundation.md) for
 generic ownership, closed admission, dispatch, and retained shutdown contracts.
+The [native module boundary](architecture/native-module-boundary.md) documents
+the qualified DLL profile, canonical SDK declarations and DevTools fixture scope.
 
 ## Runtime flow
 

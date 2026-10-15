@@ -17,6 +17,10 @@ There is no launcher, injector, binary extractor or bundled Node.js. The Luau VM
 and compiler are statically linked. Examples, developer executables, optional
 authoring toolchains and IDE support belong to Simoder-DevTools.
 
+The internal [native module boundary](docs/architecture/native-module-boundary.md)
+is qualified with separate DevTools fixtures. Production native admission remains
+closed until the required base provider is available.
+
 For the supported EA directory layout:
 
 ```text
