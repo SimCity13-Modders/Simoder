@@ -7,11 +7,11 @@ rename does not establish an independent repository or compatible package.
 | Repository | Responsibility and current extraction status |
 | --- | --- |
 | Simoder | Existing single x86 runtime DLL, native game adapters and enforced low-level primitives. Internal implementation headers are not a stable native-mod ABI. |
-| Simoder-OpenSCP | Separate upstream-compliant application/ModStudio fork; excluded from the current cleanup. |
+| Simoder-OpenSCP | Separate upstream-compliant application/ModStudio fork; owns conversion and resource inspection. Its current branch/PR is excluded from this cleanup; ownership does not claim complete replacement feature parity. |
 | Simoder-Base | Entirely Luau, project-authored public lifecycle/UI/API abstractions; not yet extracted as an implemented standalone package. |
 | Simoder-DevTools-MCP | Optional native MCP mod target. Current coupled C# executables remain legacy migration input, not a completed native package. |
 | Simoder-DevTools-Authoring | Authoring/compiler coordination and editor integration; existing host implementation still in original DevTools pending extraction. |
-| Simoder-DevTools-Diagnostics | Diagnostic mod target. Existing host utilities require classification; EA launcher compatibility stays host tooling, not runtime-mod responsibility. |
+| Simoder-DevTools-Diagnostics | Diagnostic mod target; current MCP/REA paths provide existing diagnostic operations. Standalone PE/memory probe products are retired; no claim of complete MCP PE feature parity. |
 | Simoder-SDK | Existing Luau and legacy TS declarations now have a separate canonical repository and versioned manifest. Hash-verified vendored compatibility artifacts preserve current editor/compiler paths. Public native ABI remains unimplemented; broad Simoder::Core implementation is not this SDK. |
 | Simoder-Mod-Examples | First physical extraction: four existing example projects, new local Git history, independent source/package tests and original notices. No RoadBuilder/BusLine implementation is claimed. |
 | Simoder-Mod-Templates | Separate simple cloneable templates; existing examples are not silently relabeled templates. |
@@ -39,3 +39,8 @@ HTTP/TLS interoperability or public release readiness. Further cutovers need
 dependency closure, regression/parity evidence and independent audit. Game data,
 private converted projects and investigation evidence must not enter examples,
 templates or SDK packages. The original mod notices remain required under MIT.
+
+The prototype/alpha does not require format/API migration support. The first
+real Beta release establishes the backwards-compatibility baseline; see
+[compatibility policy](compatibility.md). Retaining current input validation,
+integrity and permission checks is independent of historical format support.

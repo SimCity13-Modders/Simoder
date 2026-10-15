@@ -38,8 +38,6 @@ lookup, and returns. It does not scan mods, parse manifests, access the filesyst
   planning, and controlled-detach restoration snapshots.
 - `RuntimeDiagnostics`: owned polling worker for pending-definition detection and atomic JSON
   publication; stops before hook/service shutdown and performs no hot-path filesystem work.
-- `simoder-dev`: offline source validation, ordered dry-run, JSON explanations, catalog search
-  and new-mod scaffolding using the same typed parser/arithmetic as runtime.
 - `Simoder overlay`: rendering and input only; callbacks invoke `ModManager`.
 - `AsyncLogger`: the only file/console sinks. Producers emit semantic events.
 - `sc13_core`: game-independent TGI, hash, DBPF, RefPack, PROP, TOON, patch, and state logic.
@@ -99,8 +97,8 @@ paths and both need lifecycle coverage.
 - unsafe resource layout/type/value: that resource remains unchanged;
 - existing objects that cannot be recreated safely: only future loads receive the new generation.
 
-OpenSCP property-export interchange and registry dictionaries are offline adapters.
-Package migration also belongs to DevTools. Supported scripts run in the sandboxed
+Conversion and resource inspection belong to the OpenSCP fork. The obsolete
+standalone validation/conversion and probe executables are retired. Supported scripts run in the sandboxed
 Luau VM. Arbitrary machine-code patching and unverified resource registration are
 not supported runtime capabilities.
 
