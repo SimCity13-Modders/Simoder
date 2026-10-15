@@ -32,7 +32,10 @@ void Write(const std::filesystem::path& path, std::string_view text) {
 struct Staging final {
     std::filesystem::path path;
     /** @summary Best-effort cleanup cannot replace the original compiler exception. */
-    ~Staging() { std::error_code error; std::filesystem::remove_all(path, error); }
+    ~Staging() {
+        try { std::error_code error; std::filesystem::remove_all(NativePath(path), error); }
+        catch (...) { /* Cleanup must not replace the original compiler failure. */ }
+    }
 };
 }
 
@@ -42,12 +45,12 @@ void CompileLuauGeneration(const SourceProject& source, const std::filesystem::p
     static std::atomic_uint64_t sequence{};
     Staging staging{generation.parent_path() / ("staging-" + std::to_string(GetCurrentProcessId()) +
         "-" + std::to_string(GetTickCount64()) + "-" + std::to_string(sequence.fetch_add(1)))};
-    if (!std::filesystem::create_directory(staging.path)) throw std::runtime_error("Cannot create compiler staging");
+    if (!std::filesystem::create_directory(NativePath(staging.path))) throw std::runtime_error("Cannot create compiler staging");
     const auto bytecode = Compile(ReadBounded(SourcePath(source.directory, source.entry), 8U * 1024U * 1024U));
     Write(staging.path / "script.luau.bin", bytecode);
     std::string descriptor = "schemaVersion = 1\nsourceFingerprint = " + core::JsonString(source.fingerprint) +
         "\nbytecodeSha256 = " + core::JsonString(HashText(bytecode)) + "\n";
-    std::filesystem::create_directory(staging.path / "modules");
+    std::filesystem::create_directory(NativePath(staging.path / "modules"));
     std::size_t total = bytecode.size();
     for (const auto& file : std::filesystem::recursive_directory_iterator(source.directory / "scripts")) {
         if (!file.is_regular_file() || file.path().extension() != ".luau") continue;
@@ -64,8 +67,10 @@ void CompileLuauGeneration(const SourceProject& source, const std::filesystem::p
     if (InspectSourceProject(source.directory).fingerprint != source.fingerprint)
         throw std::runtime_error("Source changed during compilation; active generation retained");
     Write(staging.path / "generation.toml", descriptor);
-    if (!MoveFileExW(NativePath(staging.path).c_str(), NativePath(generation).c_str(), MOVEFILE_WRITE_THROUGH) &&
-        !std::filesystem::is_regular_file(generation / "generation.toml"))
-        throw std::runtime_error("Cannot publish compiled generation");
+    if (!PublishGeneration(staging.path, generation)) {
+        mods::ModDefinition validated; std::string error;
+        if (!LoadSourceProject(source.directory, validated, error))
+            throw std::runtime_error("Existing compiled generation rejected: " + error);
+    }
 }
 }

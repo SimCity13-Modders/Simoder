@@ -42,4 +42,12 @@ void RunTool(const std::filesystem::path& executable, const std::vector<std::wst
 [[nodiscard]] std::string HashText(std::string_view bytes);
 /** @summary Adds the extended Win32 path prefix for deep immutable cache generations. */
 [[nodiscard]] std::filesystem::path NativePath(const std::filesystem::path& path);
+/** @summary Atomically publish one anchored plain staging directory without replacing a destination.
+ * @param staging Owned unpublished directory beside the destination.
+ * @param generation Immutable destination in the same plain parent directory.
+ * @return True after publication; false when a destination exists and requires full caller validation.
+ * @throws std::runtime_error Invalid identity/admission or publication failure; only errors 5/32 receive
+ * at most 11 attempts within 500 ms plus native-call overhead. No copy or replacement fallback exists.
+ */
+[[nodiscard]] bool PublishGeneration(const std::filesystem::path& staging, const std::filesystem::path& generation);
 }

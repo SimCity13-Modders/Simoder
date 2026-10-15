@@ -13,6 +13,7 @@
 #include <fstream>
 #include <set>
 #include <stdexcept>
+#include <cstring>
 
 namespace sc13::scripting {
 namespace {
@@ -58,7 +59,7 @@ struct ProcessAttributes final {
 };
 /** @summary Retains compiler error tails without reading an unbounded log into memory. */
 std::string LogTail(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(NativePath(path), std::ios::binary);
     input.seekg(0, std::ios::end);
     const std::streamoff size = input.tellg();
     if (size < 0) return {};
@@ -91,6 +92,69 @@ std::filesystem::path NativePath(const std::filesystem::path& path) {
     if (value.starts_with(L"\\\\?\\")) return value;
     if (value.starts_with(L"\\\\")) return L"\\\\?\\UNC\\" + value.substr(2);
     return L"\\\\?\\" + value;
+}
+
+bool PublishGeneration(const std::filesystem::path& staging, const std::filesystem::path& generation) {
+    const auto source = NativePath(staging), destination = NativePath(generation);
+    const auto parent = source.parent_path();
+    if (_wcsicmp(parent.c_str(), destination.parent_path().c_str()) != 0 ||
+        _wcsicmp(source.c_str(), destination.c_str()) == 0)
+        throw std::runtime_error("Generation publication requires distinct siblings");
+    /** @summary Read a plain directory's stable identity from an opened, non-following handle.
+     * @param handle Open directory handle.
+     * @return Volume and file index identity; reparse points and non-directories are rejected.
+     */
+    const auto identity = [](HANDLE handle) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (handle == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(handle, &info) ||
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            throw std::runtime_error("Publication requires an accessible plain directory");
+        return std::array<DWORD, 3>{info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow};
+    };
+    Handle anchor{CreateFileW(source.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    const auto sourceIdentity = identity(anchor.value);
+    Handle parentAnchor{CreateFileW(parent.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    const auto parentIdentity = identity(parentAnchor.value);
+    const auto started = GetTickCount64();
+    DWORD failure{}; unsigned attempts{};
+    for (;;) {
+        ++attempts;
+        Handle currentParent{CreateFileW(parent.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+        Handle currentSource{CreateFileW(source.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+        if (identity(currentParent.value) != parentIdentity || identity(currentSource.value) != sourceIdentity)
+            throw std::runtime_error("Publication directory identity changed");
+        const auto attributes = GetFileAttributesW(destination.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES) return false;
+        failure = GetLastError();
+        if (failure != ERROR_FILE_NOT_FOUND && failure != ERROR_PATH_NOT_FOUND)
+            throw std::runtime_error("Cannot inspect publication destination (Win32 error " + std::to_string(failure) + ")");
+        {
+            Handle rename{CreateFileW(source.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+            if (rename.value == INVALID_HANDLE_VALUE) failure = GetLastError();
+            else {
+                if (identity(rename.value) != sourceIdentity) throw std::runtime_error("Publication staging identity changed");
+                const auto bytes = destination.native().size() * sizeof(wchar_t);
+                std::vector<std::byte> storage(offsetof(FILE_RENAME_INFO, FileName) + bytes + sizeof(wchar_t));
+                auto info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+                info->ReplaceIfExists = FALSE; info->RootDirectory = nullptr; info->FileNameLength = static_cast<DWORD>(bytes);
+                std::memcpy(info->FileName, destination.c_str(), bytes);
+                if (SetFileInformationByHandle(rename.value, FileRenameInfo, info, static_cast<DWORD>(storage.size()))) return true;
+                failure = GetLastError();
+            }
+        }
+        if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+        const auto elapsed = GetTickCount64() - started;
+        if ((failure != ERROR_ACCESS_DENIED && failure != ERROR_SHARING_VIOLATION) || attempts >= 11 || elapsed >= 500) break;
+        Sleep(static_cast<DWORD>(std::min<ULONGLONG>(50, 500 - elapsed)));
+        if (GetTickCount64() - started >= 500) break;
+    }
+    throw std::runtime_error("Cannot publish compiled generation (Win32 error " + std::to_string(failure) +
+        "; attempts=" + std::to_string(attempts) + "; staging=" + staging.string() + "; destination=" + generation.string() + ")");
 }
 
 std::filesystem::path TypeScriptToolchainPath() {
@@ -324,11 +388,11 @@ bool LoadSourceProject(const std::filesystem::path& directory, mods::ModDefiniti
             return true;
         }
         const auto cache = source.directory.parent_path() / L"cache";
-        std::filesystem::create_directories(cache); Plain(cache);
+        std::filesystem::create_directories(NativePath(cache)); Plain(cache);
         const auto projectCache = cache / source.projectKey;
-        std::filesystem::create_directories(projectCache); Plain(projectCache);
+        std::filesystem::create_directories(NativePath(projectCache)); Plain(projectCache);
         const auto generation = projectCache / source.fingerprint;
-        if (!std::filesystem::exists(generation)) {
+        if (!std::filesystem::exists(NativePath(generation))) {
             const auto log = projectCache / ("compiler-" + std::to_string(GetCurrentProcessId()) + ".log");
             if (source.language == "luau" && !source.hasResources)
                 CompileLuauGeneration(source, generation);

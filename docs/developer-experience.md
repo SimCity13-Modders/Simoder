@@ -32,3 +32,21 @@ SDK pins must be updated deliberately after validation against the selected
 revision. A successful local override build does not prove that the remote pinned
 revision includes the same changes. Publication and remote verification are
 separate from local development.
+
+Authoring cache generations can exceed Windows `MAX_PATH` even when the source
+project remains below that limit. Cache/staging filesystem operations use
+extended-length native paths; logical project identities, source fingerprints
+and the required sibling `mods/cache` location remain unchanged. Regression
+fixtures cover long generation paths, immutable cache reuse, checksum rejection
+and failed-publication cleanup without changing global Windows path policy.
+This does not establish support for arbitrarily long source-project paths.
+
+Both compilers publish a complete generation by a non-replacing atomic directory
+rename. Publication retains the staging and parent directory identities and
+rejects links or changed identities. Observed transient Windows access/share
+denials may be retried at 50 ms intervals, with at most 11 attempts and a 500 ms
+retry budget; system-call and scheduling time can exceed that budget. Other
+errors fail immediately. Existing generations are never overwritten: a competing
+publication must pass the normal full generation validation. Persistent failure
+reports the Windows error and paths, leaves the prior generation intact, and
+removes only owned unpublished staging where filesystem permissions allow it.
