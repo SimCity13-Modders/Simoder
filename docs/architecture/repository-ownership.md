@@ -10,7 +10,7 @@ rename does not establish an independent repository or compatible package.
 | Simoder-OpenSCP | Separate upstream-compliant application/ModStudio fork; owns conversion and resource inspection. Its current branch/PR is excluded from this cleanup; ownership does not claim complete replacement feature parity. |
 | Simoder-Base | Entirely Luau, project-authored public lifecycle/UI/API abstractions; not yet extracted as an implemented standalone package. |
 | Simoder-DevTools-MCP | Optional native MCP mod target. Current coupled C# executables remain legacy migration input, not a completed native package. |
-| Simoder-DevTools-Authoring | Authoring/compiler coordination and editor integration; existing host implementation still in original DevTools pending extraction. |
+| Simoder-DevTools-Authoring | Separate existing authoring compiler, TypeScript-to-Luau adapter, authoring tests and declarative snippets. DevTools consumes a clean pinned checkout; internal Core and prepared external compiler dependencies remain explicit. |
 | Simoder-DevTools-Diagnostics | Diagnostic mod target; current MCP/REA paths provide existing diagnostic operations. Standalone PE/memory probe products are retired; no claim of complete MCP PE feature parity. |
 | Simoder-SDK | Existing Luau and legacy TS declarations now have a separate canonical repository and versioned manifest. Hash-verified vendored compatibility artifacts preserve current editor/compiler paths. Public native ABI remains unimplemented; broad Simoder::Core implementation is not this SDK. |
 | Simoder-Mod-Examples | First physical extraction: four existing example projects, new local Git history, independent source/package tests and original notices. No RoadBuilder/BusLine implementation is claimed. |
@@ -26,10 +26,10 @@ example package only through an explicit prepared checkout pinned by
 that optional dependency omits examples from the DevTools assembly rather than
 copying a second authoritative source tree.
 
-DevTools and Examples retain exact SDK-derived declaration artifacts for offline
+Authoring and Examples retain exact SDK-derived declaration artifacts for offline
 source-checkout editor/compiler compatibility. Their SDK locks identify one
 canonical revision and payload hashes; these copies must not evolve separately.
-DevTools validates vendored hashes during CMake configuration and optionally
+Authoring validates vendored hashes during CMake configuration and optionally
 checks an explicit clean canonical SDK checkout. Examples runs the equivalent
 provenance check in its package tests. This is prepared-source integrity, not
 signed publisher trust. SDK refreshes require compatibility regression and audit.

@@ -1,8 +1,8 @@
 # Developer tools and source SDK
 
-The companion repository is `../Simoder-DevTools`. It owns the retained native
-authoring compiler, current MCP/DevBridge, declarative VS Code snippets, REA
-integration and their tests. Conversion and resource inspection belong to the
+The companion Simoder-DevTools repository composes the separately owned
+Simoder-DevTools-Authoring compiler/editor package, current MCP/DevBridge and
+REA integration. Conversion and resource inspection belong to the
 OpenSCP fork. The retired standalone CLIs/importers and alpha migration workflows
 are no longer distributed. Its README documents current builds and installation.
 
@@ -12,9 +12,9 @@ publishes runtime evidence and stays in the loader. No developer executables or
 .NET payload are built or installed by this repository.
 
 `SC13_CORE_ONLY=ON` exposes the internal `Simoder::Core` source target with source API version 1.
-DevTools locks a precise Simoder Git commit in `cmake/simoder-core.lock.cmake`.
-A deliberate `SIMODER_SOURCE_DIR` override permits development against a local
-checkout. Core sources are compiled directly and are never copied into DevTools.
+DevTools pins a clean Authoring checkout in `cmake/simoder-authoring.lock.cmake`.
+Authoring requires explicit prepared Simoder and Luau sources when loading Core.
+Core sources are compiled directly and are never copied into developer packages.
 The internal source target does not fetch ImGui/MinHook or install runtime files.
 Public script declarations have a separate canonical Simoder-SDK repository.
 
