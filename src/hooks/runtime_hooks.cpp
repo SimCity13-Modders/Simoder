@@ -4,6 +4,7 @@
 #include "logging/async_logger.hpp"
 #include "ui/simoder_overlay.hpp"
 #include "dev/session/session_transport.hpp"
+#include "dev/session/native_owner_capture.hpp"
 #include "platform/game_window_dispatch.hpp"
 #include <MinHook.h>
 
@@ -28,6 +29,7 @@ bool RetainFailure(const char* operation, MH_STATUS status) noexcept {
 bool Reset() noexcept {
     if (g_teardownComplete) return true;
     g_retiring = true;
+    dev::session::CloseOwnerCaptureObservation();
     g_activity.Close();
     ui::RequestStopSimoderOverlay();
     dev::session::ShutdownSessionTransport();
@@ -43,7 +45,12 @@ bool Reset() noexcept {
         !ui::SimoderOverlayDrained() || !g_activity.Drained()) return false;
     // @summary Disabled trampolines and original pointers remain process-owned: a suspended detour may not yet have incremented its entry counter.
     // No MH_RemoveHook/MH_Uninitialize is safe without a stronger execution-quiescence proof.
-    dev::session::ShutdownScriptBridge();
+    std::string captureError;
+    if (!dev::session::ShutdownScriptBridge(captureError)) {
+        logging::AsyncLogger::Instance().WriteFormat(logging::Level::Error,
+            "Owner capture teardown retained dependencies: %s", captureError.c_str());
+        return false;
+    }
     ui::ShutdownSimoderOverlay();
     ResetGameLogCapture();
     ResetResourceTrace();

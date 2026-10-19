@@ -204,5 +204,9 @@ ScriptReply ExecuteScriptPacket(HWND window, std::string_view packetJson) noexce
     return reply;
 }
 
-void ShutdownScriptBridge() noexcept { g_base.store(0); ShutdownOwnerCapture(); }
+bool ShutdownScriptBridge(std::string& error) noexcept {
+    if (!ShutdownOwnerCapture(error)) return false;
+    g_base.store(0);
+    return true;
+}
 }

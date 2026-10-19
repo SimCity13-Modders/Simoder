@@ -60,6 +60,7 @@ add_library(sc13_core STATIC
     src/dev/runtime_diagnostics.cpp
     src/dev/runtime_control.cpp
     src/dev/session/session_transport.cpp
+    src/dev/session/owner_capture_lifecycle.cpp
     src/formats/dbpf/dbpf_reader.cpp
     src/formats/dbpf/refpack.cpp
     src/formats/prop/prop_document.cpp
@@ -362,6 +363,11 @@ if(SC13_BUILD_TESTS)
     sc13_enable_warnings(simoder-game-window-dispatch-tests)
     add_test(NAME simoder-game-window-dispatch-tests COMMAND simoder-game-window-dispatch-tests)
     set_tests_properties(simoder-game-window-dispatch-tests PROPERTIES TIMEOUT 30)
+    add_executable(simoder-native-owner-capture-lifecycle-tests tests/native_owner_capture_lifecycle_tests.cpp)
+    target_link_libraries(simoder-native-owner-capture-lifecycle-tests PRIVATE sc13_core)
+    sc13_enable_warnings(simoder-native-owner-capture-lifecycle-tests)
+    add_test(NAME simoder-native-owner-capture-lifecycle-tests COMMAND simoder-native-owner-capture-lifecycle-tests)
+    set_tests_properties(simoder-native-owner-capture-lifecycle-tests PROPERTIES TIMEOUT 30)
     add_executable(simoder-native-session-transport-tests tests/native_session_transport_tests.cpp)
     target_link_libraries(simoder-native-session-transport-tests PRIVATE sc13_core user32)
     sc13_enable_warnings(simoder-native-session-transport-tests)

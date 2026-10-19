@@ -26,6 +26,7 @@ struct ScriptReply final {
  * @return Correlated payload or an explicit ABI, thread, view or native-call failure.
  */
 [[nodiscard]] ScriptReply ExecuteScriptPacket(HWND window, std::string_view packetJson) noexcept;
-/** @summary Revoke admission before restoring window hooks or destroying runtime state. */
-void ShutdownScriptBridge() noexcept;
+/** @summary Retire optional capture without clearing admission dependencies on an uncertain disable.
+ * @param error Actual retained ownership/disable diagnostic. @return Whether optional teardown was acknowledged. */
+[[nodiscard]] bool ShutdownScriptBridge(std::string& error) noexcept;
 }

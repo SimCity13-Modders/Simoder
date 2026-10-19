@@ -15,6 +15,10 @@ void EndOwnerCapture() noexcept;
  * @return JSON describing current callback ownership, never an executable command.
  */
 std::string OwnerObservationJson();
-/** @summary Restore the owned callback hook before MinHook resources are released. */
-void ShutdownOwnerCapture() noexcept;
+/** @summary Revoke optional scopes globally before runtime drain/disable, including other threads' stale TLS. */
+void CloseOwnerCaptureObservation() noexcept;
+/** @summary Disable the owned callback while retaining its original, MinHook entry and DLL through process exit.
+ * @param error Actual disable/ownership failure; caller must retain dependencies on false.
+ * @return True only after owned disable/no-hook acknowledgement; never a trampoline-unload certificate. */
+[[nodiscard]] bool ShutdownOwnerCapture(std::string& error) noexcept;
 }
