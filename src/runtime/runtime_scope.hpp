@@ -84,6 +84,10 @@ struct TaskSnapshot final {
     bool committed{};
     ScopeResult outcome{ScopeResult::Busy};
     copied::Envelope value;
+    /** @summary Original task publication identity; polling never advances it and denial clears it. */
+    std::uint64_t sequence{};
+    /** @summary Original admission or irreversible writer revision, never the current revision at poll. */
+    std::uint64_t revision{};
 };
 
 /** @summary One core-owned writer lane/revision shared across independently revocable module scopes. */
@@ -344,6 +348,11 @@ private:
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 /** @summary Synthetic authority exists only in separately compiled test targets, never runtime/Core. */
 struct RuntimeScopeTestAccess final {
+    /** @summary Seed only a retained nonterminal fixture task near sequence exhaustion, without authority changes.
+     * @param scope Actual isolated scope. @param task Original value-task handle.
+     * @param sequence UINT64_MAX-2 or UINT64_MAX-1, retaining at least one terminal publication.
+     * @return False for wrong kind/owner/phase, committed/reserved terminal or impossible exhausted input. */
+    static bool SeedTaskSequence(RuntimeScope& scope,ScopeHandle task,std::uint64_t sequence);
     friend class RuntimeScope;
     /** @summary Try-reserve the actual fixture scope mutex for bounded contention/reclamation checks.
      * @param scope Exact fixture scope. @return Nonblocking native lock; never grants authority. */

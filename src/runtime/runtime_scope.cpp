@@ -123,6 +123,30 @@ struct RuntimeScope::State final {
         copied::Reservation resultArena, resultWire, metadata;
         bool valueOperation{};
         bool committed{};
+        std::uint64_t sequence{},observationRevision{},terminalSequence{};
+        /** @summary Check publication arithmetic without wrap. @param count Required observations. @return Available capacity. */
+        bool CanPublish(std::uint64_t count) const noexcept {return !valueOperation||count<=UINT64_MAX-sequence;}
+        /** @summary Reserve the factual terminal observation before an irreversible effect.
+         * @param count Marker plus terminal publications, or one compound prepared publication.
+         * @return Capacity; failure leaves the original task unchanged. */
+        bool ReserveTerminal(std::uint64_t count) noexcept {
+            if(!valueOperation||terminalSequence||!count||!CanPublish(count))return false;
+            terminalSequence=sequence+count;return true;
+        }
+        /** @summary Publish the sole original tuple under Q; terminal observations cannot be replaced.
+         * @param next New phase. @param irreversible Factual commit flag. @param status Original outcome.
+         * @param revision Original admission or actual irreversible revision. @param value Copied retained result.
+         * @return False without mutation when terminal or publication capacity is unavailable. */
+        bool Publish(Phase next,bool irreversible,ScopeResult status,std::uint64_t revision,copied::Envelope value={}) noexcept {
+            if(valueOperation){
+                if(sequence&&(phase==Phase::Completed||phase==Phase::Cancelled))return false;
+                if(!CanPublish(1))return false;
+                const bool terminal=next==Phase::Completed||next==Phase::Cancelled;
+                if(terminal&&terminalSequence&&terminalSequence!=sequence+1)return false;
+                ++sequence;observationRevision=revision;
+            }
+            phase=next;committed=irreversible;outcome=status;valueResult=std::move(value);return true;
+        }
     };
     using OperationMap=std::map<std::uint64_t,Operation>;
     /** @summary Fixed off-Q transfer holders duplicate no payload and keep original State alive through acknowledgement. */
@@ -199,9 +223,8 @@ void RuntimeScope::RequestStop(StopReason reason) noexcept {
     for (auto& [id, operation] : state->operations) {
         (void)id;
         if (operation.phase == State::Operation::Phase::Queued || operation.phase == State::Operation::Phase::Preparing) {
-            --state->domain->pending_;
-            operation.phase = State::Operation::Phase::Cancelled;
-            operation.outcome = ScopeResult::Cancelled;
+            if(operation.Publish(State::Operation::Phase::Cancelled,false,ScopeResult::Cancelled,operation.observationRevision))
+                --state->domain->pending_;
             operation.input.clear();
         }
     }
@@ -432,9 +455,8 @@ void RuntimeScope::RetireLocked(State& state,StopReason reason) noexcept {
     for (auto& [id, operation] : state.operations) {
         (void)id;
         if (operation.phase == State::Operation::Phase::Queued || operation.phase == State::Operation::Phase::Preparing) {
-            --state.domain->pending_;
-            operation.phase = State::Operation::Phase::Cancelled;
-            operation.outcome = ScopeResult::Cancelled;
+            if(operation.Publish(State::Operation::Phase::Cancelled,false,ScopeResult::Cancelled,operation.observationRevision))
+                --state.domain->pending_;
             // @summary Keep copied envelopes, buffers and dependency graphs retained until cleanup outside every fence.
         }
     }
@@ -533,9 +555,8 @@ ScopeResult RuntimeScope::Cancel(const OperationContext& context, ScopeHandle op
     if (found->second.phase == State::Operation::Phase::Running) return ScopeResult::Busy;
     if (found->second.phase == State::Operation::Phase::Completed) return ScopeResult::Stale;
     if (found->second.phase == State::Operation::Phase::Cancelled) return ScopeResult::Cancelled;
+    if(!found->second.Publish(State::Operation::Phase::Cancelled,false,ScopeResult::Cancelled,found->second.observationRevision))return ScopeResult::Busy;
     --state_->domain->pending_;
-    found->second.phase = State::Operation::Phase::Cancelled;
-    found->second.outcome = ScopeResult::Cancelled;
     found->second.input.clear();
     return ScopeResult::Ok;
 }
@@ -575,7 +596,9 @@ ScopeResult RuntimeScope::QueueValue(const OperationContext& context, const copi
     do { if (pending >= MaxPendingOperations) return ScopeResult::Busy; }
     while (!state_->domain->pending_.compare_exchange_weak(pending, pending + 1));
     const auto serial = state_->nextOperation++;
-    try { state_->operations.emplace(serial, std::move(operation)); }
+    try { auto inserted=state_->operations.emplace(serial, std::move(operation));
+        // @summary Sequence one exists only after successful retained insertion; Q keeps this initial publication atomic.
+        static_cast<void>(inserted.first->second.Publish(State::Operation::Phase::Queued,false,ScopeResult::Busy,context.revision)); }
     catch (...) { --state_->domain->pending_; return ScopeResult::Busy; }
     output = {state_->generation, serial};
     return ScopeResult::Ok;
@@ -590,7 +613,9 @@ ScopeResult RuntimeScope::BeginValue(ScopeHandle operation) {
     if (valid != ScopeResult::Ok) return valid;
     if (retained.phase == State::Operation::Phase::Cancelled) return ScopeResult::Cancelled;
     if (retained.phase != State::Operation::Phase::Queued) return ScopeResult::Stale;
-    retained.phase = State::Operation::Phase::Preparing;
+    // @summary Preparation must preserve one final cancellation/failure publication even at synthetic near-exhaustion.
+    if(!retained.CanPublish(2))return ScopeResult::Busy;
+    if(!retained.Publish(State::Operation::Phase::Preparing,false,retained.outcome,retained.observationRevision))return ScopeResult::Busy;
     return ScopeResult::Ok;
 }
 ScopeResult RuntimeScope::CommitValue(ScopeHandle operation, const ValueCallback& callback,
@@ -617,9 +642,11 @@ ScopeResult RuntimeScope::CommitValue(ScopeHandle operation, const ValueCallback
             if (fenced != ScopeResult::Ok) return fenced;
         }
         if (state->domain->revision_.load() == UINT64_MAX) return ScopeResult::Conflict;
-        retained->phase = State::Operation::Phase::Running;
-        retained->committed = true;
-        ++state->running; ++state->domain->revision_;
+        if(!retained->ReserveTerminal(2))return ScopeResult::Busy;
+        const auto committedRevision=++state->domain->revision_;
+        // @summary Under Q, the checked two-publication reservation guarantees both this marker and its terminal record.
+        static_cast<void>(retained->Publish(State::Operation::Phase::Running,true,ScopeResult::Busy,committedRevision));
+        ++state->running;
     }
     ScopeResult outcome = ScopeResult::Indeterminate;
     copied::Envelope result;
@@ -634,9 +661,7 @@ ScopeResult RuntimeScope::CommitValue(ScopeHandle operation, const ValueCallback
     } catch (...) { outcome = ScopeResult::Indeterminate; }
     {
         const std::lock_guard lock(state->mutex);
-        retained->valueResult = std::move(result);
-        retained->outcome = outcome;
-        retained->phase = State::Operation::Phase::Completed;
+        static_cast<void>(retained->Publish(State::Operation::Phase::Completed,true,outcome,retained->observationRevision,std::move(result)));
         retained->valueInput = {}; retained->resultArena = {}; retained->resultWire = {};
         --state->running; --state->domain->pending_;
         state->drained.notify_all();
@@ -667,6 +692,7 @@ ScopeResult RuntimeScope::CommitPreparedValue(ScopeHandle operation, RuntimeComm
     if (retained.preparedResult) return ScopeResult::Stale;
     const auto revision = state->domain->Revision();
     if (revision == UINT64_MAX || plan.ExpectedGeneration() == UINT64_MAX) return ScopeResult::Conflict;
+    if(!retained.CanPublish(1))return ScopeResult::Busy;
     // @summary Bounded formatting and the sole codec finish before the irreversible marker; no result allocation follows publication.
     const auto bytes = retained.resultWire.Bytes();
     auto* wire = reinterpret_cast<char*>(bytes.data());
@@ -681,14 +707,12 @@ ScopeResult RuntimeScope::CommitPreparedValue(ScopeHandle operation, RuntimeComm
         "simoder.registry-publication.v1", retained.resultArena, retained.preparedResult, bytes.size()) != copied::Status::Ok)
         return ScopeResult::Invalid;
     // @summary Advance rechecks sticky stop. If stop wins, the hidden prepared receipt remains undisclosed until owner cleanup.
+    if(!retained.ReserveTerminal(1))return ScopeResult::Busy;
     const auto committedRevision = writer.Advance();
     if (!committedRevision) return ScopeResult::NotReady;
-    retained.phase = State::Operation::Phase::Running;
-    retained.committed = true;
     const bool published = publication.Publish(plan, committedRevision);
-    if (published) retained.valueResult = std::move(retained.preparedResult);
-    retained.outcome = published ? ScopeResult::Ok : ScopeResult::Indeterminate;
-    retained.phase = State::Operation::Phase::Completed;
+    static_cast<void>(retained.Publish(State::Operation::Phase::Completed,true,
+        published?ScopeResult::Ok:ScopeResult::Indeterminate,committedRevision,published?std::move(retained.preparedResult):copied::Envelope{}));
     --state->domain->pending_;
     // @summary Input, reserved buffers and abandoned receipts retire only on later owner cleanup, outside all publication reservations.
     return retained.outcome;
@@ -704,8 +728,8 @@ ScopeResult RuntimeScope::FinishValue(ScopeHandle operation, ScopeResult reason)
     if (reason == ScopeResult::Cancelled && retained.committed) return ScopeResult::Busy;
     if (retained.phase == State::Operation::Phase::Running) return ScopeResult::Busy;
     if (retained.phase == State::Operation::Phase::Completed || retained.phase == State::Operation::Phase::Cancelled) return ScopeResult::Stale;
-    retained.outcome = reason;
-    retained.phase = reason == ScopeResult::Cancelled ? State::Operation::Phase::Cancelled : State::Operation::Phase::Completed;
+    if(!retained.Publish(reason==ScopeResult::Cancelled?State::Operation::Phase::Cancelled:State::Operation::Phase::Completed,
+        false,reason,retained.observationRevision))return ScopeResult::Busy;
     retained.valueInput = {}; retained.resultArena = {}; retained.resultWire = {};
     --state_->domain->pending_;
     return ScopeResult::Ok;
@@ -720,6 +744,7 @@ ScopeResult RuntimeScope::PollValue(ScopeHandle operation, TaskSnapshot& output)
     const auto valid = Validate(*state_, retained.context, false);
     if (valid != ScopeResult::Ok) return valid;
     output.committed = retained.committed; output.outcome = retained.outcome;
+    output.sequence=retained.sequence;output.revision=retained.observationRevision;
     switch (retained.phase) {
     case State::Operation::Phase::Queued: output.state = TaskState::Queued; break;
     case State::Operation::Phase::Preparing: case State::Operation::Phase::Running: output.state = TaskState::Running; break;
@@ -738,6 +763,14 @@ ScopeResult RuntimeScope::CancelValue(ScopeHandle operation) {
 }
 
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+bool RuntimeScopeTestAccess::SeedTaskSequence(RuntimeScope& scope,ScopeHandle task,std::uint64_t sequence){
+    const std::lock_guard lock(scope.state_->mutex);
+    if(task.owner!=scope.state_->generation||(sequence!=UINT64_MAX-2&&sequence!=UINT64_MAX-1))return false;
+    const auto found=scope.state_->operations.find(task.serial);
+    if(found==scope.state_->operations.end()||!found->second.valueOperation||found->second.committed||found->second.terminalSequence||
+        (found->second.phase!=RuntimeScope::State::Operation::Phase::Queued&&found->second.phase!=RuntimeScope::State::Operation::Phase::Preparing))return false;
+    found->second.sequence=sequence;return true;
+}
 std::unique_lock<std::mutex> RuntimeScopeTestAccess::ReserveState(RuntimeScope& scope) {
     return std::unique_lock<std::mutex>(scope.state_->mutex, std::try_to_lock);
 }

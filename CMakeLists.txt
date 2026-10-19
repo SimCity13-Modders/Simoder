@@ -266,6 +266,12 @@ if(SC13_BUILD_TESTS)
         sc13_enable_warnings(simoder-native-provider-tests)
         add_test(NAME simoder-native-provider-tests COMMAND simoder-native-provider-tests "${SC13_BASE_SOURCE_DIR}")
         set_tests_properties(simoder-native-provider-tests PROPERTIES TIMEOUT 90)
+        # @summary Qualify original task publication sequence and revision with the actual isolated Base/writer path.
+        add_executable(simoder-task-publication-metadata-tests tests/task_publication_metadata_tests.cpp)
+        target_link_libraries(simoder-task-publication-metadata-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-task-publication-metadata-tests)
+        add_test(NAME simoder-task-publication-metadata-tests COMMAND simoder-task-publication-metadata-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-task-publication-metadata-tests PROPERTIES TIMEOUT 90)
         # @summary Exercise actual captured preparation without operational or production activation.
         add_executable(simoder-manager-preparation-tests tests/manager_preparation_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
         target_link_libraries(simoder-manager-preparation-tests PRIVATE sc13-semantic-test-support)
