@@ -24,9 +24,10 @@ set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LUAU_STATIC_CRT ON CACHE BOOL "" FORCE)
 # @summary Native ownership guards require Luau's C++ exception path; longjmp would bypass retained-object cleanup.
 set(LUAU_EXTERN_C OFF CACHE BOOL "" FORCE)
+set(SC13_LUAU_REVISION 1f6ff5d6f0072f2fab2adf35d1ffbaae7d848ad0)
 FetchContent_Declare(luau
     GIT_REPOSITORY https://github.com/luau-lang/luau.git
-    GIT_TAG 1f6ff5d6f0072f2fab2adf35d1ffbaae7d848ad0
+    GIT_TAG ${SC13_LUAU_REVISION}
 )
 FetchContent_MakeAvailable(luau)
 set_property(DIRECTORY "${luau_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
@@ -70,10 +71,17 @@ add_library(sc13_core STATIC
     src/platform/runtime_owner.cpp
     src/platform/game_window_dispatch.cpp
     src/mods/mod_definition_parser.cpp
+    src/mods/captured_candidate.cpp
     src/mods/action_worker.cpp
     src/mods/mod_candidate.cpp
     src/mods/mod_manager.cpp
+    src/mods/manager_preparation.cpp
+    src/mods/manager_publication.cpp
+    src/mods/manager_cache.cpp
+    src/mods/manager_commands.cpp
+    src/mods/manager_close.cpp
     src/mods/mod_state_store.cpp
+src/mods/state_path_writer.cpp
     src/mods/mod_types.cpp
     src/mods/native/native_module_loader.cpp
     src/mods/resource_project.cpp
@@ -81,6 +89,7 @@ add_library(sc13_core STATIC
     src/reverse/pe_file.cpp
     src/reverse/build_compatibility.cpp
     src/runtime/runtime_resource_cache.cpp
+    src/runtime/cache_settlement.cpp
     src/runtime/runtime_scope.cpp
     src/runtime/runtime_lifecycle.cpp
     src/runtime/copied_value.cpp
@@ -88,6 +97,7 @@ add_library(sc13_core STATIC
     src/scripting/script_runtime.cpp
     src/scripting/base_host.cpp
     src/scripting/semantic_bridge.cpp
+    src/mods/owned_publication.cpp
     src/scripting/semantic_lua.cpp
     src/scripting/script_patch_reducer.cpp
     src/scripting/luau_compiler.cpp
@@ -95,6 +105,7 @@ add_library(sc13_core STATIC
 )
 target_include_directories(sc13_core PUBLIC src)
 target_compile_definitions(sc13_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(sc13_core PRIVATE SC13_LUAU_REVISION="${SC13_LUAU_REVISION}")
 # @summary Identify diagnostic records by reviewed source/toolchain inputs; binary hashes remain separate release evidence.
 file(GLOB_RECURSE sc13_identity_sources CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
@@ -208,12 +219,40 @@ endif()
 if(SC13_BUILD_TESTS)
     enable_testing()
     set(SC13_BASE_SOURCE_DIR "" CACHE PATH "Optional separately checked-out Base source for integration tests")
-    set(SC13_BASE_SOURCE_DIR "" CACHE PATH "Optional separately checked-out Base source for integration tests")
     # @summary Compile the identical Core sources with fixture issuers only into a separate non-installed acceptance host.
     get_target_property(sc13_semantic_test_sources sc13_core SOURCES)
     add_library(sc13-semantic-test-support STATIC ${sc13_semantic_test_sources})
+    # @summary Observe genuine native lifetime/admission only in the non-installed fixture host.
+    target_sources(sc13-semantic-test-support PRIVATE src/mods/fixture_observation.cpp)
+    # @summary Qualify original cache/reset witnesses and bounded native eviction obligations.
+    add_executable(simoder-cache-settlement-tests tests/cache_settlement_tests.cpp)
+    target_link_libraries(simoder-cache-settlement-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-cache-settlement-tests)
+    add_test(NAME simoder-cache-settlement-tests COMMAND simoder-cache-settlement-tests)
+    set_tests_properties(simoder-cache-settlement-tests PROPERTIES TIMEOUT 90)
+      # @summary Qualify actual canonical manager membership and borrowed-resource lifetime without production cutover.
+      add_executable(simoder-manager-lifetime-tests tests/manager_lifetime_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+      target_link_libraries(simoder-manager-lifetime-tests PRIVATE sc13-semantic-test-support)
+      sc13_enable_warnings(simoder-manager-lifetime-tests)
+      add_test(NAME simoder-manager-lifetime-tests COMMAND simoder-manager-lifetime-tests)
+      set_tests_properties(simoder-manager-lifetime-tests PROPERTIES TIMEOUT 45)
+    # @summary Qualify the existing scheduler's isolated native reservation and retirement route.
+    add_executable(simoder-scheduler-publication-tests tests/scheduler_publication_tests.cpp)
+    target_link_libraries(simoder-scheduler-publication-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-scheduler-publication-tests)
+    add_test(NAME simoder-scheduler-publication-tests COMMAND simoder-scheduler-publication-tests)
+    set_tests_properties(simoder-scheduler-publication-tests PROPERTIES TIMEOUT 45)
     target_include_directories(sc13-semantic-test-support PUBLIC src)
     target_compile_definitions(sc13-semantic-test-support PUBLIC SIMODER_RUNTIME_TEST_AUTHORITY UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(sc13-semantic-test-support PRIVATE SC13_LUAU_REVISION="${SC13_LUAU_REVISION}")
+    # @summary Qualify actual lane rejection only in the fixture that links the real script runtime.
+    target_compile_definitions(sc13-semantic-test-support PRIVATE SIMODER_SCRIPT_LANE_TEST_WITNESS)
+    # @summary Exercise immutable selected-input capture in the non-installed fixture host.
+    add_executable(simoder-captured-candidate-tests tests/captured_candidate_tests.cpp)
+    target_link_libraries(simoder-captured-candidate-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-captured-candidate-tests)
+    add_test(NAME simoder-captured-candidate-tests COMMAND simoder-captured-candidate-tests)
+    set_tests_properties(simoder-captured-candidate-tests PROPERTIES TIMEOUT 30)
     target_compile_definitions(sc13-semantic-test-support PRIVATE SC13_SEMANTIC_BUILD_ID="${SC13_SEMANTIC_BUILD_ID}" SC13_SEMANTIC_BUILD_CONFIG="$<CONFIG>")
     target_link_libraries(sc13-semantic-test-support PUBLIC bcrypt version advapi32 user32 Luau.VM Luau.Compiler)
     sc13_enable_warnings(sc13-semantic-test-support)
@@ -221,6 +260,65 @@ if(SC13_BUILD_TESTS)
     target_link_libraries(simoder-semantic-bridge-tests PRIVATE sc13-semantic-test-support)
     sc13_enable_warnings(simoder-semantic-bridge-tests)
     if(SC13_BASE_SOURCE_DIR)
+        # @summary Exercise actual captured preparation without operational or production activation.
+        add_executable(simoder-manager-preparation-tests tests/manager_preparation_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-manager-preparation-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-manager-preparation-tests)
+        add_test(NAME simoder-manager-preparation-tests COMMAND simoder-manager-preparation-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-manager-preparation-tests PROPERTIES TIMEOUT 60)
+        # @summary Actual canonical joint transaction uses the separate native fixture authority library only.
+        add_executable(simoder-manager-publication-tests tests/manager_publication_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-manager-publication-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-manager-publication-tests)
+        add_test(NAME simoder-manager-publication-tests COMMAND simoder-manager-publication-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-manager-publication-tests PROPERTIES TIMEOUT 60)
+        # @summary Real scheduler outputs exercise the isolated exact native consumer without production ingress.
+        add_executable(simoder-manager-commands-tests tests/manager_commands_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-manager-commands-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-manager-commands-tests)
+        add_test(NAME simoder-manager-commands-tests COMMAND simoder-manager-commands-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-manager-commands-tests PROPERTIES TIMEOUT 90)
+        add_executable(simoder-manager-close-tests tests/manager_close_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-manager-close-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-manager-close-tests)
+        add_test(NAME simoder-manager-close-tests COMMAND simoder-manager-close-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-manager-close-tests PROPERTIES TIMEOUT 90)
+        # @summary Qualify exact native scope retirement without production authority or game effects.
+        add_executable(simoder-scope-retirement-tests tests/scope_retirement_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-scope-retirement-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-scope-retirement-tests)
+        add_test(NAME simoder-scope-retirement-tests COMMAND simoder-scope-retirement-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-scope-retirement-tests PROPERTIES TIMEOUT 90)
+        # @summary Exercise original-host VM enrollment and actual control/close races without production issuance.
+        add_executable(simoder-manager-vm-enrollment-tests tests/manager_vm_enrollment_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-manager-vm-enrollment-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-manager-vm-enrollment-tests)
+        add_test(NAME simoder-manager-vm-enrollment-tests COMMAND simoder-manager-vm-enrollment-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-manager-vm-enrollment-tests PROPERTIES TIMEOUT 90)
+        # @summary Qualify explicit off-lane original-record VM retirement and actual close-pin lifetime races.
+        add_executable(simoder-manager-vm-retirement-tests tests/manager_vm_retirement_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-manager-vm-retirement-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-manager-vm-retirement-tests)
+        add_test(NAME simoder-manager-vm-retirement-tests COMMAND simoder-manager-vm-retirement-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-manager-vm-retirement-tests PROPERTIES TIMEOUT 90)
+        # @summary Qualify original whole-Plan VM retirement and exact lifecycle reservation ownership.
+        # @summary Qualify the isolated bounded native state writer without production issuance.
+        add_executable(simoder-state-path-writer-tests tests/state_path_writer_tests.cpp)
+        target_link_libraries(simoder-state-path-writer-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-state-path-writer-tests)
+        add_test(NAME simoder-state-path-writer-tests COMMAND simoder-state-path-writer-tests "${CMAKE_CURRENT_SOURCE_DIR}/.analysis")
+        set_tests_properties(simoder-state-path-writer-tests PROPERTIES TIMEOUT 90)
+        add_executable(simoder-prepared-retirement-tests tests/prepared_retirement_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
+        target_link_libraries(simoder-prepared-retirement-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-prepared-retirement-tests)
+        add_test(NAME simoder-prepared-retirement-tests COMMAND simoder-prepared-retirement-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-prepared-retirement-tests PROPERTIES TIMEOUT 90)
+        # @summary Qualify isolated scheduler/registry/context/scope publication through one original marker.
+        add_executable(simoder-joint-publication-tests tests/joint_publication_tests.cpp)
+        target_link_libraries(simoder-joint-publication-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-joint-publication-tests)
+        add_test(NAME simoder-joint-publication-tests COMMAND simoder-joint-publication-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-joint-publication-tests PROPERTIES TIMEOUT 60)
         add_test(NAME simoder-semantic-bridge-tests COMMAND simoder-semantic-bridge-tests "${SC13_BASE_SOURCE_DIR}")
         set_tests_properties(simoder-semantic-bridge-tests PROPERTIES TIMEOUT 60)
     endif()
@@ -243,6 +341,8 @@ if(SC13_BUILD_TESTS)
     # @summary Compile synthetic authority construction only into an independent, non-installed test library.
     add_library(sc13-runtime-test-support STATIC src/runtime/runtime_scope.cpp src/runtime/runtime_lifecycle.cpp
         src/runtime/copied_value.cpp src/runtime/semantic_tasks.cpp
+        # @summary Link the real native publication primitive into isolated authority fixtures.
+        src/mods/patch_registry.cpp src/core/runtime_property_table.cpp
         src/platform/runtime_owner.cpp)
     target_include_directories(sc13-runtime-test-support PUBLIC src)
     target_compile_definitions(sc13-runtime-test-support PUBLIC SIMODER_RUNTIME_TEST_AUTHORITY
@@ -346,3 +446,76 @@ foreach(target sc13_core simoder-runtime sc13-tests simoder-script-tests)
         )
     endif()
 endforeach()
+
+# @summary Optionally qualify explicit canonical Base/SDK/Examples bytes in a non-installed native host.
+# @details These profile roots are separate from the strict clean SIMODER_NATIVE_SDK_SOURCE_DIR dependency.
+set(SC13_BASE_PROFILE_SDK_DIR "" CACHE PATH "Optional explicit canonical SDK profile root for Base conformance")
+set(SC13_BASE_PROFILE_EXAMPLES_DIR "" CACHE PATH "Optional explicit canonical Examples profile root for Base conformance")
+if(("${SC13_BASE_PROFILE_SDK_DIR}" STREQUAL "" AND NOT "${SC13_BASE_PROFILE_EXAMPLES_DIR}" STREQUAL "") OR
+   (NOT "${SC13_BASE_PROFILE_SDK_DIR}" STREQUAL "" AND "${SC13_BASE_PROFILE_EXAMPLES_DIR}" STREQUAL ""))
+    message(FATAL_ERROR "Base profile conformance requires both SC13_BASE_PROFILE_SDK_DIR and SC13_BASE_PROFILE_EXAMPLES_DIR")
+endif()
+if(NOT "${SC13_BASE_PROFILE_SDK_DIR}" STREQUAL "")
+    if(NOT SC13_BUILD_TESTS)
+        message(FATAL_ERROR "Requested Base profile conformance requires SC13_BUILD_TESTS")
+    endif()
+    if("${SC13_BASE_SOURCE_DIR}" STREQUAL "" OR NOT IS_DIRECTORY "${SC13_BASE_SOURCE_DIR}")
+        message(FATAL_ERROR "Requested Base profile conformance requires an existing explicit SC13_BASE_SOURCE_DIR")
+    endif()
+    if(NOT IS_ABSOLUTE "${SC13_BASE_PROFILE_SDK_DIR}" OR NOT IS_DIRECTORY "${SC13_BASE_PROFILE_SDK_DIR}" OR
+       NOT IS_ABSOLUTE "${SC13_BASE_PROFILE_EXAMPLES_DIR}" OR NOT IS_DIRECTORY "${SC13_BASE_PROFILE_EXAMPLES_DIR}")
+        message(FATAL_ERROR "Requested SDK and Examples profile roots must be existing absolute directories")
+    endif()
+    if(NOT TARGET sc13-semantic-test-support OR NOT TARGET Luau.Ast)
+        message(FATAL_ERROR "Base profile conformance requires the existing private semantic host and Luau.Ast")
+    endif()
+    # @summary Exercise actual cold Base and original canonical scripts with unchanged execution limits.
+    add_executable(simoder-base-sdk-conformance-tests tests/base_sdk_conformance_tests.cpp)
+    target_link_libraries(simoder-base-sdk-conformance-tests PRIVATE sc13-semantic-test-support Luau.Ast)
+    sc13_enable_warnings(simoder-base-sdk-conformance-tests)
+    add_test(NAME simoder-base-sdk-conformance-tests COMMAND simoder-base-sdk-conformance-tests
+        "${SC13_BASE_SOURCE_DIR}" "${SC13_BASE_PROFILE_SDK_DIR}" "${SC13_BASE_PROFILE_EXAMPLES_DIR}")
+    set_tests_properties(simoder-base-sdk-conformance-tests PROPERTIES TIMEOUT 60)
+endif()
+
+# @summary Qualify only explicitly retained native retirement owners, without a global close certificate.
+if(SC13_BUILD_TESTS AND SC13_BASE_SOURCE_DIR)
+    if(NOT TARGET sc13-semantic-test-support)
+        message(FATAL_ERROR "Known-owner retirement qualification requires the existing private semantic fixture host")
+    endif()
+    add_executable(simoder-manager-retirement-inventory-tests tests/manager_retirement_inventory_tests.cpp
+        tests/mod_fixture.cpp tests/test_harness.cpp)
+    target_link_libraries(simoder-manager-retirement-inventory-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-manager-retirement-inventory-tests)
+    add_test(NAME simoder-manager-retirement-inventory-tests COMMAND simoder-manager-retirement-inventory-tests
+        "${SC13_BASE_SOURCE_DIR}")
+    set_tests_properties(simoder-manager-retirement-inventory-tests PROPERTIES TIMEOUT 90)
+endif()
+
+# @summary Qualify private same-State native file/memory coordination without production authority.
+if(SC13_BUILD_TESTS AND SC13_BASE_SOURCE_DIR)
+    if(NOT TARGET sc13-semantic-test-support)
+        message(FATAL_ERROR "Canonical persistence qualification requires the existing private semantic fixture host")
+    endif()
+    add_executable(simoder-manager-persistence-tests tests/manager_persistence_tests.cpp
+        tests/mod_fixture.cpp tests/test_harness.cpp)
+    target_link_libraries(simoder-manager-persistence-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-manager-persistence-tests)
+    add_test(NAME simoder-manager-persistence-tests COMMAND simoder-manager-persistence-tests
+        "${SC13_BASE_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/.analysis")
+    set_tests_properties(simoder-manager-persistence-tests PROPERTIES TIMEOUT 90)
+endif()
+
+# @summary Qualify the finite same-original-manager runtime/file/cache retirement cohort only in the private native fixture host.
+if(SC13_BUILD_TESTS AND SC13_BASE_SOURCE_DIR)
+    if(NOT TARGET sc13-semantic-test-support)
+        message(FATAL_ERROR "Combined original-owner qualification requires the existing private semantic fixture host")
+    endif()
+    add_executable(simoder-manager-combined-owners-tests tests/manager_combined_owners_tests.cpp
+        tests/mod_fixture.cpp tests/test_harness.cpp)
+    target_link_libraries(simoder-manager-combined-owners-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-manager-combined-owners-tests)
+    add_test(NAME simoder-manager-combined-owners-tests COMMAND simoder-manager-combined-owners-tests
+        "${SC13_BASE_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/.analysis")
+    set_tests_properties(simoder-manager-combined-owners-tests PROPERTIES TIMEOUT 90)
+endif()

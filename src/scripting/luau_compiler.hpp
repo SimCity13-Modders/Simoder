@@ -2,6 +2,10 @@
 #include "scripting/source_project.hpp"
 
 namespace sc13::scripting {
+/** @summary Describe the actual integrated compiler revision, options and bytecode interpretation.
+ * @return Deterministic interpretation metadata, never compiler authenticity or consent.
+ */
+[[nodiscard]] std::string LuauCompilationProfile();
 /** @summary Compile caller-owned immutable source using the pinned compiler.
  * @param source Source bytes, bounded to 8 MiB.
  * @return Bounded bytecode; throws for invalid source or oversized output.

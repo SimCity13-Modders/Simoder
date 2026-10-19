@@ -1,20 +1,36 @@
 #include "scripting/luau_compiler.hpp"
 #include "core/json.hpp"
 #include <Luau/Compiler.h>
+#include <Luau/Bytecode.h>
 #include <Windows.h>
 #include <atomic>
 #include <fstream>
 #include <stdexcept>
 
 namespace sc13::scripting {
-/** @summary Compile bounded source for the pinned VM while preserving module-local require. */
-std::string CompileLuauSource(std::string_view source) {
-    if (source.size() > 8U * 1024U * 1024U) throw std::runtime_error("Luau source exceeds 8 MiB");
+namespace {
+/** @summary Supply identical compilation options to execution and content interpretation.
+ * @return Pinned integrated compiler options.
+ */
+Luau::CompileOptions Options() {
     Luau::CompileOptions options;
     options.optimizationLevel = 1;
     options.debugLevel = 1;
     static constexpr const char* mutableGlobals[]{"require", nullptr};
     options.mutableGlobals = mutableGlobals;
+    return options;
+}
+}
+std::string LuauCompilationProfile() {
+    const auto options = Options();
+    return std::string("luau/") + SC13_LUAU_REVISION + "/opt=" + std::to_string(options.optimizationLevel) +
+        "/debug=" + std::to_string(options.debugLevel) + "/mutable=require/bytecode=" + std::to_string(LBC_VERSION_TARGET) +
+        "/windows/pointer=" + std::to_string(sizeof(void*) * 8);
+}
+/** @summary Compile bounded source for the pinned VM while preserving module-local require. */
+std::string CompileLuauSource(std::string_view source) {
+    if (source.size() > 8U * 1024U * 1024U) throw std::runtime_error("Luau source exceeds 8 MiB");
+    const auto options = Options();
     auto result = Luau::compile(std::string(source), options);
     if (result.empty() || result.front() == '\0')
         throw std::runtime_error(result.empty() ? "Empty Luau compiler output" : result.substr(1));

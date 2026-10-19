@@ -37,6 +37,9 @@ public:
     /** @summary Reports native proof of the captured actual critical graph; grants no authority. @return True after this exact VM commits. */
     bool Ready() const noexcept;
 private:
+    friend class mods::ManagerPreparation;
+    /** @summary Actual copied package verification input; identity only, never publisher authorization. */
+    BasePackagePin pin_;
     std::unique_ptr<ScriptRuntime> runtime_;
     bool ownsSlot_{};
     std::shared_ptr<SemanticBridge> bridge_;

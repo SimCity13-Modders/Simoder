@@ -431,8 +431,17 @@ bool ValidatePatchConfiguration(const formats::toon::Value::Object& root,
 bool LoadAuthoringPatches(const std::filesystem::path& directory,
     std::vector<ResourcePatchDefinition>& patches, std::string& error) noexcept {
     try {
+        return ParseAuthoringPatches(scripting::ReadBounded(scripting::SourcePath(directory, "mod.toml"), 8U * 1024U * 1024U), patches, error);
+    } catch (const std::exception& exception) { patches.clear(); error = "mod.toml: " + std::string(exception.what()); return false; }
+    catch (...) { patches.clear(); error = "Authoring patches validation failed"; return false; }
+}
+
+bool ParseAuthoringPatches(std::string_view bytes,
+    std::vector<ResourcePatchDefinition>& patches, std::string& error) noexcept {
+    try {
         patches.clear(); error.clear();
-        const auto document = toml::parse(scripting::ReadBounded(scripting::SourcePath(directory, "mod.toml"), 8U * 1024U * 1024U));
+        if (bytes.size() > 8U * 1024U * 1024U) throw std::runtime_error("Manifest exceeds limit");
+        const auto document = toml::parse(bytes);
         if (!document.contains("patches")) return true;
         formats::toon::Value::Object root;
         root.emplace("patches", formats::toml_value::Convert(*document.get("patches")));
@@ -475,8 +484,21 @@ bool LoadModDefinition(
 bool LoadScriptSymbols(const std::filesystem::path& directory,
     scripting::ScriptDefinition& definition, std::string& error) noexcept {
     try {
+        if (!std::filesystem::exists(directory / "mod.toml")) return ParseScriptSymbols({}, definition, error);
+        return ParseScriptSymbols(scripting::ReadBounded(scripting::SourcePath(directory, "mod.toml"), 8U * 1024U * 1024U), definition, error);
+    } catch (const std::exception& exception) { error = exception.what(); return false; }
+    catch (...) { error = "Script symbols failed validation"; return false; }
+}
+
+bool ParseScriptSymbols(std::string_view bytes,
+    scripting::ScriptDefinition& definition, std::string& error) noexcept {
+    try {
         NameCatalog catalog;
-        if (!ReadAuthoringCatalog(directory, catalog, error)) return false;
+        if (bytes.size() > 8U * 1024U * 1024U) throw std::runtime_error("Manifest exceeds limit");
+        const auto document = toml::parse(bytes);
+        ToonObject root;
+        if (document.contains("symbols")) root.emplace("symbols", formats::toml_value::Convert(*document.get("symbols")));
+        if (!ParseNames(root, catalog, error)) return false;
         if (catalog.resources.size() > 4096 || catalog.properties.size() > 4096) { error = "Script catalog exceeds 4096 entries per category"; return false; }
         definition.resourceAliases = std::move(catalog.resources);
         for (const auto& [name, id] : catalog.properties) {

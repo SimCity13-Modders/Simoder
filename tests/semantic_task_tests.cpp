@@ -89,13 +89,13 @@ void Cancellation() {
 /** @summary Verifies revoked/conflicting/missing authority cannot commit or disclose retained results. */
 void Authority() {
     Fixture f; auto task = f.Admit(); Require(f.tasks.Begin(task) == ScopeResult::Ok, "revoke begin");
-    RuntimeScopeTestAccess::Revoke(*f.scope, f.context.session);
+    RuntimeScopeTestAccess::Revoke(*f.scope, f.context.grantGeneration);
     int calls{}; Require(f.tasks.Commit(task, [&](auto&, auto, auto&) { ++calls; return true; }) == ScopeResult::Denied && calls == 0, "revocation before effect");
     TaskSnapshot snapshot; Require(f.tasks.Poll(task, snapshot) == ScopeResult::Denied && !snapshot.value, "revoked queued delivery");
     Require(f.tasks.Release(task) == ScopeResult::Ok, "revoked cleanup");
     Fixture g; task = g.Admit(); Require(g.tasks.Begin(task) == ScopeResult::Ok && g.tasks.Commit(task, Echo) == ScopeResult::Ok, "successful before revoke");
     Require(g.tasks.Poll(task, snapshot) == ScopeResult::Ok && snapshot.state == TaskState::Succeeded, "terminal observed");
-    RuntimeScopeTestAccess::Revoke(*g.scope, g.context.session);
+    RuntimeScopeTestAccess::Revoke(*g.scope, g.context.grantGeneration);
     Require(g.tasks.Poll(task, snapshot) == ScopeResult::Denied && !snapshot.value && !snapshot.committed, "revoked result suppressed");
     Require(g.tasks.Release(task) == ScopeResult::Ok, "successful revoked cleanup");
     Fixture foreign; Require(foreign.tasks.Poll(task, snapshot) == ScopeResult::Denied, "cross-generation handle");
@@ -192,7 +192,7 @@ void RevokedPendingCleanup() {
     Fixture revoked(domain), fresh(domain);
     std::array<TaskHandle, 8> retained;
     for (auto& task : retained) task = revoked.Admit();
-    RuntimeScopeTestAccess::Revoke(*revoked.scope, revoked.context.session);
+    RuntimeScopeTestAccess::Revoke(*revoked.scope, revoked.context.grantGeneration);
     for (const auto task : retained) {
         Require(revoked.tasks.Begin(task) == ScopeResult::Denied, "revoked preparation admitted");
         Require(revoked.tasks.FinishUncommitted(task, ScopeResult::Denied) == ScopeResult::Ok, "revoked native cleanup rejected");

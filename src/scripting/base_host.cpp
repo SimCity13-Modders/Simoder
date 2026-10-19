@@ -1,4 +1,5 @@
 #include "scripting/base_host.hpp"
+#include "mods/fixture_observation.hpp"
 #include "scripting/semantic_bridge.hpp"
 #include "scripting/source_project.hpp"
 #include "scripting/luau_compiler.hpp"
@@ -93,7 +94,7 @@ ScriptDefinition Capture(const std::filesystem::path& root, const BasePackagePin
 }
 
 BaseHost::BaseHost(const std::filesystem::path& directory, BasePackagePin pin,
-    std::function<void(ScriptPhase, std::uint64_t)> observer, std::shared_ptr<SemanticBridge> bridge) {
+    std::function<void(ScriptPhase, std::uint64_t)> observer, std::shared_ptr<SemanticBridge> bridge) : pin_(pin) {
     bool expected{};
     if (!occupied.compare_exchange_strong(expected, true)) throw std::runtime_error("Base host already exists");
     ownsSlot_ = true;
@@ -109,6 +110,9 @@ BaseHost::BaseHost(const std::filesystem::path& directory, BasePackagePin pin,
     } catch (...) { occupied.store(false); ownsSlot_ = false; throw; }
 }
 BaseHost::~BaseHost() {
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    mods::fixture::Destroying(this,mods::fixture::ObjectKind::Base);
+#endif
     runtime_.reset();
     if (ownsSlot_) occupied.store(false);
 }

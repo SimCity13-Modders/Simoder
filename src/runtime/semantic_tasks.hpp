@@ -39,6 +39,15 @@ public:
     /** @summary Releases retained state even after revocation. @param task Handle. @return Cleanup status. */
     ScopeResult Release(TaskHandle task);
 private:
+    friend class sc13::scripting::SemanticBridge;
+    /** @summary Bridges only an actual context-reserved registry publication to its original task.
+     * @param task Issuer-bound handle. @param writer Shared writer reservation. @param publication Registry reservation.
+     * @param plan Prepared native publication. @param scopeGeneration Captured owner. @param runtimeEpoch Captured epoch.
+     * @param input Original copied request, never replacement task data.
+     * @return Native admission or completion status. */
+    ScopeResult CommitPrepared(TaskHandle task, RuntimeCommitDomain::Writer& writer,
+        mods::PatchRegistry::PublicationGuard& publication, mods::PatchRegistry::PreparedPublication& plan,
+        std::uint64_t scopeGeneration, std::uint64_t runtimeEpoch, const copied::Envelope& input);
     std::shared_ptr<RuntimeScope> scope_;
     std::shared_ptr<copied::Storage> storage_;
     std::uint64_t owner_{};

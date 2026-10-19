@@ -85,6 +85,7 @@ SemanticLua::Task& SemanticLua::CheckTask(lua_State* state, int index) {
 }
 int SemanticLua::Validate(lua_State* state) {
     auto& self = Self(state); std::size_t length{}, schemaLength{};
+    if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;}
     const auto* wire = luaL_checklstring(state, 1, &length);
     const auto* schema = luaL_checklstring(state, 2, &schemaLength);
     runtime::copied::Envelope value;
@@ -94,12 +95,14 @@ int SemanticLua::Validate(lua_State* state) {
 }
 int SemanticLua::Wire(lua_State* state) {
     auto& self = Self(state);
+    if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;}
     const auto* value = static_cast<Value*>(lua_touserdatatagged(state,1,valueTag));
     if (!value || value->generation != self.owner_.vmGeneration_) luaL_error(state,"Invalid owner value");
     const auto bytes = value->value.Encode(); lua_pushlstring(state,bytes.data(),bytes.size()); return 1;
 }
 int SemanticLua::Request(lua_State* state) {
     auto& self = Self(state); std::size_t length{};
+    if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;}
     const auto* method = luaL_checklstring(state,1,&length);
     const auto* value = static_cast<Value*>(lua_touserdatatagged(state,2,valueTag));
     if (!value || value->generation != self.owner_.vmGeneration_) luaL_error(state,"Invalid owner value");
@@ -145,15 +148,15 @@ int SemanticLua::PushPoll(lua_State* state, const TaskLease& task) {
     lua_pushstring(state,Code(snapshot.outcome)); lua_setfield(state,-2,"error");
     lua_setreadonly(state,-1,true); return 1;
 }
-int SemanticLua::Poll(lua_State* state) { auto& self=Self(state); return self.PushPoll(state,*self.CheckTask(state,1).lease); }
+int SemanticLua::Poll(lua_State* state) { auto& self=Self(state); if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;} return self.PushPoll(state,*self.CheckTask(state,1).lease); }
 int SemanticLua::Cancel(lua_State* state) {
-    auto& self=Self(state);const auto& lease=*self.CheckTask(state,1).lease;
+    auto& self=Self(state);if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;}const auto& lease=*self.CheckTask(state,1).lease;
     auto result=self.endpoint_->bridge->ValidateContext(*self.endpoint_,lease.context);
     if(result==runtime::ScopeResult::Ok)result=self.endpoint_->tasks->Cancel(lease.handle);
     lua_pushstring(state,Code(result)); return 1;
 }
 int SemanticLua::Observe(lua_State* state) {
-    auto& self=Self(state); auto lease=self.CheckTask(state,1).lease;
+    auto& self=Self(state); if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;} auto lease=self.CheckTask(state,1).lease;
     luaL_checktype(state,2,LUA_TFUNCTION);
     if (!self.AcquireRegistration()) { lua_pushnil(state); lua_pushstring(state,"ResourceLimit"); return 2; }
     for (auto& callback:self.callbacks_) if (callback.reference == -1) {
@@ -163,7 +166,7 @@ int SemanticLua::Observe(lua_State* state) {
     luaL_error(state,"ResourceLimit");
 }
 int SemanticLua::Await(lua_State* state) {
-    auto& self=Self(state); auto lease=self.CheckTask(state,1).lease;
+    auto& self=Self(state); if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;} auto lease=self.CheckTask(state,1).lease;
     for (auto& coroutine:self.coroutines_) if (coroutine.state == state && coroutine.reference != -1 && !coroutine.waiting) {
         if (!lua_isyieldable(state)) luaL_error(state,"Await boundary is not yieldable");
         coroutine.waiting=std::move(lease); coroutine.turn=self.turn_+1;self.Record(SemanticPhase::Await,runtime::ScopeResult::Busy,&coroutine.waiting->context); return lua_yield(state,0);
@@ -171,7 +174,7 @@ int SemanticLua::Await(lua_State* state) {
     luaL_error(state,"Await requires a host-registered coroutine");
 }
 int SemanticLua::Run(lua_State* state) {
-    auto& self=Self(state); luaL_checktype(state,1,LUA_TFUNCTION);
+    auto& self=Self(state); if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;} luaL_checktype(state,1,LUA_TFUNCTION);
     if (self.owner_.bootstrap_ || !self.owner_.committed_ || !self.AcquireRegistration()) {
         lua_pushnil(state); lua_pushstring(state,"NotReady"); return 2;
     }
@@ -204,9 +207,9 @@ void SemanticLua::PushSnapshot(lua_State* state,const LifecycleRecord& record) {
     lua_setreadonly(state,-1,true);
 }
 void SemanticLua::PushSnapshot(lua_State* state) { PushSnapshot(state,CaptureSnapshot()); }
-int SemanticLua::Snapshot(lua_State* state) { auto& self=Self(state); self.PushSnapshot(state); return 1; }
+int SemanticLua::Snapshot(lua_State* state) { auto& self=Self(state); if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;} self.PushSnapshot(state); return 1; }
 int SemanticLua::Subscribe(lua_State* state) {
-    auto& self=Self(state); luaL_checktype(state,1,LUA_TFUNCTION);
+    auto& self=Self(state); if(self.owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;} luaL_checktype(state,1,LUA_TFUNCTION);
     if (self.retained_>=64 || self.mailboxCount_==self.mailbox_.size() || !self.AcquireRegistration()) { lua_pushnil(state); lua_pushstring(state,"ResourceLimit"); return 2; }
     for (std::size_t index=0;index<self.subscriptions_.size();++index) {auto& subscription=self.subscriptions_[index];if (subscription.reference == -1) {
         if (self.mailboxCount_==self.mailbox_.size()) {lua_pushnil(state);lua_pushstring(state,"ResourceLimit");return 2;}
@@ -230,6 +233,7 @@ int SemanticLua::Unsubscribe(lua_State* state){
     lua_pushstring(state,"Ok");return 1;
 }
 int SemanticLua::Descriptors(lua_State* state) {
+    if(Self(state).owner_.preparation_){lua_pushnil(state);lua_pushstring(state,"NotReady");return 2;}
     const auto& methods=Self(state).endpoint_->bridge->Methods(); lua_newtable(state); int index=1;
     for (const auto& method:methods) {
         lua_newtable(state);

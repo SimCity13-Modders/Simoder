@@ -7,6 +7,12 @@
 #include <map>
 #include <mutex>
 #include <utility>
+#include <cstdio>
+#include <algorithm>
+#include <array>
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY) && defined(SIMODER_SCRIPT_LANE_TEST_WITNESS)
+#include "scripting/script_runtime.hpp"
+#endif
 
 namespace sc13::runtime {
 namespace {
@@ -18,22 +24,16 @@ constexpr std::size_t MaxRetainedOperations = 128;
 constexpr std::size_t MaxPendingOperations = 8;
 /** @summary Bound dependency references owned by one module generation. */
 constexpr std::size_t MaxRetainedResources = 64;
+/** @summary Combined native incarnation/phase rejects ABA without separate nonce/phase races. */
+enum class TicketPhase : std::uint64_t { Free,Live,Claimed,Queued,Acknowledged };
+/** @summary Encode one nonreused release-only identity. @param serial Native sequence. @param phase Native phase. @return Atomic word. */
+constexpr std::uint64_t TicketWord(std::uint64_t serial,TicketPhase phase) noexcept {return (serial<<3)|static_cast<std::uint64_t>(phase);}
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+/** @summary Fixture-thread interleavings never run while Q is held. */
+thread_local std::function<void()> commandReservedBarrier,commandWritingBarrier;
+#endif
 /** @summary Process-local generation allocator; zero means exhausted and always denies. */
 std::atomic<std::uint64_t> nextGeneration{1};
-/** @summary Thread-local linked reservations prevent undefined recursive std::mutex try-locking. */
-struct ActiveCommit final {
-    const void* domain;
-    ActiveCommit* previous;
-};
-thread_local ActiveCommit* activeCommit{};
-/** @summary Stack-only writer identity guard shared by byte and copied-value commits. */
-struct ActiveReservation final {
-    ActiveCommit entry;
-    /** @summary Registers the already locked writer domain. @param domain Native domain identity. */
-    explicit ActiveReservation(const void* domain) : entry{domain, activeCommit} { activeCommit = &entry; }
-    /** @summary Restores the enclosing writer identity. */
-    ~ActiveReservation() { activeCommit = entry.previous; }
-};
 /** @summary Allocates without wraparound reuse. @return Unique nonzero generation or zero. */
 std::uint64_t AllocateGeneration() noexcept {
     auto value = nextGeneration.load();
@@ -44,15 +44,71 @@ std::uint64_t AllocateGeneration() noexcept {
 }
 }
 
+thread_local RuntimeCommitDomain::Writer* RuntimeCommitDomain::activeWriter_{};
+RuntimeCommitDomain::Writer::Writer(RuntimeCommitDomain& domain, bool wait)
+    : domain_(domain), lock_(domain.lane_, std::defer_lock) {
+    if (domain.WriterActiveOnCurrentThread()) return;
+    if (wait) lock_.lock(); else static_cast<void>(lock_.try_lock());
+    if (lock_.owns_lock()) { previous_ = activeWriter_; activeWriter_ = this; }
+}
+bool RuntimeCommitDomain::WriterActiveOnCurrentThread() const noexcept {
+    for (auto* active = activeWriter_; active; active = active->previous_)
+        if (&active->domain_ == this) return true;
+    return false;
+}
+RuntimeCommitDomain::Writer::~Writer() {
+    if (lock_.owns_lock()) activeWriter_ = previous_;
+}
+bool RuntimeCommitDomain::Writer::CanAdvance() const noexcept {
+    return Acquired() && !domain_.IsStopping() && domain_.revision_.load() != UINT64_MAX;
+}
+std::uint64_t RuntimeCommitDomain::Writer::Advance() noexcept {
+    return CanAdvance() ? ++domain_.revision_ : 0;
+}
+std::uint64_t RuntimeCommitDomain::Writer::AdvanceRollback() noexcept {
+    return Acquired() && domain_.revision_.load() != UINT64_MAX ? ++domain_.revision_ : 0;
+}
+
 /** @summary Small owned authority/queue state retained independently by executing callbacks. */
 struct RuntimeScope::State final {
+    /** @summary Fixed exact retirement mailbox; phase zero is free, one writing, two ready and three draining. */
+    struct CommandRelease final {
+        std::atomic_uint8_t phase{};
+        OperationContext context;
+        std::uint64_t ticketSerial{};
+        std::size_t ticketSlot{};
+    };
+    std::array<CommandRelease,MaxRetainedOperations> commandReleases{};
+    /** @summary Sticky impossible-capacity fault keeps remaining reservations retained and closes native admission. */
+    std::atomic_bool commandReleaseOverflow{};
+    /** @summary Fixed original-context tickets share the existing retained reservation admission budget. */
+    struct CommandRecord final {std::atomic_uint64_t word{};OperationContext context;};
+    std::array<CommandRecord,MaxRetainedOperations> commandTickets{};
+    static_assert(sizeof(commandTickets)<=32U*1024U,"Reviewed fixed command-ticket metadata bound");
+    /** @summary Fixed provenance beside the unchanged bounded resource vector; generic opaque resources stay unqualified. */
+    std::array<bool,MaxRetainedResources> resourceScopeOwned{};
+    /** @summary Native scope retirement sequence retained across off-guard destruction. */
+    struct Retirement final {
+        std::atomic_bool turn{};
+        std::atomic_uint64_t completed{};
+        std::uint64_t sequence{},joined{};
+        std::size_t outstandingTickets{};
+        std::uint64_t nextTicket{1};
+        bool invariant{};
+    } retirement;
     /** @summary Internal fixture grant records; production store remains unavailable and empty. */
     struct Grant final {
         OperationContext context;
+        std::map<std::uint64_t, OperationContext> reservations;
+        std::uint64_t capabilities{};
+        std::uint64_t required{};
+        bool restricted{};
+        bool allParticipants{};
         bool sessionAllowed{};
         bool entityAllowed{};
         bool mandatoryAllowed{};
         bool revoked{};
+        std::uint64_t revision{1};
     };
     /** @summary Retained copied operation with explicit nonreplayable completion. */
     struct Operation final {
@@ -63,22 +119,42 @@ struct RuntimeScope::State final {
         Phase phase{Phase::Queued};
         ScopeResult outcome{ScopeResult::Busy};
         std::shared_ptr<copied::Storage> storage;
-        copied::Envelope valueInput, valueResult;
+        copied::Envelope valueInput, valueResult, preparedResult;
         copied::Reservation resultArena, resultWire, metadata;
         bool valueOperation{};
         bool committed{};
     };
+    using OperationMap=std::map<std::uint64_t,Operation>;
+    /** @summary Fixed off-Q transfer holders duplicate no payload and keep original State alive through acknowledgement. */
+    struct DisposalStorage final {
+        OperationMap::node_type operation;
+        std::shared_ptr<void> resource;
+        std::shared_ptr<State> owner;
+        std::uint64_t sequence{};
+    };
+    static_assert(sizeof(DisposalStorage)+sizeof(Retirement)+sizeof(std::unique_lock<std::mutex>)<=1024,
+        "Reviewed additional native disposal holder/turn metadata bound");
     mutable std::mutex mutex;
     std::shared_ptr<RuntimeCommitDomain> domain;
     std::condition_variable drained;
     std::shared_ptr<platform::RuntimeOwner> owner;
     std::vector<std::shared_ptr<void>> resources;
     std::map<std::uint64_t, Grant> grants;
-    std::map<std::uint64_t, Operation> operations;
+    OperationMap operations;
+    std::vector<std::uint64_t> disconnectedChannels;
     std::uint64_t generation{AllocateGeneration()};
     std::uint64_t epoch{1};
     std::uint64_t nextOperation{1};
-    std::uint64_t nextSession{1};
+    std::uint64_t nextGrant{1};
+    std::uint64_t nextReservation{1};
+    std::size_t retainedReservations{};
+    bool admissionClosed{};
+    std::uint64_t fixtureContent{};
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    std::map<std::uint64_t, RuntimeScopeTestAccess::Review> challenges;
+    std::optional<RuntimeScopeTestAccess::Review> currentReview;
+    std::uint64_t nextChallenge{1};
+#endif
     std::size_t running{};
     std::size_t registrations{};
     std::uint32_t readiness{};
@@ -97,6 +173,7 @@ RuntimeScope::RuntimeScope(std::shared_ptr<platform::RuntimeOwner> owner, std::s
     state_->owner = std::move(owner);
 }
 RuntimeScope::~RuntimeScope() { RequestStop(); }
+RuntimeCommitDomain& RuntimeScope::stateDomain() noexcept { return *state_->domain; }
 
 bool RuntimeScope::CommitActivation() {
     const std::lock_guard lock(state_->mutex);
@@ -132,13 +209,14 @@ void RuntimeScope::RequestStop(StopReason reason) noexcept {
 }
 bool RuntimeScope::DrainFor(std::chrono::milliseconds timeout) {
     const auto state = state_;
-    std::vector<std::shared_ptr<void>> released;
+    decltype(state->resources) released;
     {
         std::unique_lock lock(state->mutex);
         if (!state->stopping || timeout.count() < 0) return false;
         if (!state->drained.wait_for(lock, timeout, [&] { return state->running == 0; })) return false;
         state->safelyDrained = true;
         released.swap(state->resources);
+        state->resourceScopeOwned.fill(false);
     }
     // @summary Resource destructors may reenter; release them after dropping the state lock.
     released.clear();
@@ -148,6 +226,7 @@ bool RuntimeScope::RetainResource(std::shared_ptr<void> resource) {
     if (!resource) return false;
     const std::lock_guard lock(state_->mutex);
     if (state_->stopping || state_->domain->IsStopping() || state_->resources.size() + state_->registrations >= MaxRetainedResources) return false;
+    state_->resourceScopeOwned[state_->resources.size()]=false;
     state_->resources.push_back(std::move(resource));
     return true;
 }
@@ -164,31 +243,204 @@ void RuntimeScope::ReleaseRegistration() noexcept {
 }
 ScopeSnapshot RuntimeScope::Current() const {
     const std::lock_guard lock(state_->mutex);
-    return {state_->generation, state_->epoch, state_->domain->revision_.load(), state_->running, state_->operations.size(),
-            state_->committed, state_->stopping, state_->safelyDrained};
+    return SnapshotLocked(*state_);
+}
+void RuntimeScope::DrainCommandReleasesLocked(State& state) noexcept {
+    for(auto& slot:state.commandReleases) {
+        std::uint8_t ready=2;
+        if(!slot.phase.compare_exchange_strong(ready,3,std::memory_order_acquire))continue;
+        if(slot.ticketSlot>=state.commandTickets.size() ||
+            state.commandTickets[slot.ticketSlot].context!=slot.context ||
+            AcknowledgeCommandLocked(state,slot.ticketSlot,slot.ticketSerial)!=ScopeResult::Ok)
+            {state.retirement.invariant=true;state.admissionClosed=true;state.domain->RequestStop();}
+        slot.phase.store(0,std::memory_order_release);
+    }
+}
+ScopeResult RuntimeScope::AcknowledgeCommandLocked(State& state,std::size_t slot,std::uint64_t serial) noexcept {
+    if(slot>=state.commandTickets.size() || !serial)return ScopeResult::Stale;
+    auto& record=state.commandTickets[slot];const auto word=record.word.load(std::memory_order_acquire);
+    if(word==TicketWord(serial,TicketPhase::Acknowledged))return ScopeResult::Ok;
+    if(word!=TicketWord(serial,TicketPhase::Claimed) && word!=TicketWord(serial,TicketPhase::Queued))return ScopeResult::Stale;
+    const auto& context=record.context;const auto grant=state.grants.find(context.grantGeneration);
+    if(grant==state.grants.end() || context==grant->second.context){state.retirement.invariant=true;state.admissionClosed=true;state.domain->RequestStop();return ScopeResult::Indeterminate;}
+    const auto reservation=grant->second.reservations.find(context.reservation);
+    if(reservation==grant->second.reservations.end() || reservation->second!=context || !state.retainedReservations || !state.retirement.outstandingTickets){
+        state.retirement.invariant=true;state.admissionClosed=true;state.domain->RequestStop();return ScopeResult::Indeterminate;
+    }
+    grant->second.reservations.erase(reservation);--state.retainedReservations;--state.retirement.outstandingTickets;
+    record.word.store(TicketWord(serial,TicketPhase::Acknowledged),std::memory_order_release);return ScopeResult::Ok;
+}
+ScopeResult RuntimeScope::ReleaseCommandTicket(const CommandTicket& ticket) noexcept {
+    const auto state=state_;
+    if(ticket.owner_!=state->generation || !ticket.serial_ || ticket.slot_>=state->commandTickets.size())return ScopeResult::Stale;
+    auto& record=state->commandTickets[ticket.slot_];auto expected=TicketWord(ticket.serial_,TicketPhase::Live);
+    if(!record.word.compare_exchange_strong(expected,TicketWord(ticket.serial_,TicketPhase::Claimed),std::memory_order_acq_rel)){
+        if(expected==TicketWord(ticket.serial_,TicketPhase::Acknowledged))return ScopeResult::Ok;
+        if((expected>>3)!=ticket.serial_)return ScopeResult::Stale;
+        return ScopeResult::Busy;
+    }
+    std::unique_lock lock(state->mutex,std::try_to_lock);
+    if(lock.owns_lock())return AcknowledgeCommandLocked(*state,ticket.slot_,ticket.serial_);
+    for(auto& slot:state->commandReleases) {
+        std::uint8_t empty=0;
+        if(!slot.phase.compare_exchange_strong(empty,1,std::memory_order_acquire))continue;
+        slot.context=record.context;slot.ticketSerial=ticket.serial_;slot.ticketSlot=ticket.slot_;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        try{if(commandWritingBarrier)commandWritingBarrier();}catch(...){state->commandReleaseOverflow.store(true);state->domain->RequestStop();return ScopeResult::Indeterminate;}
+#endif
+        // @summary Publish exact transfer ownership before Ready, so a reducer never observes an unowned ready record.
+        record.word.store(TicketWord(ticket.serial_,TicketPhase::Queued),std::memory_order_release);
+        slot.phase.store(2,std::memory_order_release);
+        return ScopeResult::NotReady;
+    }
+    // @summary At most 127 fresh tickets coexist with the retained root grant in the 128-slot scope budget.
+    // Writing/ready/draining slots each still represent one distinct retained reservation; ordinary code cannot fill this mailbox.
+    // On native invariant failure retain the original map/context for final State cleanup and stop admission, never terminate or wait.
+    state->commandReleaseOverflow.store(true);state->domain->RequestStop();return ScopeResult::Indeterminate;
+}
+ScopeSnapshot RuntimeScope::SnapshotLocked(const State& state) noexcept {
+    return {state.generation,state.epoch,state.domain->revision_.load(),state.running,state.operations.size(),
+        state.committed,state.stopping,state.safelyDrained};
+}
+RuntimeScope::RetirementObservation RuntimeScope::ObserveRetirement() noexcept {
+    const auto state=state_;RetirementObservation output;output.generation=state->generation;
+    output.ticketBytes=sizeof(state->commandTickets);output.disposalBytes=sizeof(State::DisposalStorage)+sizeof(State::Retirement)+sizeof(std::unique_lock<std::mutex>);
+    /** @summary Compare the existing mailbox layout to expose all added fixed metadata, not opaque resource payload bytes. */
+    struct OriginalMailbox final {std::atomic_uint8_t phase{};OperationContext context;};
+    output.metadataBytes=sizeof(State::Retirement)+sizeof(state->resourceScopeOwned)+
+        state->commandReleases.size()*(sizeof(State::CommandRelease)-sizeof(OriginalMailbox));
+    bool idle=false;if(!state->retirement.turn.compare_exchange_strong(idle,true)){output.result=ScopeResult::Busy;return output;}
+    /** @summary Releases the native turn without running any resource destructor. */
+    struct Turn final {State& state;/** @summary Release only this native observation turn. */~Turn(){state.retirement.turn.store(false,std::memory_order_release);}} turn{*state};
+    std::unique_lock lock(state->mutex,std::try_to_lock);if(!lock.owns_lock()){output.result=ScopeResult::Busy;return output;}
+    auto& retirement=state->retirement;
+    const auto completed=retirement.completed.load(std::memory_order_acquire);
+    if(completed==retirement.sequence)retirement.joined=completed;
+    output.disposalSequence=retirement.sequence;output.disposalAcknowledged=retirement.joined;
+    output.disposalPending=retirement.sequence!=retirement.joined;
+    output.running=state->running;output.registrations=state->registrations;output.operations=state->operations.size();output.resources=state->resources.size();
+    for(std::size_t index=0;index<state->resources.size();++index)if(!state->resourceScopeOwned[index])++output.unknownResources;
+    output.commandTickets=retirement.outstandingTickets;output.stopping=state->stopping;
+    output.invariant=retirement.invariant || state->commandReleaseOverflow.load();
+    for(const auto& mailbox:state->commandReleases){const auto phase=mailbox.phase.load(std::memory_order_acquire);if(phase==1)++output.mailboxWriting;else if(phase==2)++output.mailboxReady;else if(phase==3)++output.mailboxDraining;}
+    for(const auto& [grantId,grant]:state->grants){
+        static_cast<void>(grantId);
+        for(const auto& [serial,context]:grant.reservations){
+            static_cast<void>(serial);if(context==grant.context){++output.rootReservations;continue;}
+            bool tracked=false;
+            for(const auto& ticket:state->commandTickets){const auto phase=static_cast<TicketPhase>(ticket.word.load(std::memory_order_acquire)&7U);
+                if(phase!=TicketPhase::Free && phase!=TicketPhase::Acknowledged && ticket.context==context){tracked=true;break;}}
+            if(!tracked)++output.nonCommandFreshReservations;
+        }
+    }
+    output.scopeReady=state->generation && state->stopping && state->admissionClosed && !output.running && !output.registrations &&
+        !output.operations && !output.resources && !output.commandTickets && !output.nonCommandFreshReservations &&
+        !output.mailboxWriting && !output.mailboxReady && !output.mailboxDraining && !output.disposalPending && !output.invariant;
+    output.result=output.scopeReady?ScopeResult::Ok:ScopeResult::NotReady;return output;
+}
+ScopeResult RuntimeScope::DrainRetirementOne() noexcept {
+    const auto state=state_;
+    if(state->domain->WriterActiveOnCurrentThread())return ScopeResult::Denied;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY) && defined(SIMODER_SCRIPT_LANE_TEST_WITNESS)
+    if(scripting::ScriptRuntime::OnScriptLane())return ScopeResult::Denied;
+#endif
+    bool idle=false;if(!state->retirement.turn.compare_exchange_strong(idle,true))return ScopeResult::Busy;
+    /** @summary Keeps arbitrary destruction outside Q while retaining exact turn ownership. */
+    struct Turn final {State& state;/** @summary Release the turn after off-guard destruction and native acknowledgement. */~Turn(){state.retirement.turn.store(false,std::memory_order_release);}} turn{*state};
+    State::DisposalStorage disposal;disposal.owner=state;
+    {
+        std::unique_lock lock(state->mutex,std::try_to_lock);if(!lock.owns_lock())return ScopeResult::Busy;
+        auto& retirement=state->retirement;
+        if(retirement.sequence!=retirement.joined)return ScopeResult::NotReady;
+        RetireLocked(*state,StopReason::ExplicitShutdown);DrainCommandReleasesLocked(*state);
+        if(retirement.invariant || state->commandReleaseOverflow.load())return ScopeResult::Indeterminate;
+        if(state->running || state->registrations)return ScopeResult::NotReady;
+        auto operation=state->operations.begin();
+        while(operation!=state->operations.end() && operation->second.phase==State::Operation::Phase::Running)++operation;
+        std::size_t resource=0;while(resource<state->resources.size() && !state->resourceScopeOwned[resource])++resource;
+        if(operation==state->operations.end() && resource==state->resources.size())return ScopeResult::NotReady;
+        if(retirement.sequence==UINT64_MAX)return ScopeResult::Denied;
+        if(operation!=state->operations.end())disposal.operation=state->operations.extract(operation);
+        if(resource<state->resources.size()){
+            disposal.resource=std::move(state->resources[resource]);
+            if(resource+1!=state->resources.size()){state->resources[resource]=std::move(state->resources.back());state->resourceScopeOwned[resource]=state->resourceScopeOwned[state->resources.size()-1];}
+            state->resourceScopeOwned[state->resources.size()-1]=false;state->resources.pop_back();
+        }
+        disposal.sequence=++retirement.sequence;
+    }
+    // @summary Copied operation pools are native-owned; resource provenance was explicitly enrolled by a closed native issuer.
+    disposal.operation={};disposal.resource.reset();
+    state->retirement.completed.store(disposal.sequence,std::memory_order_release);
+    return ScopeResult::Ok;
 }
 
-ScopeResult RuntimeScope::Validate(const State& state, const OperationContext& context, bool checkRevision) {
+ScopeResult RuntimeScope::Validate(const State& state, const OperationContext& context, bool checkRevision,
+    bool checkGrantRevision, bool checkCapability, bool candidate) {
     if (!state.generation || context.owner != state.generation || context.epoch != state.epoch) return ScopeResult::Stale;
-    if (state.stopping || state.domain->IsStopping() || !state.committed || !state.ownerAvailable) return ScopeResult::NotReady;
+    if (state.stopping || state.domain->IsStopping() || (!candidate && !state.committed) ||
+        (candidate && state.committed) || !state.ownerAvailable) return ScopeResult::NotReady;
     if (!state.authorityAvailable) return ScopeResult::Denied;
-    if (!context.principal || !context.session || !context.entity || !context.opcode ||
+    if (state.admissionClosed || !context.opcode ||
         !context.readiness || (context.readiness & ~(RuntimeReady | MenuReady | CityReady)) != 0 ||
         std::chrono::steady_clock::now() >= context.deadline) return ScopeResult::Denied;
-    const auto grant = state.grants.find(context.session);
+    const auto grant = state.grants.find(context.grantGeneration);
     if (grant == state.grants.end() || grant->second.revoked) return ScopeResult::Denied;
-    const auto& authorized = grant->second.context;
-    if (context.owner != authorized.owner || context.epoch != authorized.epoch ||
-        context.grantGeneration != authorized.grantGeneration || context.principal != authorized.principal ||
-        context.session != authorized.session || context.entity != authorized.entity ||
-        context.revision != authorized.revision ||
-        context.opcode != authorized.opcode || context.readiness != authorized.readiness ||
-        context.deadline != authorized.deadline || !grant->second.mandatoryAllowed ||
-        !(grant->second.sessionAllowed || grant->second.entityAllowed)) return ScopeResult::Denied;
+    const auto& effective = grant->second;
+    const auto reservation = effective.reservations.find(context.reservation);
+    if (reservation == effective.reservations.end() || reservation->second != context ||
+        (checkGrantRevision && context.grantRevision != effective.revision) ||
+        !effective.mandatoryAllowed || context.opcode > 64 ||
+        (checkCapability && !(effective.capabilities & (std::uint64_t{1} << (context.opcode - 1)))) ||
+        (effective.required & effective.capabilities) != effective.required) return ScopeResult::Denied;
+    if (const auto* script = std::get_if<OrdinaryScriptOrigin>(&context.origin)) {
+        if (script->owner != state.generation || !script->content) return ScopeResult::Denied;
+    } else if (const auto* agent = std::get_if<AgentOrigin>(&context.origin)) {
+        if (agent->owner != state.generation || !agent->content || !agent->actor || !agent->channel ||
+            !agent->consentSession || !agent->entity || !agent->extent ||
+            !(effective.sessionAllowed || (effective.entityAllowed &&
+                std::get<AgentOrigin>(effective.context.origin).actor == agent->actor &&
+                std::get<AgentOrigin>(effective.context.origin).entity == agent->entity)) ||
+            std::find(state.disconnectedChannels.begin(), state.disconnectedChannels.end(), agent->channel) != state.disconnectedChannels.end())
+            return ScopeResult::Denied;
+    } else return ScopeResult::Denied;
     if ((state.readiness & context.readiness) != context.readiness) return ScopeResult::NotReady;
     if (checkRevision && context.revision != state.domain->revision_.load()) return ScopeResult::Conflict;
     return ScopeResult::Ok;
 }
+
+RuntimeScope::LifecycleGuard::LifecycleGuard(RuntimeScope& scope) noexcept
+    : scope_(scope), lock_(scope.state_->mutex, std::try_to_lock) {}
+ScopeResult RuntimeScope::LifecycleGuard::Check(const OperationContext& context, bool candidate) const {
+    return Acquired() ? Validate(*scope_.state_, context, true, true, true, candidate) : ScopeResult::Busy;
+}
+bool RuntimeScope::LifecycleGuard::InDomain(const RuntimeCommitDomain& domain) const noexcept {
+    return Acquired() && scope_.state_->domain.get() == &domain;
+}
+ScopeSnapshot RuntimeScope::LifecycleGuard::Snapshot() const noexcept {
+    return Acquired() ? RuntimeScope::SnapshotLocked(*scope_.state_) : ScopeSnapshot{};
+}
+void RuntimeScope::LifecycleGuard::Retire() noexcept {
+    RuntimeScope::RetireLocked(*scope_.state_,StopReason::OwnerLost);
+}
+void RuntimeScope::RetireLocked(State& state,StopReason reason) noexcept {
+    state.admissionClosed=true;
+    if (state.stopping) return;
+    state.stopping = true; state.admissionClosed = true; state.readiness = 0;
+    state.reason = reason;
+    if (state.epoch != UINT64_MAX) ++state.epoch;
+    for (auto& [id, grant] : state.grants) { (void)id; grant.revoked = true; }
+    for (auto& [id, operation] : state.operations) {
+        (void)id;
+        if (operation.phase == State::Operation::Phase::Queued || operation.phase == State::Operation::Phase::Preparing) {
+            --state.domain->pending_;
+            operation.phase = State::Operation::Phase::Cancelled;
+            operation.outcome = ScopeResult::Cancelled;
+            // @summary Keep copied envelopes, buffers and dependency graphs retained until cleanup outside every fence.
+        }
+    }
+    state.drained.notify_all();
+}
+void RuntimeScope::LifecycleGuard::Activate() noexcept { scope_.state_->committed = true; }
 
 ScopeResult RuntimeScope::Queue(const OperationContext& context, std::span<const std::byte> input, ScopeHandle& output) {
     output = {};
@@ -214,11 +466,8 @@ ScopeResult RuntimeScope::Queue(const OperationContext& context, std::span<const
 ScopeResult RuntimeScope::Commit(const OperationContext& context, ScopeHandle operation, CommitCallback callback) {
     if (!callback) return ScopeResult::Invalid;
     const auto state = state_;
-    for (const auto* active = activeCommit; active; active = active->previous)
-        if (active->domain == state->domain.get()) return ScopeResult::Busy;
-    std::unique_lock lane(state->domain->lane_, std::try_to_lock);
-    if (!lane.owns_lock()) return ScopeResult::Busy;
-    ActiveReservation reservation(state->domain.get());
+    auto lane = state->domain->ReserveWriter();
+    if (!lane.Acquired()) return ScopeResult::Busy;
     std::vector<std::byte> input;
     {
         const std::lock_guard lock(state->mutex);
@@ -291,14 +540,18 @@ ScopeResult RuntimeScope::Cancel(const OperationContext& context, ScopeHandle op
     return ScopeResult::Ok;
 }
 ScopeResult RuntimeScope::Release(std::uint64_t owner, ScopeHandle operation) {
-    const std::lock_guard lock(state_->mutex);
-    if (owner != state_->generation || operation.owner != owner) return ScopeResult::Denied;
-    const auto found = state_->operations.find(operation.serial);
-    if (found == state_->operations.end()) return ScopeResult::Stale;
-    if (found->second.phase == State::Operation::Phase::Running) return ScopeResult::Busy;
-    if (found->second.phase == State::Operation::Phase::Queued) --state_->domain->pending_;
-    if (found->second.phase == State::Operation::Phase::Preparing) --state_->domain->pending_;
-    state_->operations.erase(found);
+    // @summary Extract without allocation, then reclaim retained payloads after releasing the scope guard.
+    decltype(state_->operations)::node_type retired;
+    {
+        const std::lock_guard lock(state_->mutex);
+        if (owner != state_->generation || operation.owner != owner) return ScopeResult::Denied;
+        const auto found = state_->operations.find(operation.serial);
+        if (found == state_->operations.end()) return ScopeResult::Stale;
+        if (found->second.phase == State::Operation::Phase::Running) return ScopeResult::Busy;
+        if (found->second.phase == State::Operation::Phase::Queued ||
+            found->second.phase == State::Operation::Phase::Preparing) --state_->domain->pending_;
+        retired = state_->operations.extract(found);
+    }
     return ScopeResult::Ok;
 }
 
@@ -344,11 +597,8 @@ ScopeResult RuntimeScope::CommitValue(ScopeHandle operation, const ValueCallback
                                     const std::function<ScopeResult()>& precommit) {
     if (!callback) return ScopeResult::Invalid;
     const auto state = state_;
-    for (const auto* active = activeCommit; active; active = active->previous)
-        if (active->domain == state->domain.get()) return ScopeResult::Busy;
-    std::unique_lock lane(state->domain->lane_, std::try_to_lock);
-    if (!lane.owns_lock()) return ScopeResult::Busy;
-    ActiveReservation guard(state->domain.get());
+    auto lane = state->domain->ReserveWriter();
+    if (!lane.Acquired()) return ScopeResult::Busy;
     State::Operation* retained{};
     {
         const std::lock_guard lock(state->mutex);
@@ -392,6 +642,56 @@ ScopeResult RuntimeScope::CommitValue(ScopeHandle operation, const ValueCallback
         state->drained.notify_all();
     }
     return outcome;
+}
+ScopeResult RuntimeScope::CommitPreparedValue(ScopeHandle operation, RuntimeCommitDomain::Writer& writer,
+    mods::PatchRegistry::PublicationGuard& publication, mods::PatchRegistry::PreparedPublication& plan,
+    std::uint64_t scopeGeneration, std::uint64_t runtimeEpoch, const copied::Envelope& input) {
+    const auto state = state_;
+    if (&writer.domain_ != state->domain.get() || !writer.Acquired()) return ScopeResult::Denied;
+    if (!publication.owns_lock()) return ScopeResult::Busy;
+    if (!publication.CanPublish(plan)) return ScopeResult::Conflict;
+    const std::unique_lock lock(state->mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return ScopeResult::Busy;
+    if (operation.owner != state->generation || scopeGeneration != state->generation || runtimeEpoch != state->epoch)
+        return ScopeResult::Stale;
+    const auto found = state->operations.find(operation.serial);
+    if (found == state->operations.end() || !found->second.valueOperation) return ScopeResult::Stale;
+    auto& retained = found->second;
+    if (retained.phase == State::Operation::Phase::Cancelled) return ScopeResult::Cancelled;
+    if (retained.phase != State::Operation::Phase::Preparing) return ScopeResult::Stale;
+    if (!input || input.Schema() != retained.valueInput.Schema() || input.Encode() != retained.valueInput.Encode())
+        return ScopeResult::Invalid;
+    const auto valid = Validate(*state, retained.context, true);
+    if (valid != ScopeResult::Ok) return valid;
+    if (!writer.CanAdvance()) return ScopeResult::NotReady;
+    if (retained.preparedResult) return ScopeResult::Stale;
+    const auto revision = state->domain->Revision();
+    if (revision == UINT64_MAX || plan.ExpectedGeneration() == UINT64_MAX) return ScopeResult::Conflict;
+    // @summary Bounded formatting and the sole codec finish before the irreversible marker; no result allocation follows publication.
+    const auto bytes = retained.resultWire.Bytes();
+    auto* wire = reinterpret_cast<char*>(bytes.data());
+    const int written = std::snprintf(wire, bytes.size(),
+        "{\"v\":1,\"schema\":\"simoder.registry-publication.v1\",\"value\":[\"map\",["
+        "[\"domainRevision\",[\"u64\",\"%llu\"]],[\"live\",[\"string\",\"not-requested\"]],"
+        "[\"publication\",[\"string\",\"registry-committed\"]],[\"registryGeneration\",[\"u64\",\"%llu\"]]]]}",
+        static_cast<unsigned long long>(revision + 1),
+        static_cast<unsigned long long>(plan.ExpectedGeneration() + 1));
+    if (written < 0 || static_cast<std::size_t>(written) >= bytes.size()) return ScopeResult::BufferSmall;
+    if (retained.storage->DecodeReserved({wire, static_cast<std::size_t>(written)},
+        "simoder.registry-publication.v1", retained.resultArena, retained.preparedResult, bytes.size()) != copied::Status::Ok)
+        return ScopeResult::Invalid;
+    // @summary Advance rechecks sticky stop. If stop wins, the hidden prepared receipt remains undisclosed until owner cleanup.
+    const auto committedRevision = writer.Advance();
+    if (!committedRevision) return ScopeResult::NotReady;
+    retained.phase = State::Operation::Phase::Running;
+    retained.committed = true;
+    const bool published = publication.Publish(plan, committedRevision);
+    if (published) retained.valueResult = std::move(retained.preparedResult);
+    retained.outcome = published ? ScopeResult::Ok : ScopeResult::Indeterminate;
+    retained.phase = State::Operation::Phase::Completed;
+    --state->domain->pending_;
+    // @summary Input, reserved buffers and abandoned receipts retire only on later owner cleanup, outside all publication reservations.
+    return retained.outcome;
 }
 ScopeResult RuntimeScope::FinishValue(ScopeHandle operation, ScopeResult reason) {
     if (reason == ScopeResult::Ok || reason == ScopeResult::Indeterminate) return ScopeResult::Invalid;
@@ -438,6 +738,235 @@ ScopeResult RuntimeScope::CancelValue(ScopeHandle operation) {
 }
 
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+std::unique_lock<std::mutex> RuntimeScopeTestAccess::ReserveState(RuntimeScope& scope) {
+    return std::unique_lock<std::mutex>(scope.state_->mutex, std::try_to_lock);
+}
+namespace {
+/** @summary Rejects malformed synthetic native identities before a challenge can be displayed.
+ * @param origin Captured fixture ingress. @param owner Actual fixture scope. @return Whether every selected role field is bound. */
+bool QualifiedOrigin(const OperationOrigin& origin, std::uint64_t owner) {
+    if (const auto* script = std::get_if<OrdinaryScriptOrigin>(&origin))
+        return script->owner == owner && script->content;
+    if (const auto* agent = std::get_if<AgentOrigin>(&origin))
+        return agent->owner == owner && agent->content && agent->actor && agent->channel &&
+            agent->consentSession && agent->entity && agent->extent;
+    return false;
+}
+}
+RuntimeScopeTestAccess::Challenge RuntimeScopeTestAccess::ChallengeDecision(RuntimeScope& scope, const Review& review) {
+    const std::lock_guard lock(scope.state_->mutex);
+    auto& state = *scope.state_;
+    if (!state.authorityAvailable || state.stopping || state.admissionClosed || state.domain->IsStopping() ||
+        state.nextChallenge == UINT64_MAX ||
+        !QualifiedOrigin(review.origin, state.generation) || !state.fixtureContent ||
+        (std::holds_alternative<OrdinaryScriptOrigin>(review.origin) &&
+            (review.sessionAllowed || review.entityAllowed || review.allParticipants)) ||
+        std::visit([&](const auto& origin) {
+            using T = std::decay_t<decltype(origin)>;
+            if constexpr (std::is_same_v<T, UnqualifiedOrigin>) return true;
+            else return origin.content != state.fixtureContent;
+        }, review.origin) || !review.revision || !review.action ||
+        !review.requested || (review.required & ~review.requested) || (review.approved & ~review.requested) ||
+        !review.opcode || review.opcode > 64 || !review.readiness ||
+        (review.readiness & ~(RuntimeReady | MenuReady | CityReady)) ||
+        review.expires <= std::chrono::steady_clock::now() ||
+        review.expires > std::chrono::steady_clock::now() + std::chrono::hours(24)) return {};
+    if (const auto* agent = std::get_if<AgentOrigin>(&review.origin))
+        if (std::find(state.disconnectedChannels.begin(), state.disconnectedChannels.end(), agent->channel) !=
+            state.disconnectedChannels.end()) return {};
+    if (state.currentReview && review.revision < state.currentReview->revision) return {};
+    if (state.currentReview && *state.currentReview != review) state.challenges.clear();
+    if (state.challenges.size() >= MaxRetainedOperations) return {};
+    state.currentReview = review;
+    const auto serial = state.nextChallenge++;
+    state.challenges.emplace(serial, review);
+    return {state.generation, serial};
+}
+OperationContext RuntimeScopeTestAccess::Decide(RuntimeScope& scope, Challenge challenge, const Review& review) {
+    auto writer = scope.state_->domain->ReserveWriter();
+    if (!writer.Acquired()) return {};
+    const std::lock_guard lock(scope.state_->mutex);
+    auto& state = *scope.state_;
+    if (challenge.owner != state.generation) return {};
+    const auto found = state.challenges.find(challenge.serial);
+    if (found == state.challenges.end()) return {};
+    const auto reviewed = found->second;
+    state.challenges.erase(found);
+    if (reviewed != review || !state.authorityAvailable || state.stopping || state.admissionClosed ||
+        state.domain->IsStopping() || review.expires <= std::chrono::steady_clock::now())
+        return {};
+    if ((review.required & review.approved) != review.required ||
+        (review.approved != review.requested && !review.supportsRestricted)) {
+        // @summary Close admission before deferred retirement; this fixture never performs physical patch cleanup.
+        state.admissionClosed = true;
+        for (auto& [id, grant] : state.grants) { (void)id; grant.revoked = true; }
+        return {};
+    }
+    if (state.grants.size() >= MaxRetainedOperations || state.retainedReservations >= MaxRetainedOperations ||
+        state.nextGrant == UINT64_MAX || state.nextReservation == UINT64_MAX) return {};
+    const auto serial = state.nextGrant++;
+    OperationContext context;
+    context.owner = state.generation; context.epoch = state.epoch; context.grantGeneration = serial;
+    context.grantRevision = 1;
+    context.origin = review.origin; context.decision = {challenge.serial, review.revision, review.action};
+    context.reservation = state.nextReservation++; context.revision = state.domain->Revision();
+    context.opcode = review.opcode; context.readiness = review.readiness; context.deadline = review.expires;
+    RuntimeScope::State::Grant grant;
+    grant.context = context; grant.reservations.emplace(context.reservation, context);
+    grant.capabilities = review.approved; grant.required = review.required;
+    grant.restricted = review.approved != review.requested; grant.allParticipants = review.allParticipants;
+    grant.sessionAllowed = review.sessionAllowed; grant.entityAllowed = review.entityAllowed;
+    grant.mandatoryAllowed = review.mandatoryAllowed;
+    state.grants.emplace(serial, std::move(grant));
+    ++state.retainedReservations;
+    return context;
+}
+OperationContext RuntimeScopeTestAccess::Reserve(RuntimeScope& scope, const OperationContext& context) {
+    const std::lock_guard lock(scope.state_->mutex);
+    return ReserveLocked(scope,context);
+}
+OperationContext RuntimeScopeTestAccess::TryReserve(RuntimeScope& scope,const OperationContext& context) {
+    std::unique_lock lock(scope.state_->mutex,std::try_to_lock);if(!lock.owns_lock())return {};
+    return ReserveLocked(scope,context);
+}
+OperationContext RuntimeScope::TryReserveCommand(const OperationContext& context,CommandTicket& ticket) {
+    if(ticket.serial_ || context.opcode!=1)return {};
+    return TryReserveTracked(context,ticket,ReservationRole::Command);
+}
+ScopeResult RuntimeScope::CheckRootDecision(const OperationContext& context) noexcept {
+    std::unique_lock lock(state_->mutex,std::try_to_lock);if(!lock.owns_lock())return ScopeResult::Busy;
+    if(state_->stopping || state_->admissionClosed || state_->domain->IsStopping())return ScopeResult::Denied;
+    const auto result=Validate(*state_,context,false,false,true,!state_->committed);if(result!=ScopeResult::Ok)return result;
+    const auto grant=state_->grants.find(context.grantGeneration);
+    return grant!=state_->grants.end() && grant->second.context==context?ScopeResult::Ok:ScopeResult::Denied;
+}
+OperationContext RuntimeScope::TryReserveTracked(const OperationContext& context,CommandTicket& ticket,ReservationRole role,ScopeResult* status) {
+    if(status)*status=ScopeResult::NotReady;
+    if(ticket.serial_){if(status)*status=ScopeResult::Invalid;return {};}
+    OperationContext fresh;
+    {
+        std::unique_lock lock(state_->mutex,std::try_to_lock);if(!lock.owns_lock()){if(status)*status=ScopeResult::Busy;return {};}
+        if(status && (state_->stopping || state_->admissionClosed || state_->domain->IsStopping())){*status=ScopeResult::Denied;return {};}
+        const bool candidate=role==ReservationRole::LifecycleDecision && !state_->committed;
+        const auto valid=Validate(*state_,context,false,false,true,candidate);if(valid!=ScopeResult::Ok){if(status)*status=valid;return {};}
+        if(state_->retirement.invariant || state_->commandReleaseOverflow.load() || state_->retirement.nextTicket>(UINT64_MAX>>3))return {};
+        std::size_t slot=state_->commandTickets.size();
+        for(std::size_t index=0;index<state_->commandTickets.size();++index){
+            const auto phase=static_cast<TicketPhase>(state_->commandTickets[index].word.load(std::memory_order_acquire)&7U);
+            if(phase==TicketPhase::Free || phase==TicketPhase::Acknowledged){slot=index;break;}
+        }
+        if(slot==state_->commandTickets.size())return {};
+        fresh=ReserveFreshLocked(context,role);
+        if(!fresh.reservation || fresh.reservation==context.reservation)return {};
+        auto& record=state_->commandTickets[slot];record.context=fresh;
+        ticket.owner_=state_->generation;ticket.slot_=slot;ticket.serial_=state_->retirement.nextTicket++;
+        ++state_->retirement.outstandingTickets;
+        record.word.store(TicketWord(ticket.serial_,TicketPhase::Live),std::memory_order_release);
+    }
+    try{if(commandReservedBarrier)commandReservedBarrier();}
+    catch(...){static_cast<void>(ReleaseCommandTicket(ticket));ticket={};return {};}
+    if(status)*status=ScopeResult::Ok;
+    return fresh;
+}
+ScopeRetirementTestAccess::Reservation ScopeRetirementTestAccess::Reserve(RuntimeScope& scope,const OperationContext& context){
+    Reservation result;result.context=scope.TryReserveCommand(context,result.ticket);return result;
+}
+ScopeResult ScopeRetirementTestAccess::Release(RuntimeScope& scope,const Ticket& ticket){return scope.ReleaseCommandTicket(ticket);}
+ScopeRetirementTestAccess::Observation ScopeRetirementTestAccess::Observe(RuntimeScope& scope){return scope.ObserveRetirement();}
+ScopeResult ScopeRetirementTestAccess::DrainOne(RuntimeScope& scope){return scope.DrainRetirementOne();}
+bool ScopeRetirementTestAccess::RetainSafe(RuntimeScope& scope,std::shared_ptr<void> resource){
+    if(!resource)return false;const std::scoped_lock lock(scope.state_->mutex);
+    if(scope.state_->stopping || scope.state_->domain->IsStopping() || scope.state_->resources.size()+scope.state_->registrations>=MaxRetainedResources)return false;
+    scope.state_->resources.push_back(std::move(resource));scope.state_->resourceScopeOwned[scope.state_->resources.size()-1]=true;return true;
+}
+void ScopeRetirementTestAccess::Barriers(std::function<void()> reserved,std::function<void()> writing){
+    commandReservedBarrier=std::move(reserved);commandWritingBarrier=std::move(writing);
+}
+OperationContext RuntimeScopeTestAccess::ReserveLocked(RuntimeScope& scope,const OperationContext& context) {
+    return scope.ReserveFreshLocked(context,RuntimeScope::ReservationRole::Command);
+}
+OperationContext RuntimeScope::ReserveFreshLocked(const OperationContext& context,ReservationRole role) {
+    DrainCommandReleasesLocked(*state_);
+    auto& state = *state_;
+    const bool candidate=role==ReservationRole::LifecycleDecision && !state.committed;
+    if (Validate(state, context, false, false,true,candidate) != ScopeResult::Ok || state.nextReservation == UINT64_MAX ||
+        state.retainedReservations >= MaxRetainedOperations) return {};
+    auto& grant = state.grants.at(context.grantGeneration);
+    auto fresh = context;
+    fresh.grantRevision = grant.revision;
+    fresh.reservation = state.nextReservation++; fresh.revision = state.domain->Revision();
+    grant.reservations.emplace(fresh.reservation, fresh);
+    ++state.retainedReservations;
+    return fresh;
+}
+std::size_t RuntimeScopeTestAccess::Reservations(const RuntimeScope& scope) {
+    const std::lock_guard lock(scope.state_->mutex);
+    RuntimeScope::DrainCommandReleasesLocked(*scope.state_);return scope.state_->retainedReservations;
+}
+OperationContext RuntimeScopeTestAccess::Join(RuntimeScope& scope, const OperationContext& context,
+    std::uint64_t actor, std::uint64_t channel) {
+    const std::lock_guard lock(scope.state_->mutex);
+    auto& state = *scope.state_;
+    if (!actor || !channel || RuntimeScope::Validate(state, context, false) != ScopeResult::Ok ||
+        state.nextReservation == UINT64_MAX || state.retainedReservations >= MaxRetainedOperations) return {};
+    auto& grant = state.grants.at(context.grantGeneration);
+    if (!grant.allParticipants || !grant.sessionAllowed || grant.reservations.size() >= MaxRetainedOperations ||
+        !std::holds_alternative<AgentOrigin>(context.origin) ||
+        std::find(state.disconnectedChannels.begin(), state.disconnectedChannels.end(), channel) != state.disconnectedChannels.end()) return {};
+    auto joined = context;
+    auto& origin = std::get<AgentOrigin>(joined.origin);
+    origin.actor = actor; origin.channel = channel;
+    // @summary Entity consent belongs to its originally reviewed actor; session membership alone cannot borrow it.
+    joined.reservation = state.nextReservation++; joined.revision = state.domain->Revision();
+    grant.reservations.emplace(joined.reservation, joined);
+    ++state.retainedReservations;
+    return joined;
+}
+ScopeResult RuntimeScopeTestAccess::RevokeSession(RuntimeScope& scope, std::uint64_t identity) {
+    auto writer = scope.state_->domain->ReserveWriter();
+    if (!writer.Acquired()) return ScopeResult::Busy;
+    const std::lock_guard lock(scope.state_->mutex);
+    bool matched{};
+    for (auto pending = scope.state_->challenges.begin(); pending != scope.state_->challenges.end();) {
+        const auto* origin = std::get_if<AgentOrigin>(&pending->second.origin);
+        if (origin && origin->consentSession == identity) {
+            matched = true; pending = scope.state_->challenges.erase(pending);
+        } else ++pending;
+    }
+    for (auto& [id, grant] : scope.state_->grants) {
+        (void)id;
+        const auto* origin = std::get_if<AgentOrigin>(&grant.context.origin);
+        if (!origin || origin->consentSession != identity) continue;
+        matched = true; grant.sessionAllowed = false;
+        if (grant.revision != UINT64_MAX) ++grant.revision;
+        else grant.revoked = true;
+    }
+    return matched ? ScopeResult::Ok : ScopeResult::Stale;
+}
+ScopeResult RuntimeScopeTestAccess::Disconnect(RuntimeScope& scope, std::uint64_t channel) {
+    auto writer = scope.state_->domain->ReserveWriter();
+    if (!writer.Acquired()) return ScopeResult::Busy;
+    const std::lock_guard lock(scope.state_->mutex);
+    if (!channel) return ScopeResult::Invalid;
+    for (auto pending = scope.state_->challenges.begin(); pending != scope.state_->challenges.end();) {
+        const auto* origin = std::get_if<AgentOrigin>(&pending->second.origin);
+        if (origin && origin->channel == channel) pending = scope.state_->challenges.erase(pending);
+        else ++pending;
+    }
+    auto& closed = scope.state_->disconnectedChannels;
+    if (std::find(closed.begin(), closed.end(), channel) != closed.end()) return ScopeResult::Ok;
+    if (closed.size() < MaxRetainedOperations) closed.push_back(channel);
+    else scope.state_->admissionClosed = true;
+    return ScopeResult::Ok;
+}
+RuntimeScopeTestAccess::PermissionView RuntimeScopeTestAccess::Inspect(RuntimeScope& scope, const OperationContext& context) {
+    const std::lock_guard lock(scope.state_->mutex);
+    const auto& state = *scope.state_;
+    if (RuntimeScope::Validate(state, context, false, true, false) != ScopeResult::Ok)
+        return {0, false, state.admissionClosed};
+    const auto& grant = state.grants.at(context.grantGeneration);
+    return {grant.capabilities, grant.restricted, false};
+}
 std::size_t RuntimeScopeTestAccess::Registrations(const RuntimeScope& scope) {
     const std::lock_guard lock(scope.state_->mutex);
     return scope.state_->registrations;
@@ -446,25 +975,40 @@ std::unique_ptr<RuntimeScope> RuntimeScopeTestAccess::Create(std::shared_ptr<Run
     auto scope = std::make_unique<RuntimeScope>(nullptr, std::move(domain));
     scope->state_->ownerAvailable = true;
     scope->state_->authorityAvailable = true;
+    // @summary Opaque isolated loaded-content pin, explicitly not a durable source/dependency identity.
+    scope->state_->fixtureContent = 1;
     return scope;
 }
 OperationContext RuntimeScopeTestAccess::Issue(RuntimeScope& scope, bool sessionAllowed, bool entityAllowed,
                                               bool mandatoryAllowed, std::uint32_t opcode,
                                               std::chrono::milliseconds lease, std::uint32_t readiness) {
-    const std::lock_guard lock(scope.state_->mutex);
-    auto& state = *scope.state_;
-    if (!state.authorityAvailable || state.grants.size() >= MaxRetainedOperations || state.stopping || state.domain->IsStopping() ||
-        state.nextSession == std::numeric_limits<std::uint64_t>::max()) return {};
-    const auto session = state.nextSession++;
-    OperationContext context{state.generation, state.epoch, session, 7, session, 11, state.domain->revision_.load(), opcode,
-                             readiness, std::chrono::steady_clock::now() + lease};
-    state.grants.emplace(session, RuntimeScope::State::Grant{context, sessionAllowed, entityAllowed, mandatoryAllowed, false});
+    Review review;
+    // @summary Legacy fixture grants are independent optional operations; dedicated reviews test required-owner retirement.
+    review.required = 0;
+    review.origin = AgentOrigin{scope.Current().generation, 1, 7, 13, 17, 11, 1};
+    review.sessionAllowed = sessionAllowed; review.entityAllowed = entityAllowed;
+    review.mandatoryAllowed = mandatoryAllowed; review.opcode = opcode; review.readiness = readiness;
+    review.expires = std::chrono::steady_clock::now() + lease;
+    auto context = Decide(scope, ChallengeDecision(scope, review), review);
+    if (!context.owner && lease.count() <= 0) {
+        const auto current = scope.Current(); context.owner = current.generation; context.epoch = current.epoch;
+    }
     return context;
 }
-void RuntimeScopeTestAccess::Revoke(RuntimeScope& scope, std::uint64_t session) {
+ScopeResult RuntimeScopeTestAccess::Revoke(RuntimeScope& scope, std::uint64_t grantIdentity) {
+    auto writer = scope.state_->domain->ReserveWriter();
+    if (!writer.Acquired()) return ScopeResult::Busy;
     const std::lock_guard lock(scope.state_->mutex);
-    const auto found = scope.state_->grants.find(session);
-    if (found != scope.state_->grants.end()) found->second.revoked = true;
+    const auto found = scope.state_->grants.find(grantIdentity);
+    if (found != scope.state_->grants.end()) {
+        // @summary A fresh reviewed action is required after revocation; an older pending prompt cannot restore admission.
+        scope.state_->challenges.clear();
+        found->second.revoked = true;
+        if (found->second.revision != UINT64_MAX) ++found->second.revision;
+        if (found->second.required) scope.state_->admissionClosed = true;
+        return ScopeResult::Ok;
+    }
+    return ScopeResult::Stale;
 }
 #endif
 }

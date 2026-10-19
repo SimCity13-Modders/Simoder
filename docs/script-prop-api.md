@@ -1,5 +1,9 @@
 # PROP scripting API
 
+The [proposed production adapter contract](architecture/prop-adapter-contract.md)
+describes the U3f migration gates. It does not change these current bindings or
+enable a new permission provider or SDK facet.
+
 `simoder.props` supports the existing verified scalar float32 PROP path. It does
 not register new resources or replace resource streams. Scripts can add absolute
 overrides for existing fields, clear their own overrides and read copied historical

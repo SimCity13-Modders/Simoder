@@ -2,6 +2,7 @@
 #include "mods/mod_manager.hpp"
 #include "mods/patch_registry.hpp"
 #include "runtime/runtime_resource_cache.hpp"
+#include "runtime/runtime_scope.hpp"
 #include "scripting/script_runtime.hpp"
 #include "scripting/source_project.hpp"
 #include "scripting/luau_compiler.hpp"
@@ -13,6 +14,7 @@
 #include <stdexcept>
 #include <thread>
 #include <bit>
+#include <future>
 
 namespace {
 int checks{};
@@ -53,6 +55,50 @@ sc13::mods::ModDefinition Load(const std::filesystem::path& mod) {
     if (!sc13::mods::LoadModDefinition(mod, result, error)) throw std::runtime_error(error);
     Check(bool(result.script), "Missing compiled script"); return result;
 }
+/** @summary Confirms legacy activation waits outside the manager and resumes without a spurious Busy failure. */
+void VerifyLegacyWriterWait(const std::filesystem::path& root) {
+    const auto mod = root / "mods/Script";
+    Write(mod / "mod.toml", Manifest());
+    Write(mod / "scripts/main.luau", "return {onEnable=function() error('recursive-preparation-must-not-run') end}");
+    sc13::mods::PatchRegistry registry;
+    sc13::runtime::RuntimeResourceCache cache;
+    auto domain = std::make_shared<sc13::runtime::RuntimeCommitDomain>();
+    sc13::mods::ModManager manager(root / "mods", root / "state.toon", registry, cache, {}, {}, {}, domain);
+    std::string error;
+    Check(manager.Initialize(error), error);
+    const auto initialState = sc13::scripting::ReadBounded(root / "state.toon", 4096);
+    {
+        auto writer = domain->ReserveWriter(true);
+        Check(!manager.SetEnabled("fixture.script", true, error) && error.find("Lifecycle transaction") != std::string::npos,
+            "Recursive lifecycle entry reached Lua preparation instead of rejecting admission");
+        Check(manager.Snapshot().front().state == sc13::mods::ModState::Inactive && domain->Revision() == 0 &&
+            sc13::scripting::ReadBounded(root / "state.toon", 4096) == initialState,
+            "Recursive lifecycle entry changed state or persistence");
+    }
+    Write(mod / "scripts/main.luau", "return {}");
+    Check(manager.Refresh(error), error);
+    std::future<bool> activation;
+    bool observedWaiting{};
+    {
+        auto writer = domain->ReserveWriter(true);
+        Check(writer.Acquired(), "Cannot reserve legacy contention fixture");
+        activation = std::async(std::launch::async, [&] { return manager.SetEnabled("fixture.script", true, error); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto state = manager.Snapshot();
+            if (!state.empty() && state.front().state == sc13::mods::ModState::Loading) {
+                observedWaiting = activation.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+                break;
+            }
+            std::this_thread::yield();
+        }
+    }
+    const auto activated = activation.get();
+    Check(observedWaiting && activated, "Legacy contention failed or retained the manager lock while joining the domain");
+    Check(registry.Current()->domain_revision() == domain->Revision() && domain->Revision() == 1,
+        "Resumed legacy activation lost its exact publication revision");
+}
+
 /** @summary Deterministically exercise transient/persistent share denial and non-replacing publication.
  * @param root Owned fixture root for publication operations only.
  */
@@ -216,7 +262,8 @@ void VerifyPropApi(const std::filesystem::path& root) {
     };
     const auto value = [&] { return cache.ReadObservedFloat(target, 0x09AE19D7U)->value; };
     Write(mod / "scripts/main.luau", "assert(simoder.hasCapability('game.props.float')); local v=simoder.props.getFloat('sanitizer','cost'); assert(v.value==300 and v.vanilla==300 and v.historical); return {onEnable=function() simoder.props.setFloat('sanitizer','cost',345) end, onTick=function() simoder.props.setFloat('sanitizer','cost',345) end}");
-    sc13::mods::ModManager manager(root / "mods", root / "state.toon", registry, cache, refresh);
+    auto domain = std::make_shared<sc13::runtime::RuntimeCommitDomain>();
+    sc13::mods::ModManager manager(root / "mods", root / "state.toon", registry, cache, refresh, {}, {}, domain);
     /** @summary Preserve disable return/error and observed value without conflating persistence rejection with lost patches. */
     const auto disableAndCheck = [&](const char* id, float expected, const char* diagnostic) {
         const bool disabled = manager.SetEnabled(id, false, error);
@@ -226,12 +273,17 @@ void VerifyPropApi(const std::filesystem::path& root) {
                    "; value=" + std::to_string(observed) + "; error=" + error);
     };
     Check(manager.Initialize(error) && manager.SetEnabled("fixture.script", true, error), error);
+    Check(domain->Revision() == 1 && registry.Current()->domain_revision() == domain->Revision(),
+        "Enable did not share the registry/domain publication tuple");
     Check(value() == 345, "Staged named override was not applied");
     const auto generation = registry.Current()->generation();
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     Check(registry.Current()->generation() == generation, "Identical tick writes churned generations");
+    Check(domain->Revision() == 1, "Identical tick writes churned writer revisions");
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('sanitizer','cost',350) end, onTick=function() simoder.props.setFloat('sanitizer','cost',999); error('discard-batch') end}");
     Check(manager.Refresh(error) && manager.Reload("fixture.script", error), error);
+    Check(registry.Current()->domain_revision() == domain->Revision() && domain->Revision() == 2,
+        "Reload did not advance the same writer domain");
     Eventually([&] { return !manager.Snapshot().front().scriptRunning; }, "Tick fault was not stopped");
     Check(value() == 350, "Failed callback leaked its queued patch");
     const auto active = manager.Snapshot().front().scriptRevision;
@@ -241,9 +293,12 @@ void VerifyPropApi(const std::filesystem::path& root) {
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('sanitizer',0x12345678,700) end}");
     Check(manager.Refresh(error) && !manager.Reload("fixture.script", error), "Missing observed property was accepted");
     Check(value() == 350, "Failed preflight changed the observed resource");
+    Check(domain->Revision() == 2, "Rejected preparation changed the writer revision");
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('sanitizer','cost',360) end, onTick=function() simoder.props.clearFloat('sanitizer','cost') end}");
     Check(manager.Refresh(error) && manager.Reload("fixture.script", error), error);
     Eventually([&] { return value() == 300; }, "Clear did not restore the vanilla-derived result");
+    Check(registry.Current()->domain_revision() == domain->Revision() && domain->Revision() == 4,
+        "Dynamic clear did not enter the shared publication domain");
     Write(mod / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('sanitizer','cost',365) end}");
     Check(manager.Refresh(error) && manager.Reload("fixture.script", error), error);
     Check(value() == 365, "Final scripted override missing");
@@ -269,7 +324,10 @@ void VerifyPropApi(const std::filesystem::path& root) {
     otherManifest.replace(otherManifest.find("fixture.script"), std::string("fixture.script").size(), "fixture.other");
     Write(other / "mod.toml", otherManifest);
     Write(other / "scripts/main.luau", "return {onEnable=function() simoder.props.setFloat('00B1B104:61EFC000:00000000719436BD',0x09AE19D7,400) end}");
-    Check(manager.Refresh(error) && manager.SetEnabled("fixture.script", true, error) && manager.SetEnabled("fixture.other", true, error), error);
+    Check(manager.Refresh(error) && manager.SetEnabled("fixture.script", true, error), error);
+    // @summary Observe the original signed-zero tick before capturing the next owner's registry generation.
+    Eventually([&] { return std::bit_cast<std::uint32_t>(value()) == 0; }, "Positive-zero tick did not settle before the next owner's activation");
+    Check(manager.SetEnabled("fixture.other", true, error), error);
     Check(value() == 400 && !manager.Conflicts().empty(), "Activation order or script conflict reporting failed");
     disableAndCheck("fixture.script", 400, "Disabling an earlier owner removed another owner's override");
     disableAndCheck("fixture.other", 300, "Final owner removal did not restore vanilla");
@@ -367,6 +425,7 @@ int main() {
 #endif
         VerifyPropApi(root / "api");
         VerifyPublication(root / "publication");
+        VerifyLegacyWriterWait(root / "writer-wait");
         VerifyDeepCache(root);
         std::filesystem::remove_all(sc13::scripting::NativePath(root));
         std::cout << checks << " scripting checks passed (production compilation and x86 Luau VM).\n"; return 0;

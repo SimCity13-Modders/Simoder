@@ -1,4 +1,6 @@
 #include "scripting/semantic_bridge.hpp"
+#include "mods/owned_publication.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <limits>
@@ -78,6 +80,10 @@ runtime::ScopeResult SemanticBridge::Dispatch(const SemanticInvocation& invocati
     if (!origin || origin->closed || origin->bridge.get() != this || !origin->generation ||
         invocation.generation != origin->generation || invocation.method >= methods_.size()) return ScopeResult::Stale;
     const auto& descriptor = methods_[invocation.method];
+    if (descriptor.registryPublication) {
+        origin->tasks->FinishUncommitted(invocation.task, ScopeResult::Denied);
+        return ScopeResult::Denied;
+    }
     const auto liveContext=ValidateContext(*origin,invocation.context);
     if (liveContext!=ScopeResult::Ok) {origin->tasks->FinishUncommitted(invocation.task,liveContext);return liveContext;}
     if (descriptor.id != method || value.Encode() != invocation.value.Encode() || value.Schema() != descriptor.inputSchema) {
@@ -87,6 +93,56 @@ runtime::ScopeResult SemanticBridge::Dispatch(const SemanticInvocation& invocati
     if (begin != ScopeResult::Ok) {origin->tasks->FinishUncommitted(invocation.task,begin);return begin;}
     const auto result=origin->tasks->Commit(invocation.task, descriptor.execute,[this,origin,context=invocation.context]{return ContextFence(*origin,context);});
     if(result!=ScopeResult::Ok&&result!=ScopeResult::Indeterminate)origin->tasks->FinishUncommitted(invocation.task,result);
+    return result;
+}
+runtime::ScopeResult SemanticBridge::DispatchPrepared(const SemanticInvocation& invocation,
+    mods::PatchRegistry& registry, mods::OwnedPublication& plan) {
+    using runtime::ScopeResult;
+    const auto& origin = invocation.origin;
+    if (!origin || origin->bridge.get() != this || !origin->scope || !origin->tasks ||
+        origin->closed || !origin->generation || invocation.generation != origin->generation)
+        return ScopeResult::Stale;
+    if (origin->tasks->scope_.get() != origin->scope.get()) {
+        // @summary Consume the original issuer-bound task without touching the mismatched scope or disclosing its data.
+        origin->tasks->FinishUncommitted(invocation.task, ScopeResult::Denied);
+        return ScopeResult::Denied;
+    }
+    const auto begin = origin->tasks->Begin(invocation.task);
+    if (begin != ScopeResult::Ok) {
+        origin->tasks->FinishUncommitted(invocation.task, begin);
+        return begin;
+    }
+    ScopeResult result = ScopeResult::Busy;
+    {
+        auto writer = origin->scope->ReserveWriter();
+        if (writer.Acquired()) {
+            const auto owned = plan.Validate(invocation);
+            if (owned != ScopeResult::Ok) result=owned;
+            else {
+            auto publication = registry.TryReservePublication();
+            if (publication.owns_lock()) {
+                // @summary The same mutex serializes ObserveContext/Close; no observation-only check can race the typed publication.
+                const std::unique_lock contextLock(mutex_, std::try_to_lock);
+                if (contextLock.owns_lock()) {
+                    result = ValidateContextLocked(*origin, invocation.context);
+                    if (result == ScopeResult::Ok && (invocation.epoch != epoch_ || invocation.method >= methods_.size()))
+                        result = ScopeResult::Stale;
+                    if (result == ScopeResult::Ok && (!invocation.value ||
+                        invocation.value.Schema() != methods_[invocation.method].inputSchema)) result = ScopeResult::Invalid;
+                    if (result == ScopeResult::Ok && !methods_[invocation.method].registryPublication) result = ScopeResult::Denied;
+                    if (result == ScopeResult::Ok) {
+                        result = origin->tasks->CommitPrepared(invocation.task, writer,
+                            publication, plan.plan_, invocation.context.scopeGeneration, invocation.context.runtimeEpoch, invocation.value);
+                        // @summary Swap preallocated owner baseline only after the exact publication; retired storage remains in the plan beyond all fences.
+                        if(result==ScopeResult::Ok) plan.origin_->scripted_.swap(plan.next_);
+                    }
+                }
+            }
+            }
+        }
+    }
+    if (result != ScopeResult::Ok && result != ScopeResult::Indeterminate)
+        origin->tasks->FinishUncommitted(invocation.task, result);
     return result;
 }
 void SemanticBridge::Close() noexcept {
@@ -144,6 +200,9 @@ runtime::ScopeResult SemanticBridge::NextPublication(std::uint64_t& cursor, Sema
     return runtime::ScopeResult::Ok;
 }
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+std::unique_lock<std::mutex> SemanticBridgeTestAccess::ReserveObservation(SemanticBridge& bridge) {
+    return std::unique_lock<std::mutex>(bridge.mutex_, std::try_to_lock);
+}
 void SemanticBridgeTestAccess::Configure(SemanticBridge& bridge, std::vector<SemanticMethod> methods) {
     if (bridge.readyGeneration_ || bridge.closed_ || methods.size() > 64) throw std::runtime_error("Invalid fixture catalog");
     for (std::size_t i = 0; i < methods.size(); ++i) {
@@ -160,6 +219,76 @@ void SemanticBridgeTestAccess::Issue(SemanticEndpoint& endpoint, runtime::Operat
     if (endpoint.generation || endpoint.closed) throw std::runtime_error("Endpoint already bound");
     endpoint.context = context;
 }
+/** @summary Refresh only an existing original owner's binding through the authentic tracked reservation evaluator.
+ * @param origin Constructor-bound actual native incarnation. @param output Empty typed lifetime owner.
+ * @return Exact bounded admission; failed local ownership is released after all guards. */
+runtime::ScopeResult SemanticBridge::RefreshFixtureReservation(
+    const std::shared_ptr<mods::PublicationOrigin>& origin, mods::LifecycleDecision& output) {
+    using runtime::ScopeResult;
+    if (!origin || output.Context().owner) return ScopeResult::Invalid;
+    // @summary Current reads constructor-complete identities; mutable admission is checked under D/B/Q below.
+    if (!origin->Current()) return ScopeResult::Stale;
+    const auto endpoint=origin->endpoint_;
+    const auto scope=origin->scope_;
+    if (scope->stateDomain().WriterActiveOnCurrentThread()) return ScopeResult::Busy;
+    mods::LifecycleDecision fresh;
+    runtime::OperationContext source;
+    std::uint64_t ready{};
+    const auto matches=[&] {
+        return origin->Current() && origin->endpoint_==endpoint && origin->scope_==scope &&
+            endpoint->bridge.get()==this && endpoint->scope==scope && !endpoint->closed.load() &&
+            endpoint->generation && endpoint->generation==origin->generation_ &&
+            endpoint->storageOwner && endpoint->context.owner==endpoint->storageOwner &&
+            !closed_ && readyGeneration_ &&
+            std::any_of(endpoints_.begin(),endpoints_.end(),[&](const auto& entry) {
+                return !entry.owner_before(endpoint) && !endpoint.owner_before(entry);
+            });
+    };
+    {
+        std::unique_lock observation(mutex_,std::try_to_lock);
+        if (!observation.owns_lock()) return ScopeResult::Busy;
+        if (!matches()) return ScopeResult::Stale;
+        source=endpoint->context;ready=readyGeneration_;
+    }
+    // @summary Existing allocation/reservation callbacks run outside every publication/bridge/scope guard.
+    const auto reserved=mods::LifecycleDecisionTestAccess::FreshDecision(scope,source,fresh);
+    if (reserved!=ScopeResult::Ok) return reserved;
+    {
+        auto writer=scope->ReserveWriter();
+        if (!writer.Acquired()) return ScopeResult::Busy;
+        std::unique_lock observation(mutex_,std::try_to_lock);
+        if (!observation.owns_lock()) return ScopeResult::Busy;
+        if (!matches() || readyGeneration_!=ready) return ScopeResult::Stale;
+        if (endpoint->context!=source) return ScopeResult::Conflict;
+        runtime::RuntimeScope::LifecycleGuard authority(*scope);
+        if (!authority.Acquired()) return ScopeResult::Busy;
+        if (!authority.InDomain(scope->stateDomain())) return ScopeResult::Stale;
+        const auto context=fresh.Context();
+        const auto admitted=authority.Check(context,false);
+        if (admitted!=ScopeResult::Ok) return admitted;
+        const auto facts=authority.Snapshot();
+        if (facts.generation!=endpoint->storageOwner || context.owner!=facts.generation ||
+            context.epoch!=facts.epoch || !context.reservation || context.reservation==source.reservation)
+            return ScopeResult::Stale;
+        auto provenance=context;
+        // @summary Only compare immutable provenance; this normalized temporary is never installed or authorized.
+        provenance.reservation=source.reservation;provenance.revision=source.revision;
+        provenance.grantRevision=source.grantRevision;
+        if (provenance!=source || endpoint->closed.load()) return ScopeResult::Stale;
+        endpoint->context=context;
+        output=std::move(fresh);
+    }
+    // @summary A failed local lease is destroyed only after Q/B/D; success transfers that same owner to the caller.
+    return ScopeResult::Ok;
+}
+/** @summary Fixture-only forwarding never creates a grant or accepts a replacement context.
+ * @param bridge Exact original transport. @param origin Actual native incarnation. @param output Empty typed owner.
+ * @return Original guarded refresh result. */
+runtime::ScopeResult SemanticBridgeTestAccess::RefreshReservation(SemanticBridge& bridge,
+    const std::shared_ptr<mods::PublicationOrigin>& origin, mods::LifecycleDecision& output) {
+    return bridge.RefreshFixtureReservation(origin,output);
+}
+
 void SemanticBridgeTestAccess::ObserveContext(SemanticBridge& bridge,SemanticContextKind kind,std::uint64_t slot,std::uint32_t generation,bool singlePlayerKnown) {
     const std::scoped_lock lock(bridge.mutex_); auto& fact=bridge.contexts_[static_cast<std::size_t>(kind)];
     if (fact.epoch==UINT64_MAX) throw std::runtime_error("Context epoch exhausted");
@@ -195,6 +324,9 @@ runtime::ScopeResult SemanticBridge::ResolveContext(const SemanticEndpoint& endp
 }
 runtime::ScopeResult SemanticBridge::ValidateContext(const SemanticEndpoint& endpoint,const SemanticContextLease& lease) const {
     const std::scoped_lock lock(mutex_);
+    return ValidateContextLocked(endpoint, lease);
+}
+runtime::ScopeResult SemanticBridge::ValidateContextLocked(const SemanticEndpoint& endpoint,const SemanticContextLease& lease) const noexcept {
     if(closed_||!readyGeneration_||endpoint.closed||lease.baseEpoch!=epoch_||lease.vmGeneration!=endpoint.generation||!lease.mask)return runtime::ScopeResult::Stale;
     if(!singlePlayerKnown_)return runtime::ScopeResult::NotReady;
     for(std::size_t i=0;i<contexts_.size();++i)if((lease.mask&(1U<<i))&&!(lease.facts[i]==contexts_[i]))return runtime::ScopeResult::Stale;

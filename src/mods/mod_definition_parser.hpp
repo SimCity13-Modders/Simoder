@@ -29,6 +29,18 @@ namespace sc13::mods {
  */
 [[nodiscard]] bool LoadAuthoringPatches(const std::filesystem::path& directory,
     std::vector<ResourcePatchDefinition>& patches, std::string& error) noexcept;
+/** @summary Parse patches from immutable authoring bytes through the existing resolver.
+ * @param bytes Captured manifest bytes. @param patches Validated operations. @param error Validation diagnostic.
+ * @return True when the captured patch configuration is valid.
+ */
+[[nodiscard]] bool ParseAuthoringPatches(std::string_view bytes,
+    std::vector<ResourcePatchDefinition>& patches, std::string& error) noexcept;
+/** @summary Parse script aliases from immutable authoring bytes through the existing resolver.
+ * @param bytes Captured manifest bytes. @param definition Destination script aliases. @param error Validation diagnostic.
+ * @return True when the captured catalog is valid.
+ */
+[[nodiscard]] bool ParseScriptSymbols(std::string_view bytes,
+    scripting::ScriptDefinition& definition, std::string& error) noexcept;
 /** @summary Validate decoded patch configuration independently from file syntax or installation layout. */
 [[nodiscard]] bool ValidatePatchConfiguration(const formats::toon::Value::Object& root,
     std::vector<ResourcePatchDefinition>& patches, std::string& error) noexcept;

@@ -11,16 +11,30 @@
 #include <set>
 #include "mods/mod_types.hpp"
 #include "scripting/script_patch_command.hpp"
+#include "scripting/script_command_batch.hpp"
 #include "runtime/runtime_resource_cache.hpp"
 #include "runtime/runtime_scope.hpp"
 #include <optional>
 #include <atomic>
 #include <array>
+#include "mods/action_worker.hpp"
 
 struct lua_State;
+namespace sc13::mods { class ModManager; class ManagerClose; struct ManagerCloseTestAccess; struct ManagerPreparationTestAccess; class ManagerPreparation; class ManagerPublication; class PublicationOrigin; class OwnedPublication; class OwnerLifecycle; struct OwnerLifecycleTestAccess; }
 namespace sc13::scripting {
+/** @summary Native scheduler close witnesses; not a VM retirement or resource release certificate. */
+struct SchedulerCloseObservation final {
+    runtime::ScopeResult result{runtime::ScopeResult::NotReady};
+    std::uint64_t revision{},generation{};
+    std::size_t checked{},holders{},selected{},queued{},executing{};
+};
 class SemanticLua;
 class SemanticBridge;
+struct ScriptSchedulerState;
+class SchedulerPublicationPlan;
+class SchedulerPublicationReservation;
+enum class SchedulerPublicationPurpose;
+struct SchedulerPublicationTestAccess;
 struct SemanticEndpoint;
 /** @summary Carries an owned historical float observation without game addresses or borrowed storage. */
 using FloatObservation = runtime::RuntimeFloatObservation;
@@ -101,6 +115,34 @@ public:
     /** @summary Stops callbacks and records a host transaction failure while retaining the last committed overrides. */
     void Fail(std::string diagnostic);
 private:
+    friend class mods::ManagerCommands;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct mods::ManagerCommandsTestAccess;
+#endif
+    /** @summary Native closed route has weak owner references and never selects itself from manifest content. */
+    std::shared_ptr<mods::ManagerCommandRoute> commandRoute_;
+    /** @summary Single-assignment original worker lifetime anchor; read/published under V and never retargeted. */
+    std::shared_ptr<mods::ActionWorker::Control> commandControl_;
+    friend class mods::ManagerPreparation;
+    friend class mods::ManagerClose;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct mods::ManagerCloseTestAccess;
+#endif
+    friend class mods::ManagerPublication;
+    friend class mods::OwnerLifecycle;
+    /** @summary Exact consumed native preparation identity; never sufficient for standalone admission. */
+    std::shared_ptr<const void> preparationProof_;
+    /** @summary Native-only initializer role cannot be requested by manifests or promoted through legacy publication. */
+    struct Preparation final {};
+    /** @summary Execute exact captured bytecode in restricted preparation mode.
+     * @param modId Exact native owner. @param definition Immutable captured generation. @param host Actual retained Base endpoint. */
+    ScriptRuntime(Preparation, std::string modId, const ScriptDefinition& definition, ScriptHost host);
+    friend class mods::PublicationOrigin;
+    friend class mods::OwnedPublication;
+    /** @summary Deep immutable copy of the exact loaded definition, never a caller's later mutable object. */
+    std::shared_ptr<const ScriptDefinition> loadedDefinition_;
+    /** @summary Charges semantic host-side snapshot storage independently of the VM allocator budget. */
+    runtime::copied::Reservation loadedDefinitionAccounting_;
     friend class SemanticLua;
     std::unique_ptr<SemanticLua> semantics_;
     bool semanticQualified_{};
@@ -110,16 +152,48 @@ private:
     /** @summary Construct verified base using the shared lane and allocator. */
     ScriptRuntime(BaseBootstrap, const ScriptDefinition& definition, ScriptHost host);
     /** @summary Share lifecycle mechanics while enforcing private role identity. */
-    ScriptRuntime(std::string modId, const ScriptDefinition& definition, ScriptHost host, bool bootstrap);
+    ScriptRuntime(std::string modId, const ScriptDefinition& definition, ScriptHost host, bool bootstrap, bool preparation = false);
     bool bootstrap_{};
+    bool preparation_{};
     friend class ScriptLane;
     friend class ScriptScheduler;
+    friend struct ScriptSchedulerState;
+    friend class SchedulerPublicationPlan;
+    friend class SchedulerPublicationReservation;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct SchedulerPublicationTestAccess;
+    friend struct CallbackBudgetTestAccess;
+#endif
     /** @summary Initializes Lua only on the reserved script lane. */
     void Initialize(const ScriptDefinition& definition);
     /** @summary Closes Lua on the reserved lane after exactly-once committed retirement. */
     void Close() noexcept;
-    /** @summary Visits one published VM on the sole lane, then dispatches copied effects outside its lock. */
-    void ScheduledTick();
+    /** @summary Reuses exact existing Close/Invoke/ack/slot release while actual controlMutex is held.
+     * @param requireInactive Reject a still committed/scheduled VM. @return Exact release outcome; Invoke exceptions propagate. */
+    runtime::ScopeResult CloseAndReleaseLocked(bool requireInactive);
+    /** @summary Tick an observed routeless VM under V; a concurrently installed native route defers to its worker. @param selectedRegistration Original lane selection. */
+    void ScheduledTick(std::uint64_t selectedRegistration);
+    /** @summary Checks the exact retained selection under the existing VM lock, without issuing permissions.
+     * @param selectedRegistration Original native lane selection revision. @return True only for executable current ownership. */
+    bool ExecutionEligible(std::uint64_t selectedRegistration) const noexcept;
+    /** @summary Executes only the original lane-selected registration under the VM guard.
+     * @param deltaSeconds Explicit interval, or negative for elapsed monotonic time. @param selectedRegistration Exact retained dispatch revision. */
+    void TickSelected(double deltaSeconds,std::uint64_t selectedRegistration);
+    /** @summary Execute existing Pump/onTick mechanics while caller holds V. @param deltaSeconds Original interval. @param selectedRegistration Exact registration. */
+    void TickSelectedLocked(double deltaSeconds,std::uint64_t selectedRegistration);
+    /** @summary Worker-stack transfer isolates exact automatic output without a retained mailbox. */
+    struct CapturedTick final {
+        std::vector<ScriptPatchCommand> prior,output;
+        bool executed{};
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        /** @summary Borrowed worker-owned fixture callback, invoked after V release before Work.done. */
+        const std::function<void()>* beforeAcknowledgment{};
+#endif
+    };
+    /** @summary Marshal exact original automatic tick through existing reserved Work. @param registration Original selection. @param generation Original VM generation. @param route Original route identity. @param transfer Empty worker-owned transfer through acknowledgment. */
+    void InvokeSelectedTick(std::uint64_t registration,std::uint64_t generation,const mods::ManagerCommandRoute* route,CapturedTick& transfer);
+    /** @summary Isolate Pump plus this tick output under one V before Work.done. @param registration Original selection. @param generation Original generation. @param route Original route. @param transfer Worker-stack storage. */
+    void CaptureSelectedTick(std::uint64_t registration,std::uint64_t generation,const mods::ManagerCommandRoute* route,CapturedTick& transfer);
     /** @summary Publishes a copied diagnostic snapshot without retaining a VM lock in readers. */
     void PublishStatus() noexcept;
     /** @summary Retains a bounded diagnostic without allocation, including host-allocation failure paths. */
@@ -131,6 +205,17 @@ private:
     std::uint64_t vmGeneration_{};
     std::shared_ptr<ScriptSchedulerHost> schedulerHost_;
     std::atomic_bool scheduled_{};
+    /** @summary Native registration revision sampled by lane selection and rechecked under the VM guard. */
+    std::atomic_uint64_t registration_{};
+    std::shared_ptr<runtime::RuntimeCommitDomain> publicationDomain_;
+    std::shared_ptr<const std::byte> publicationNode_;
+    bool sealed_{}, retired_{}, disableOwed_{};
+    std::atomic_bool laneReleased_{};
+    /** @summary Monotonic native closure request is visible before a queued lane teardown can execute. */
+    std::atomic_bool stopRequested_{};
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    std::function<void()> selectedBarrier_, extractedBarrier_;
+#endif
     std::mutex controlMutex_;
     /** @summary Enforces the per-mod allocator cap on every VM allocation. */
     static void* Allocate(void* context, void* pointer, std::size_t oldSize, std::size_t newSize);
@@ -180,6 +265,8 @@ private:
     std::map<std::string, mods::PropertyPatch, std::less<>> propertyAliases_;
     ScriptHost host_;
     std::vector<ScriptPatchCommand> commands_;
+    /** @summary Temporary exact-callback allowance retains the combined pending-plus-output 256 bound. */
+    std::size_t commandLimit_{256};
     bool stopping_{};
     mutable std::mutex mutex_;
     mutable std::mutex statusMutex_;
@@ -193,6 +280,80 @@ private:
         std::uint64_t droppedLogs{};
     } publishedStatus_;
 };
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+/** @summary One fixture-only cold callback observation; no runtime owner, timer exemption or production issuer. */
+struct CallbackBudgetTestAccess final {
+    /** @summary Distinguish an absent request from native arm rejection without throwing through a swallowed observer. */
+    enum class ArmResult : std::uint8_t {NotRequested,Armed,Busy,WrongLane,InvalidGeneration,InvalidPhase,Fenced,AlreadyUsed,MismatchedRuntime};
+    /** @summary Distinguish unentered/cancelled capture from a real protected-call result. */
+    enum class Completion : std::uint8_t {NotReached,Cancelled,LuaReturn,NativeException};
+    /** @summary Raw enclosing native CPU samples; 100 ns is a unit, not precision, and cycles are never elapsed time. */
+    struct NativeSample final {
+        std::uint64_t kernel100ns{},user100ns{},cycles{};
+        std::uint32_t thread{},cpuError{},cycleError{};
+        bool platformAvailable{},cpuAvailable{},cyclesAvailable{};
+    };
+    /** @summary Fixed scalar evidence read only after the existing synchronous initialization join. */
+    struct Observation final {
+        NativeSample before,after;
+        std::uint64_t generation{},allocationCalls{},freeCalls{},reallocationCalls{},allocationFailures{},requestedBytes{};
+        std::uint64_t usedBefore{},usedAfter{},peakUsed{},gcInterruptEvents{},instructionInterrupts{},detectedElapsedUs{};
+        std::int64_t preSamplingNs{},callbackStartNs{},deadlineNs{},callbackEndNs{},postSamplingNs{},detectedDeadlineNs{};
+        std::uint32_t budgetMs{},maximumDepth{};
+        std::int32_t luaStatus{-1};
+        ScriptPhase phase{ScriptPhase::Enable};
+        ArmResult arm{ArmResult::NotRequested};Completion completion{Completion::NotReached};
+        bool terminal{},borrowCleared{true},callbackStarted{},exceeded{},detectedElapsedValid{},nested{},overflow{},sameThread{},wallOrderValid{},cpuOrderValid{},cycleOrderValid{};
+    };
+    static_assert(sizeof(Observation)<=384);
+    static_assert(sizeof(Observation)<=512);
+    /** @summary Arm once from the real first Enable observer on the lane, retaining only a borrowed fixed destination.
+     * @param generation Actual observer generation. @param phase Actual Enable label. @param output Test-owned untouched destination.
+     * @return Explicit admission; output must outlive joined construction and the retained observer. */
+    static ArmResult Arm(std::uint64_t generation,ScriptPhase phase,Observation& output) noexcept;
+    /** @summary Arm only from the authentic native preparation Entry observer of this exact generation.
+     * @param generation Actual observer generation; never a caller-created runtime identity.
+     * @param output Untouched fixed destination retained through joined construction and any retained observer.
+     * @return Explicit diagnostic admission; grants no operation or runtime permission. */
+    static ArmResult ArmPreparationEntry(std::uint64_t generation,Observation& output) noexcept;
+    /** @summary Cancel only an unconsumed matching arm during handled initialization Close; never an active/foreign frame.
+     * @param generation Actual Close generation. @return Whether the original borrowed slot was cleared. */
+    static bool Cancel(std::uint64_t generation) noexcept;
+private:
+    friend class ScriptRuntime;
+    /** @summary Fixed outer/native-nested classification without a second sample or runtime owner. */
+    enum class Role : std::uint8_t {None,Outer,Nested,NestedOverflow};
+    /** @summary Clears the original borrowed capture before any protected-call return or native exception cleanup. */
+    class Frame final {
+        ScriptRuntime* runtime_{};Role role_{Role::None};bool finished_{};
+    public:
+        /** @summary Install no-throw cleanup before sampling a consumed slot. @param runtime Exact actual caller. */
+        explicit Frame(ScriptRuntime& runtime) noexcept;
+        /** @summary Preserve clear/finalization during native unwinding without replacing an exception. */
+        ~Frame() noexcept;
+        Frame(const Frame&)=delete;Frame& operator=(const Frame&)=delete;
+        /** @summary Copy the existing exact deadline after its unchanged assignment, with no new clock query. */
+        void Deadline() noexcept;
+        /** @summary Finish before original stack/command/string cleanup. @param status Protected Lua status or -1. @param nativeException Native unwind. */
+        void Finish(int status,bool nativeException) noexcept;
+    };
+    static_assert(sizeof(Frame)<=64);
+    /** @summary Admit exact bootstrap/generation and sample before its original watchdog starts. @param runtime Actual caller. @return Native frame role. */
+    static Role Begin(ScriptRuntime& runtime) noexcept;
+    /** @summary Copy only original watchdog scalars. @param runtime Exact outer runtime. */
+    static void Deadline(ScriptRuntime& runtime) noexcept;
+    /** @summary Publish one terminal sample and clear its borrowed TLS pointer. @param runtime Exact caller. @param role Original frame role. @param status Lua status. @param nativeException Native unwind. */
+    static void End(ScriptRuntime& runtime,Role role,int status,bool nativeException) noexcept;
+    /** @summary Count actual Lua allocator attempts only for the original active runtime. @param runtime Exact allocator owner. @param hasPointer Reallocation source exists. @param size Actual requested bytes. */
+    static void Allocating(ScriptRuntime& runtime,bool hasPointer,std::size_t size) noexcept;
+    /** @summary Observe unchanged allocator return/state after the real operation. @param runtime Original owner. @param success Real allocation/free result. */
+    static void Allocated(ScriptRuntime& runtime,bool success) noexcept;
+    /** @summary Count an existing VM interrupt without querying CPU or changing its policy. @param runtime Exact owner. @param gc Original GC label. */
+    static void Interrupting(const ScriptRuntime& runtime,int gc) noexcept;
+    /** @summary Copy the existing watchdog failure's exact now/deadline-derived evidence. @param runtime Original owner. @param elapsed Original elapsed microseconds. */
+    static void Exceeded(const ScriptRuntime& runtime,std::int64_t elapsed) noexcept;
+};
+#endif
 /** @summary Schedules mod scripts on one background thread, independent of render and resource hooks. */
 class ScriptScheduler final {
 public:
@@ -219,10 +380,73 @@ public:
     /** @summary Removes one scheduled VM without closing an in-flight callback's state. */
     void Remove(const std::string& owner, bool retainReservation = false);
 private:
-    std::mutex mutex_;
-    std::map<std::string, std::shared_ptr<ScriptRuntime>> runtimes_;
+    friend class mods::ModManager;
+    friend class mods::ManagerClose;
+    friend class mods::ManagerPreparation;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct mods::ManagerCloseTestAccess;
+    friend struct mods::ManagerPreparationTestAccess;
+#endif
+    /** @summary Associate an initialized uncommitted preparation with its original host without activation.
+     * @param vm Actual candidate. @return Exact role/identity/closed-state qualification or try-only contention. */
+    runtime::ScopeResult BindPreparation(const std::shared_ptr<ScriptRuntime>& vm) noexcept;
+    /** @summary Retains the original atomic ingress latch without borrowing the scheduler.
+     * @return Fixed exact host latch. */
+    std::shared_ptr<std::atomic_bool> CloseAdmission() const noexcept;
+    /** @summary Tries a bounded scan of actual lane slots for this exact host.
+     * @param cursor Original scan position. @param revision Original host activity revision. @return Actual bounded witnesses. */
+    SchedulerCloseObservation PollClose(std::size_t& cursor,std::uint64_t& revision) noexcept;
+    /** @summary Tries current original-host activity under actual L without a slot traversal. @return Native counter snapshot. */
+    SchedulerCloseObservation ObserveCloseActivity() noexcept;
+    /** @summary Explicit off-lane closure of one exact original current VM, using existing lane controls.
+     * @param anchor Original scheduler State. @param vm Current record VM. @param generation Exact original slot identity.
+     * @param closedNow Reports a newly acknowledged release only. @return Exact result; exception leaves VM retained. */
+    static runtime::ScopeResult CloseCurrent(const std::shared_ptr<ScriptSchedulerState>& anchor,
+        const std::shared_ptr<ScriptRuntime>& vm,std::uint64_t generation,bool& closedNow) noexcept;
+    /** @summary Tries original Plan target provenance without closing or activating a VM.
+     * @param anchor Original scheduler State. @param vm Genuine retained VM. @param generation Exact identity.
+     * @param preparation Require original uncommitted preparation role. @return Native qualification. */
+    static runtime::ScopeResult InspectCloseTarget(const std::shared_ptr<ScriptSchedulerState>& anchor,
+        const std::shared_ptr<ScriptRuntime>& vm,std::uint64_t generation,bool preparation) noexcept;
+    /** @summary Shares exact slot/host/role checks with control and V already held.
+     * @param anchor Original scheduler. @param vm Original target. @param generation Exact identity.
+     * @param preparation Require uncommitted role. @return Try-L result. */
+    static runtime::ScopeResult QualifyCloseLocked(const std::shared_ptr<ScriptSchedulerState>& anchor,
+        const std::shared_ptr<ScriptRuntime>& vm,std::uint64_t generation,bool preparation) noexcept;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    /** @summary Executes a real ordinary control using its existing permanent slot. @param vm Exact VM. @param callback Native body. */
+    static void InvokeCloseControl(const std::shared_ptr<ScriptRuntime>& vm,const std::function<void()>& callback);
+    /** @summary Copies actual slot work under L. @param vm Exact VM. @return Native witnesses. */
+    static SchedulerCloseObservation ObserveCloseControl(const std::shared_ptr<ScriptRuntime>& vm);
+    /** @summary Hold the actual lane mutex for a bounded native fixture interleaving, never Lua.
+     * @param callback Native gate; its owner must release/join before returning the borrowed candidate. */
+    void HoldPreparationLane(const std::function<void()>& callback);
+    /** @summary Observe exact VM/slot/original host association without creating another owner.
+     * @param vm Original retained fixture VM. @return Ok, Stale, Denied or actual contention. */
+    runtime::ScopeResult PreparationBinding(const std::shared_ptr<ScriptRuntime>& vm) noexcept;
+#endif
+    friend class mods::ManagerCommands;
+    friend class SchedulerPublicationPlan;
+    friend class SchedulerPublicationReservation;
+    friend class mods::OwnerLifecycle;
+    friend class mods::ManagerPublication;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct SchedulerPublicationTestAccess;
+#endif
+    /** @summary Retains the actual sole scheduler map/lock after stack-owner destruction invalidates plans. */
+    std::shared_ptr<ScriptSchedulerState> state_;
     std::shared_ptr<ScriptLane> lane_;
     std::shared_ptr<ScriptSchedulerHost> host_;
-    bool stopped_{};
+    /** @summary Prepares a typed change through native identities; no production caller is enrolled.
+     * @param owner Native fixture node name. @param candidate Actual initialized uncommitted VM, null for removal.
+     * @param purpose Closed native change kind. @param output Receives a one-shot retained plan only on success.
+     * @param preparationProof Exact consumed canonical preparation, empty for standalone fixture admission.
+     * @return Ok, or a rejection with no operational publication. */
+    runtime::ScopeResult PreparePublication(const std::string& owner, const std::shared_ptr<ScriptRuntime>& candidate,
+        SchedulerPublicationPurpose purpose, SchedulerPublicationPlan& output,
+        const std::shared_ptr<const void>& preparationProof = {});
+    /** @summary Publishes a prepared isolated scheduler change with a nonblocking typed fence.
+     * @param plan Exact native preparation, consumed only by successful publication. @return Ok or a pre-marker rejection. */
+    static runtime::ScopeResult PublishPublication(SchedulerPublicationPlan& plan);
 };
 }

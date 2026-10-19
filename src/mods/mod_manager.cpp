@@ -1,5 +1,6 @@
 #include "scripting/script_patch_reducer.hpp"
 #include "mods/mod_manager.hpp"
+#include "mods/fixture_observation.hpp"
 
 #include "mods/mod_definition_parser.hpp"
 #include "mods/resource_project.hpp"
@@ -22,6 +23,10 @@ namespace sc13::mods {
 namespace {
 /** @summary Bound retired module generations retained while callbacks finish. */
 constexpr std::size_t MaxRetiredRuntimeScopes = 128;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+/** @summary Fixture-only pauses after admission, before any borrowed-resource access. */
+thread_local std::function<void()> readerBarrier, callbackBarrier, legacyInitializationBarrier;
+#endif
 
 /** Appends a diagnostic without discarding earlier independent failures. */
 void AppendError(std::string& destination, std::string_view message) {
@@ -70,12 +75,21 @@ struct LifecycleReservation final {
     std::atomic_bool& busy;
     bool acquired{};
     /** @summary Rejects overlapping writers and lane-origin synchronous lifecycle reentry. */
-    explicit LifecycleReservation(std::atomic_bool& value) : busy(value) {
+    explicit LifecycleReservation(std::atomic_bool& value, const runtime::RuntimeCommitDomain& domain) : busy(value) {
         bool expected = false;
-        acquired = !scripting::ScriptRuntime::OnScriptLane() && busy.compare_exchange_strong(expected, true);
+        acquired = !scripting::ScriptRuntime::OnScriptLane() && !domain.WriterActiveOnCurrentThread() &&
+            busy.compare_exchange_strong(expected, true);
     }
     /** @summary Releases only the reservation acquired by this operation. */
     ~LifecycleReservation() { if (acquired) busy.store(false); }
+};
+
+/** @summary Retains retired registry stores until manager bookkeeping and lock release complete. */
+struct PublicationRetirement final {
+    std::unique_lock<std::mutex>& lock;
+    PatchRegistry::PreparedPublication plan;
+    /** @summary Releases the manager before destruction of the retained registry plan. */
+    ~PublicationRetirement() { if (lock.owns_lock()) lock.unlock(); }
 };
 
 /** @summary Disposes candidates and retires replaced VMs only after releasing the manager mutex. */
@@ -107,28 +121,65 @@ ModManager::ModManager(
     RuntimeResourceRefreshCallback runtimeRefresh, scripting::ScriptScheduler::LogSink scriptLog,
     std::shared_ptr<platform::RuntimeOwner> runtimeOwner,
     std::shared_ptr<runtime::RuntimeCommitDomain> runtimeDomain)
-    : modsDirectory_(std::move(modsDirectory)),
+    : state_(std::make_shared<State>()),
+      modsDirectory_(std::move(modsDirectory)),
       statePath_(std::move(statePath)),
       registry_(registry),
       cache_(cache),
       runtimeRefresh_(std::move(runtimeRefresh)),
       runtimeOwner_(std::move(runtimeOwner)),
       runtimeDomain_(runtimeDomain ? std::move(runtimeDomain) : std::make_shared<runtime::RuntimeCommitDomain>()),
-      scriptScheduler_(std::make_unique<scripting::ScriptScheduler>(std::move(scriptLog),
-          [this](const auto& id, const auto& runtime, const auto& commands, std::string& error) {
-              return ApplyScriptCommands(id, runtime, commands, error);
-          })),
-      actionWorker_(std::make_unique<ActionWorker>([this](const ModAction& action) {
+      mutex_(state_->mutex), records_(state_->records),
+      scriptScheduler_(std::make_unique<scripting::ScriptScheduler>(std::move(scriptLog), CommandSink())),
+      actionWorker_(std::make_unique<ActionWorker>([weak = std::weak_ptr<State>(state_)](const ModAction& action) {
+          const Lease operation(weak.lock());
+          if (!operation) return std::string("Mod manager is closed");
+          auto* manager = operation.Manager();
           std::string error;
-          const bool success = action.kind == "refresh" ? Refresh(error) :
-              action.kind == "reload" ? Reload(action.id, error, action.revision) :
-              SetEnabled(action.id, action.kind == "enable", error);
-          static_cast<void>(Snapshot());
+          const bool success = action.kind == "refresh" ? manager->Refresh(error) :
+              action.kind == "reload" ? manager->Reload(action.id, error, action.revision) :
+              manager->SetEnabled(action.id, action.kind == "enable", error);
+          static_cast<void>(manager->Snapshot());
           return success ? action.kind + " completed: " + action.id : action.kind + " failed: " + error;
-      })) { retiredScopes_.reserve(MaxRetiredRuntimeScopes); }
+      })) {
+    state_->manager = this; state_->cache = &cache;
+    state_->schedulerClose=scriptScheduler_->CloseAdmission();state_->actionClose=actionWorker_->closeAdmission_;
+    retiredScopes_.reserve(MaxRetiredRuntimeScopes);
+}
 
+ModManager::Lease::Lease(const std::shared_ptr<State>& state) {
+    if (!state) return;
+    const std::scoped_lock lock(state->gate);
+    if (state->closed || state->closeRequested.load() || !state->manager) return;
+    ++state->users; state_ = state; manager_ = state->manager;
+}
+ModManager::Lease::~Lease() {
+    if (!state_) return;
+    const std::scoped_lock lock(state_->gate);
+    if (--state_->users == 0) state_->drained.notify_all();
+}
+void ModManager::CloseAndDrain() noexcept {
+    runtimeStopping_.store(true);
+    std::unique_lock lock(state_->gate);
+    state_->closed = true; state_->manager = nullptr;
+    state_->drained.wait(lock, [this] { return state_->users == 0; });
+    lock.unlock();
+    // @summary A native close action acknowledges only after all copied VM/dependency holders have retired off guards.
+    auto pins=state_->retirement.pins.load();
+    while(pins){state_->retirement.pins.wait(pins);pins=state_->retirement.pins.load();}
+    lock.lock();
+    state_->cache = nullptr;
+    lock.unlock();
+    const std::scoped_lock records(state_->mutex);
+    state_->retirement.cursor=state_->records.end();state_->retirement.initialized=false;state_->retirement.complete=false;
+}
+
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+ModManager::State::~State(){fixture::Destroying(this,fixture::ObjectKind::State);}
+#endif
 ModManager::~ModManager() {
-    RequestRuntimeStop();
+    CloseAndDrain();
+    StopScopes();
     actionWorker_.reset();
     scriptScheduler_->Shutdown();
     for (auto& [id, record] : records_) {
@@ -136,14 +187,26 @@ ModManager::~ModManager() {
         scriptScheduler_->Flush(id, record.scriptRuntime);
     }
     scriptScheduler_.reset();
+    // @summary Retained plans keep only closed observations; actual record services/scopes retire before borrowed resources.
+    std::map<ModId, Record, std::less<>> retired;
+    {
+        const std::scoped_lock lock(mutex_);
+        retired.swap(records_);
+    }
 }
 
 bool ModManager::RuntimeStopping() const noexcept {
-    return runtimeStopping_.load() || runtimeDomain_->IsStopping();
+    return runtimeStopping_.load() || state_->closeRequested.load() || runtimeDomain_->IsStopping();
 }
 
 void ModManager::RequestRuntimeStop() noexcept {
     runtimeStopping_.store(true);
+    const Lease operation(state_);
+    if (!operation) return;
+    StopScopes();
+}
+
+void ModManager::StopScopes() noexcept {
     const std::scoped_lock lock(mutex_);
     for (auto& [id, record] : records_) {
         static_cast<void>(id);
@@ -153,6 +216,8 @@ void ModManager::RequestRuntimeStop() noexcept {
 }
 
 bool ModManager::RuntimeScopesDrained() noexcept {
+    const Lease operation(state_);
+    if (!operation) return false;
     try {
         std::vector<std::shared_ptr<runtime::RuntimeScope>> scopes;
         {
@@ -176,8 +241,10 @@ bool ModManager::RuntimeScopesDrained() noexcept {
 }
 
 bool ModManager::Initialize(std::string& error) noexcept {
+    const Lease operation(state_);
+    if (!operation) { error = "Mod manager is closed"; return false; }
     const RetiredDrain drain{*this};
-    const LifecycleReservation reservation(lifecycleBusy_);
+    const LifecycleReservation reservation(lifecycleBusy_, *runtimeDomain_);
     if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
         std::unique_lock lock(mutex_);
@@ -231,8 +298,10 @@ bool ModManager::Initialize(std::string& error) noexcept {
 }
 
 bool ModManager::Refresh(std::string& error) noexcept {
+    const Lease operation(state_);
+    if (!operation) { error = "Mod manager is closed"; return false; }
     const RetiredDrain drain{*this};
-    const LifecycleReservation reservation(lifecycleBusy_);
+    const LifecycleReservation reservation(lifecycleBusy_, *runtimeDomain_);
     if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
         std::unique_lock lock(mutex_);
@@ -344,6 +413,10 @@ bool ModManager::RefreshLocked(std::string& error, std::unique_lock<std::mutex>&
     for (auto iterator = records_.begin(); iterator != records_.end();) {
         auto candidate = unique.find(iterator->first);
         Record& record = iterator->second;
+        if(record.participant.jointBinding) {
+            if(candidate!=unique.end())unique.erase(candidate);
+            ++iterator;continue;
+        }
         const bool registered = registry_.IsActive(iterator->first);
         if (candidate == unique.end()) {
             if (registered) {
@@ -359,30 +432,15 @@ bool ModManager::RefreshLocked(std::string& error, std::unique_lock<std::mutex>&
                     ++iterator;
                     continue;
                 }
-                std::set<core::Tgi> affected = PatchTargets(EffectivePatches(record));
-                const std::size_t invalidatedBefore = cache_.Invalidate(affected);
-                static_cast<void>(invalidatedBefore);
                 std::string deactivateError;
-                if (registry_.Deactivate(iterator->first, affected, deactivateError)) {
-                    if (record.runtimeScope) record.runtimeScope->RequestStop();
-                    const auto owner = iterator->first;
-                    auto retired = std::move(record.scriptRuntime);
-                    scriptScheduler_->Remove(iterator->first);
-                    record.serviceSupervisor.reset();
-                    record.scriptPatches.clear();
-                    const std::size_t invalidatedAfter = cache_.Invalidate(affected);
-                    static_cast<void>(invalidatedAfter);
-                    EraseEnabled(enabledOrder_, iterator->first);
+                const bool deactivated = DisableLocked(record, false, deactivateError, lock, false);
+                if (!lock.owns_lock()) lock.lock();
+                if (deactivated) {
                     persistenceChanged = true;
                     record.state = ModState::Missing;
                     record.pendingDefinition.reset();
                     record.pendingFingerprint.reset();
                     record.diagnostic = "Active mod directory is missing or no longer valid";
-                    RefreshRuntimeResourcesLocked(
-                        affected, record, "removed-mod restoration");
-                    lock.unlock();
-                    if (retired) { retired->Stop(); scriptScheduler_->Flush(owner, retired); retired.reset(); }
-                    lock.lock();
                     ++iterator;
                     continue;
                 }
@@ -453,7 +511,28 @@ std::vector<ResourcePatchDefinition> ModManager::EffectivePatches(const Record& 
 }
 
 scripting::ScriptHost ModManager::ScriptHost() {
-    return {[this](const core::Tgi& target, std::uint32_t property) { return cache_.ReadObservedFloat(target, property); }};
+    return {[weak = std::weak_ptr<State>(state_)](const core::Tgi& target, std::uint32_t property)
+        -> std::optional<scripting::FloatObservation> {
+        const auto state = weak.lock();
+        const Lease operation(state);
+        if (!operation) return std::nullopt;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        if (callbackBarrier) callbackBarrier();
+#endif
+        return state->cache->ReadObservedFloat(target, property);
+    }};
+}
+
+scripting::ScriptScheduler::CommandSink ModManager::CommandSink() {
+    return [weak = std::weak_ptr<State>(state_)](const auto& id, const auto& runtime,
+        const auto& commands, std::string& error) {
+        const Lease operation(weak.lock());
+        if (!operation) { error = "Mod manager is closed"; return false; }
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        if (callbackBarrier) callbackBarrier();
+#endif
+        return operation.Manager()->ApplyScriptCommands(id, runtime, commands, error);
+    };
 }
 
 bool ModManager::ValidateScriptPatchesLocked(const ModId& owner,
@@ -483,16 +562,55 @@ bool ModManager::ValidateScriptPatchesLocked(const ModId& owner,
     return true;
 }
 
+bool ModManager::PublishPrepared(PatchRegistry::ChangeKind kind, const ModId& id,
+    std::span<const ResourcePatchDefinition> patches, PatchRegistry::PreparedPublication& prepared,
+    std::unique_lock<std::mutex>& lock, std::string& error,
+    const ModId* owner, const scripting::ScriptRuntime* expectedRuntime, PublicationPurpose purpose, bool validatePatches) {
+    // @summary Legacy synchronous drains join only after releasing preparation locks; new tasks stay try-only.
+    lock.unlock();
+    auto writer = runtimeDomain_->ReserveWriter(true);
+    lock.lock();
+    if (!writer.Acquired()) { error = "Recursive runtime writer admission is busy"; return false; }
+    if (purpose == PublicationPurpose::Mutation && (RuntimeStopping() || !writer.CanAdvance())) {
+        error = "Runtime writer is stopped or exhausted"; return false;
+    }
+    const auto sealed=records_.find(id);
+    if(sealed!=records_.end() && sealed->second.participant.jointBinding){error="Sealed owner requires canonical publication";return false;}
+    if (owner) {
+        const auto current = records_.find(*owner);
+        if (current == records_.end() || current->second.scriptRuntime.get() != expectedRuntime) {
+            error = "Stale script owner generation"; return false;
+        }
+    }
+    // @summary Legacy drain preparation uses fresh owner/order state while serialized, before any effects.
+    // @summary The separate prepared API remains available for future nonblocking operations; none is activated.
+    if (validatePatches &&
+        !ValidateScriptPatchesLocked(id, std::vector<ResourcePatchDefinition>(patches.begin(), patches.end()), error)) return false;
+    if (!registry_.Prepare(kind, id, patches, prepared, error)) return false;
+    auto publication = registry_.ReservePublication(true);
+    if (!publication.CanPublish(prepared)) { error = "Prepared registry publication became stale"; return false; }
+    // @summary No allocation, callback, refresh, persistence, logging or waiting beyond this fence.
+    const auto revision = purpose == PublicationPurpose::Rollback ? writer.AdvanceRollback() : writer.Advance();
+    if (!revision) { error = "Runtime writer stopped before publication"; return false; }
+    return publication.Publish(prepared, revision);
+}
+
 bool ModManager::ApplyScriptCommands(const ModId& id,
     const std::shared_ptr<scripting::ScriptRuntime>& runtime,
     const std::vector<scripting::ScriptPatchCommand>& commands, std::string& error) {
+    const Lease operation(state_);
+    if (!operation) { error = "Mod manager is closed"; return false; }
     try {
-        const std::scoped_lock lock(mutex_);
+        std::unique_lock lock(mutex_);
+        PublicationRetirement publication{lock};
         if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         const auto found = records_.find(id);
         /** @summary Discard an in-flight callback from a disabled or superseded VM without touching its successor. */
-        if (found == records_.end() || found->second.scriptRuntime != runtime || !registry_.IsActive(id)) return true;
+        if (found == records_.end() || found->second.scriptRuntime != runtime || !registry_.IsActive(id)) {
+            error = "Stale script owner generation"; return false;
+        }
         auto& record = found->second;
+        if(record.participant.jointBinding){error="Sealed commands require exact canonical consumer";return false;}
         auto candidate = scripting::ReduceScriptPatches(record.scriptPatches, commands);
         bool equal = candidate.size() == record.scriptPatches.size();
         for (std::size_t i = 0; equal && i < candidate.size(); ++i) {
@@ -505,14 +623,18 @@ bool ModManager::ApplyScriptCommands(const ModId& id,
         if (equal) return true;
         auto effective = record.definition.patches;
         effective.insert(effective.end(), candidate.begin(), candidate.end());
-        if (!ValidateScriptPatchesLocked(id, effective, error)) return false;
         auto affected = PatchTargets(EffectivePatches(record));
         const auto added = PatchTargets(effective); affected.insert(added.begin(), added.end());
+        if (!PublishPrepared(PatchRegistry::ChangeKind::Replace, id, effective, publication.plan,
+                lock, error, &id, runtime.get(), PublicationPurpose::Mutation, true)) return false;
+        // @summary Re-resolve after joining the domain: lifecycle removal may have retired the former record.
+        const auto committed = records_.find(id);
+        if (committed == records_.end() || committed->second.scriptRuntime != runtime) {
+            error = "Script owner retired after registry publication"; return false;
+        }
+        committed->second.scriptPatches = std::move(candidate);
         static_cast<void>(cache_.Invalidate(affected));
-        if (!registry_.Replace(id, effective, affected, error)) return false;
-        record.scriptPatches = std::move(candidate);
-        static_cast<void>(cache_.Invalidate(affected));
-        RefreshRuntimeResourcesLocked(affected, record, "script update");
+        RefreshRuntimeResourcesLocked(affected, committed->second, "script update");
         return true;
     } catch (const std::exception& exception) { error = exception.what(); return false; }
     catch (...) { error = "Script PROP transaction failed safely"; return false; }
@@ -523,6 +645,7 @@ bool ModManager::EnableLocked(
     bool persist,
     std::string& error, std::unique_lock<std::mutex>& lock) {
     error.clear();
+    if(record.participant.jointBinding){error="Sealed owner requires canonical publication";return false;}
     if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
     if (record.state != ModState::Inactive) {
         error = "Only an inactive mod can be enabled";
@@ -537,14 +660,21 @@ bool ModManager::EnableLocked(
     if (definition.script) scriptScheduler_->Reserve(id);
     std::shared_ptr<scripting::ScriptRuntime> prepared;
     ScriptExit exit{lock, *scriptScheduler_, id, prepared};
+    PublicationRetirement publication{lock};
     if (definition.script) {
         lock.unlock();
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        if(legacyInitializationBarrier)legacyInitializationBarrier();
+#endif
         try { prepared = std::make_shared<scripting::ScriptRuntime>(id, *definition.script, ScriptHost()); }
         catch (const std::exception& exception) { lock.lock(); error = exception.what(); record.diagnostic = error; return false; }
         scriptScheduler_->Prepare(prepared);
         lock.lock();
         if (RuntimeStopping() || registry_.Current()->generation() != expectedGeneration || record.state != ModState::Inactive) {
-            error = "Script candidate became stale while preparing"; return false;
+            error = "Script candidate became stale while preparing: stopping="+std::to_string(RuntimeStopping())+
+                "; expectedGeneration="+std::to_string(expectedGeneration)+"; observedGeneration="+
+                std::to_string(registry_.Current()->generation())+"; state="+ModStateName(record.state);
+            return false;
         }
     }
     auto scriptPatches = scripting::ReduceScriptPatches({}, prepared ? prepared->TakePatchCommands() : std::vector<scripting::ScriptPatchCommand>{});
@@ -564,6 +694,7 @@ bool ModManager::EnableLocked(
         record.diagnostic = error;
         return false;
     }
+    // @summary Preserve early enable rejection before persistence; the serialized preflight rechecks races later.
     if (!scriptPatches.empty() && !ValidateScriptPatchesLocked(id, effective, error)) { record.diagnostic = error; return false; }
     const std::vector<ModId> previousOrder = enabledOrder_;
     std::vector<ModId> candidateOrder = previousOrder;
@@ -576,9 +707,8 @@ bool ModManager::EnableLocked(
         return false;
     }
     std::set<core::Tgi> affected = PatchTargets(effective);
-    const std::size_t invalidatedBefore = cache_.Invalidate(affected);
-    static_cast<void>(invalidatedBefore);
-    if (!registry_.Activate(id, effective, affected, error)) {
+    if (!PublishPrepared(PatchRegistry::ChangeKind::Activate, id, effective, publication.plan, lock, error,
+            nullptr, nullptr, PublicationPurpose::Mutation, !scriptPatches.empty())) {
         if (persist) {
             std::string rollbackError;
             if (!PersistOrder(previousOrder, rollbackError)) {
@@ -594,8 +724,11 @@ bool ModManager::EnableLocked(
         std::string rollbackError;
         std::set<core::Tgi> rollbackAffected;
         error = "Runtime scope activation rejected";
-        if (!registry_.Deactivate(id, rollbackAffected, rollbackError))
+        PublicationRetirement rollback{lock};
+        if (!PublishPrepared(PatchRegistry::ChangeKind::Deactivate, id, {}, rollback.plan, lock,
+                rollbackError, nullptr, nullptr, PublicationPurpose::Rollback))
             AppendError(error, "registry rollback failed: " + rollbackError);
+        rollbackAffected = rollback.plan.Affected();
         static_cast<void>(cache_.Invalidate(rollbackAffected));
         if (persist && !PersistOrder(previousOrder, rollbackError)) AppendError(error, "persistence rollback failed: " + rollbackError);
         record.state = ModState::Failed;
@@ -625,8 +758,10 @@ bool ModManager::EnableLocked(
 bool ModManager::DisableLocked(
     Record& record,
     bool persist,
-    std::string& error, std::unique_lock<std::mutex>& lock) {
+    std::string& error, std::unique_lock<std::mutex>& lock, bool finalizePending) {
     error.clear();
+    if(record.participant.jointBinding){error="Sealed owner requires canonical publication";return false;}
+    PublicationRetirement publication{lock};
     if (!registry_.IsActive(record.definition.manifest.id)) {
         error = "Only an active or changed mod can be disabled";
         return false;
@@ -643,9 +778,7 @@ bool ModManager::DisableLocked(
         return false;
     }
     std::set<core::Tgi> affected = PatchTargets(EffectivePatches(record));
-    const std::size_t invalidatedBefore = cache_.Invalidate(affected);
-    static_cast<void>(invalidatedBefore);
-    if (!registry_.Deactivate(id, affected, error)) {
+    if (!PublishPrepared(PatchRegistry::ChangeKind::Deactivate, id, {}, publication.plan, lock, error)) {
         if (persist) {
             std::string rollbackError;
             if (!PersistOrder(previousOrder, rollbackError)) {
@@ -670,7 +803,7 @@ bool ModManager::DisableLocked(
         previousState == ModState::Changed &&
         (!record.pendingDefinition.has_value() ||
          !record.pendingFingerprint.has_value());
-    if (record.pendingDefinition.has_value() && record.pendingFingerprint.has_value()) {
+    if (finalizePending && record.pendingDefinition.has_value() && record.pendingFingerprint.has_value()) {
         record.definition = std::move(*record.pendingDefinition);
         record.fingerprint = *record.pendingFingerprint;
         record.pendingDefinition.reset();
@@ -717,8 +850,10 @@ bool ModManager::SetEnabled(
     const ModId& id,
     bool enabled,
     std::string& error) noexcept {
+    const Lease operation(state_);
+    if (!operation) { error = "Mod manager is closed"; return false; }
     const RetiredDrain drain{*this};
-    const LifecycleReservation reservation(lifecycleBusy_);
+    const LifecycleReservation reservation(lifecycleBusy_, *runtimeDomain_);
     if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
         std::unique_lock lock(mutex_);
@@ -748,8 +883,10 @@ bool ModManager::SetEnabled(
 }
 
 bool ModManager::Reload(const ModId& id, std::string& error, std::string_view expectedRevision) noexcept {
+    const Lease operation(state_);
+    if (!operation) { error = "Mod manager is closed"; return false; }
     const RetiredDrain drain{*this};
-    const LifecycleReservation reservation(lifecycleBusy_);
+    const LifecycleReservation reservation(lifecycleBusy_, *runtimeDomain_);
     if (!reservation.acquired) { error = "Lifecycle transaction busy or script-lane reentry"; return false; }
     try {
         std::unique_lock lock(mutex_);
@@ -762,6 +899,7 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
             return false;
         }
         auto& record = found->second;
+        if(record.participant.jointBinding){error="Sealed reload requires canonical publication";return false;}
         const auto& fingerprint = *record.pendingFingerprint;
         if (record.definition.services || record.pendingDefinition->services) {
             error = "Developer service changes require disabling and enabling the mod";
@@ -782,6 +920,7 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
         auto preparedScope = runtimeOwner_ ? std::make_shared<runtime::RuntimeScope>(runtimeOwner_, runtimeDomain_) : nullptr;
         std::shared_ptr<scripting::ScriptRuntime> prepared;
         ScriptExit exit{lock, *scriptScheduler_, id, prepared};
+        PublicationRetirement publication{lock};
         if (pending.script) {
             scriptScheduler_->Reserve(id);
             lock.unlock();
@@ -804,16 +943,16 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
         auto affected = PatchTargets(EffectivePatches(record));
         const auto newTargets = PatchTargets(effective);
         affected.insert(newTargets.begin(), newTargets.end());
-        if (!ValidateScriptPatchesLocked(id, effective, error)) { record.diagnostic = "Reload rejected: " + error; return false; }
         if (RuntimeStopping()) { error = "Mod runtime is stopping"; return false; }
         const auto previousPatches = EffectivePatches(record);
-        // /** @summary Invalidate around a single publication so in-flight old plans cannot commit. */
-        static_cast<void>(cache_.Invalidate(affected));
-        if (!registry_.Replace(id, effective, affected, error)) return false;
+        if (!PublishPrepared(PatchRegistry::ChangeKind::Replace, id, effective, publication.plan, lock, error,
+                nullptr, nullptr, PublicationPurpose::Mutation, true)) { record.diagnostic = "Reload rejected: " + error; return false; }
         if (RuntimeStopping() || (preparedScope && !preparedScope->CommitActivation())) {
             error = "Reload runtime scope activation rejected";
             std::string rollbackError;
-            if (!registry_.Replace(id, previousPatches, affected, rollbackError))
+            PublicationRetirement rollback{lock};
+            if (!PublishPrepared(PatchRegistry::ChangeKind::Replace, id, previousPatches, rollback.plan, lock,
+                    rollbackError, nullptr, nullptr, PublicationPurpose::Rollback))
                 AppendError(error, "registry rollback failed: " + rollbackError);
             static_cast<void>(cache_.Invalidate(affected));
             if (preparedScope) preparedScope->RequestStop(runtime::StopReason::ActivationFailed);
@@ -843,6 +982,8 @@ bool ModManager::Reload(const ModId& id, std::string& error, std::string_view ex
 }
 
 std::vector<ModUiEntry> ModManager::Snapshot(bool wait) const {
+    const Lease operation(state_);
+    if (!operation) return {};
     std::unique_lock lock(mutex_, std::defer_lock);
     if (wait) lock.lock(); else static_cast<void>(lock.try_lock());
     if (!lock.owns_lock()) {
@@ -879,6 +1020,8 @@ std::vector<ModUiEntry> ModManager::Snapshot(bool wait) const {
 }
 
 bool ModManager::DeveloperServicesActive() const {
+    const Lease operation(state_);
+    if (!operation) return false;
     const std::scoped_lock lock(mutex_);
     for (const auto& [id, record] : records_) {
         if (registry_.IsActive(id) && record.serviceSupervisor && record.serviceSupervisor->Diagnostic().empty()) return true;
@@ -887,27 +1030,131 @@ bool ModManager::DeveloperServicesActive() const {
 }
 
 bool ModManager::RequestAction(std::string action, ModId id, std::string revision) {
+    const Lease operation(state_);
+    if (!operation) return false;
     if (RuntimeStopping()) return false;
     if (action != "refresh" && action != "reload" && action != "enable" && action != "disable") return false;
     return actionWorker_->Submit({std::move(action), std::move(id), std::move(revision)});
 }
-std::string ModManager::ActionStatus() const { return actionWorker_->Status(); }
-bool ModManager::OperationBusy() const noexcept { return actionWorker_->Busy(); }
+std::string ModManager::ActionStatus() const {
+    const Lease operation(state_);
+    return operation ? actionWorker_->Status() : "Mod manager is closed";
+}
+bool ModManager::OperationBusy() const noexcept {
+    const Lease operation(state_);
+    return operation && actionWorker_->Busy();
+}
 
 std::vector<ModId> ModManager::EnabledOrder() const {
+    const Lease operation(state_);
+    if (!operation) return {};
     const std::scoped_lock lock(mutex_);
     return enabledOrder_;
 }
 
 std::vector<PatchConflict> ModManager::Conflicts() const {
+    const Lease operation(state_);
+    if (!operation) return {};
     return registry_.Current()->conflicts();
 }
 std::vector<runtime::RuntimeResourceObservation> ModManager::RuntimeObservations() const {
+    const Lease operation(state_);
+    if (!operation) return {};
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    if (readerBarrier) readerBarrier();
+#endif
     return cache_.Observations();
 }
 PatchGeneration ModManager::Generation() const noexcept {
+    const Lease operation(state_);
+    if (!operation) return {};
     return registry_.Current()->generation();
 }
+
+bool ModManager::PreparationRecord(const Record& record, std::shared_ptr<const void>& identity,
+    std::shared_ptr<const void>& stamp,bool qualified) {
+    identity=record.participant.identity; stamp=record.participant.stamp;
+    if(qualified && record.participant.jointBinding)
+        return !record.participant.stamp->cleanupPending && !record.serviceSupervisor &&
+            ((record.participant.stamp->current && record.state==ModState::Active && record.scriptRuntime) ||
+             (record.participant.CanonicalEmpty() &&
+              record.state==ModState::Inactive && !record.scriptRuntime));
+    return record.state==ModState::Inactive && !record.scriptRuntime && !record.serviceSupervisor &&
+        !record.participant.jointBinding && !record.participant.stamp->current && !record.participant.stamp->tombstone;
+}
+
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+void ManagerLifetimeTestAccess::LegacyInitializationBarrier(std::function<void()> callback) {
+    legacyInitializationBarrier=std::move(callback);
+}
+ManagerLifetimeTestAccess::Plan ManagerLifetimeTestAccess::Capture(ModManager& manager, const ModId& id) {
+    Plan result;
+    const ModManager::Lease operation(manager.state_);
+    if (!operation) return result;
+    const std::scoped_lock lock(manager.mutex_);
+    const auto found = manager.records_.find(id);
+    if (found == manager.records_.end()) return result;
+    result.state_ = manager.state_; result.owner_ = id;
+    result.identity_ = found->second.participant.identity;
+    result.stamp_ = found->second.participant.stamp;
+    return result;
+}
+runtime::ScopeResult ManagerLifetimeTestAccess::Validate(const Plan& plan) {
+    using runtime::ScopeResult;
+    if (!plan.state_) return ScopeResult::Invalid;
+    const ModManager::Lease operation(plan.state_);
+    if (!operation) return ScopeResult::Cancelled;
+    const std::unique_lock lock(plan.state_->mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return ScopeResult::Busy;
+    const auto found = plan.state_->records.find(plan.owner_);
+    if (found == plan.state_->records.end() || found->second.participant.identity != plan.identity_ ||
+        found->second.participant.stamp != plan.stamp_) return ScopeResult::Stale;
+    return ScopeResult::Ok;
+}
+std::unique_lock<std::mutex> ManagerLifetimeTestAccess::HoldManager(ModManager& manager) {
+    return std::unique_lock<std::mutex>(manager.mutex_);
+}
+scripting::ScriptHost ManagerLifetimeTestAccess::Host(ModManager& manager) { return manager.ScriptHost(); }
+scripting::ScriptScheduler::CommandSink ManagerLifetimeTestAccess::Sink(ModManager& manager) { return manager.CommandSink(); }
+void ManagerLifetimeTestAccess::ReaderBarrier(std::function<void()> callback) { readerBarrier = std::move(callback); }
+void ManagerLifetimeTestAccess::CallbackBarrier(std::function<void()> callback) { callbackBarrier = std::move(callback); }
+bool ManagerLifetimeTestAccess::Closed(const Plan& plan) {
+    if (!plan.state_) return true;
+    const std::scoped_lock lock(plan.state_->gate);
+    return plan.state_->closed;
+}
+bool ManagerLifetimeTestAccess::ManagerAvailable(const Plan& plan) {
+    if (!plan.state_) return false;
+    const std::unique_lock lock(plan.state_->mutex, std::try_to_lock);
+    return lock.owns_lock();
+}
+bool ManagerLifetimeTestAccess::ReplaceStamp(ModManager& manager, const ModId& id) {
+    const ModManager::Lease operation(manager.state_);
+    if (!operation) return false;
+    auto next = std::make_shared<OwnerParticipant::Stamp>();
+    std::shared_ptr<OwnerParticipant::Stamp> retired;
+    {
+        const std::scoped_lock lock(manager.mutex_);
+        const auto found = manager.records_.find(id);
+        if (found == manager.records_.end()) return false;
+        next->revision = found->second.participant.stamp->revision + 1;
+        retired.swap(found->second.participant.stamp);
+        found->second.participant.stamp.swap(next);
+    }
+    return true;
+}
+std::weak_ptr<runtime::RuntimeScope> ManagerLifetimeTestAccess::AttachScope(ModManager& manager, const ModId& id) {
+    const ModManager::Lease operation(manager.state_);
+    if (!operation) return {};
+    auto scope = std::make_shared<runtime::RuntimeScope>(nullptr, manager.runtimeDomain_);
+    const std::scoped_lock lock(manager.mutex_);
+    const auto found = manager.records_.find(id);
+    if (found == manager.records_.end() || found->second.runtimeScope) return {};
+    found->second.runtimeScope = scope;
+    return scope;
+}
+std::weak_ptr<const void> ManagerLifetimeTestAccess::Anchor(const Plan& plan) { return plan.state_; }
+#endif
 
 bool ModManager::PersistOrder(
     const std::vector<ModId>& order,

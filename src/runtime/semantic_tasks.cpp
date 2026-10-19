@@ -21,6 +21,13 @@ ScopeResult SemanticTasks::Admit(const OperationContext& context, const copied::
 }
 ScopeResult SemanticTasks::Begin(TaskHandle task) { return scope_ && task.issuer_ == issuer_ && task.handle_.owner == owner_ ? scope_->BeginValue(task.handle_) : ScopeResult::Denied; }
 ScopeResult SemanticTasks::Commit(TaskHandle task, const ValueCallback& callback, const std::function<ScopeResult()>& guard) { return scope_ && task.issuer_ == issuer_ && task.handle_.owner == owner_ ? scope_->CommitValue(task.handle_, callback, guard) : ScopeResult::Denied; }
+ScopeResult SemanticTasks::CommitPrepared(TaskHandle task, RuntimeCommitDomain::Writer& writer,
+    mods::PatchRegistry::PublicationGuard& publication, mods::PatchRegistry::PreparedPublication& plan,
+    std::uint64_t scopeGeneration, std::uint64_t runtimeEpoch, const copied::Envelope& input) {
+    return scope_ && task.issuer_ == issuer_ && task.handle_.owner == owner_
+        ? scope_->CommitPreparedValue(task.handle_, writer, publication, plan, scopeGeneration, runtimeEpoch, input)
+        : ScopeResult::Denied;
+}
 ScopeResult SemanticTasks::FinishUncommitted(TaskHandle task, ScopeResult reason) { return scope_ && task.issuer_ == issuer_ && task.handle_.owner == owner_ ? scope_->FinishValue(task.handle_, reason) : ScopeResult::Denied; }
 ScopeResult SemanticTasks::Poll(TaskHandle task, TaskSnapshot& output) const {
     output = {};

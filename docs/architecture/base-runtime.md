@@ -113,3 +113,10 @@ production Core and d3d9.dll. U3e conformance uses real isolated Luau VMs and th
 actual pinned Base graph, plus native cancellation/revocation/context/storage fault
 fixtures. Actual game qualification and selective existing-operation adapters remain
 U3f/U6; a successful source build does not prove game behavior.
+
+
+## Current U3 host profile
+
+The [current U3 Base Luau host profile](u3-host-profile.md) records the supported
+SDK alpha presentation, current qualification and remaining acceptance limits.
+The U3e description and numeric bounds above remain historical per-unit evidence.

@@ -7,9 +7,135 @@
 #include <set>
 #include <span>
 #include <string>
+#include <atomic>
+#include <cstdlib>
+#include <new>
+#include <thread>
+
+namespace registry_allocation_probe {
+/** @summary Selects a test-thread allocation to fail without production injection controls. */
+thread_local int remaining{-1};
+/** @summary Counts current-thread reclamation to detect forbidden destruction during commit. */
+thread_local std::size_t deallocations{};
+}
+
+/** @summary Replaces allocation only in this test executable.
+ * @param bytes Requested allocation size.
+ * @return Owned allocation or throws at the selected fixture boundary.
+ */
+void* operator new(std::size_t bytes) {
+    if (registry_allocation_probe::remaining == 0) throw std::bad_alloc();
+    if (registry_allocation_probe::remaining > 0) --registry_allocation_probe::remaining;
+    if (void* allocation = std::malloc(bytes ? bytes : 1U)) return allocation;
+    throw std::bad_alloc();
+}
+/** @summary Releases test allocation. @param allocation Owned allocation. */
+void operator delete(void* allocation) noexcept {
+    if (allocation) ++registry_allocation_probe::deallocations;
+    std::free(allocation);
+}
+/** @summary Releases sized test allocation. @param allocation Owned allocation. */
+void operator delete(void* allocation, std::size_t) noexcept { ::operator delete(allocation); }
 
 namespace sc13::tests {
 namespace {
+/** @summary Proves preparation isolation, stale rejection and allocation-free publication. */
+void TestPreparedPublication() {
+    using Registry = sc13::mods::PatchRegistry;
+    const sc13::core::Tgi target{1U, 2U, 3U};
+    const sc13::mods::ResourcePatchDefinition patch{target, {{4U,
+        sc13::mods::PropertyType::Float, sc13::mods::PatchOperation::Set, 5.0F}}};
+    Registry registry;
+    Registry other;
+    std::string error;
+    error.reserve(256U);
+    Registry::PreparedPublication first;
+    Registry::PreparedPublication competing;
+    SC13_EXPECT(registry.Prepare(Registry::ChangeKind::Activate, "first", {&patch, 1U}, first, error));
+    SC13_EXPECT(registry.Prepare(Registry::ChangeKind::Activate, "competing", {&patch, 1U}, competing, error));
+    SC13_EXPECT(registry.Current()->generation() == 0U);
+    SC13_EXPECT(first.ExpectedGeneration() == 0U && first.Affected().contains(target));
+    {
+        auto wrong = other.TryReservePublication();
+        SC13_EXPECT(!wrong.CanPublish(first));
+        SC13_EXPECT(!wrong.Publish(first, 1U));
+    }
+    bool valid = false;
+    bool published = false;
+    {
+        auto guard = registry.TryReservePublication();
+        registry_allocation_probe::remaining = 0;
+        valid = guard.CanPublish(first);
+        published = guard.Publish(first, 17U);
+        registry_allocation_probe::remaining = -1;
+        SC13_EXPECT(valid && published);
+        SC13_EXPECT(!guard.CanPublish(first));
+        SC13_EXPECT(!guard.CanPublish(competing));
+        SC13_EXPECT(!guard.Publish(competing, 18U));
+    }
+    SC13_EXPECT(registry.Current()->generation() == 1U);
+    SC13_EXPECT(registry.Current()->domain_revision() == 17U);
+    SC13_EXPECT(!registry.IsActive("competing"));
+
+    // A cancelled admission discards its prepared candidate without any publication.
+    {
+        Registry::PreparedPublication cancelled;
+        SC13_EXPECT(registry.Prepare(Registry::ChangeKind::Deactivate, "first", {}, cancelled, error));
+    }
+    SC13_EXPECT(registry.IsActive("first") && registry.Current()->generation() == 1U);
+
+    Registry::PreparedPublication replacement;
+    SC13_EXPECT(registry.Prepare(Registry::ChangeKind::Replace, "first", {&patch, 1U}, replacement, error));
+    SC13_EXPECT(!registry.Prepare(Registry::ChangeKind::Deactivate, "first", {}, replacement, error));
+    Registry::PreparedPublication moved(std::move(replacement));
+    std::size_t releasedAtCommit = 0;
+    {
+        auto guard = registry.TryReservePublication();
+        SC13_EXPECT(!guard.CanPublish(replacement));
+        const auto before = registry_allocation_probe::deallocations;
+        registry_allocation_probe::remaining = 0;
+        published = guard.Publish(moved, 18U);
+        registry_allocation_probe::remaining = -1;
+        releasedAtCommit = registry_allocation_probe::deallocations - before;
+    }
+    SC13_EXPECT(published && releasedAtCommit == 0U);
+    const auto beforeReclaim = registry_allocation_probe::deallocations;
+    moved = Registry::PreparedPublication{};
+    SC13_EXPECT(registry_allocation_probe::deallocations > beforeReclaim);
+
+    bool reachedSuccess = false;
+    for (int failAt = 0; failAt < 128 && !reachedSuccess; ++failAt) {
+        Registry::PreparedPublication candidate;
+        registry_allocation_probe::remaining = failAt;
+        reachedSuccess = registry.Prepare(Registry::ChangeKind::Replace, "first", {&patch, 1U}, candidate, error);
+        registry_allocation_probe::remaining = -1;
+        SC13_EXPECT(registry.Current()->generation() == 2U);
+    }
+    SC13_EXPECT(reachedSuccess);
+
+    // Independently prepared writers race for the same generation; exactly one wins.
+    Registry::PreparedPublication left;
+    Registry::PreparedPublication right;
+    SC13_EXPECT(registry.Prepare(Registry::ChangeKind::Activate, "left", {&patch, 1U}, left, error));
+    SC13_EXPECT(registry.Prepare(Registry::ChangeKind::Activate, "right", {&patch, 1U}, right, error));
+    std::atomic<int> winners{};
+    std::atomic<int> ready{};
+    std::atomic<bool> start{};
+    const auto attempt = [&](Registry::PreparedPublication& plan) {
+        ++ready;
+        while (!start.load()) std::this_thread::yield();
+        auto guard = registry.TryReservePublication();
+        if (guard.Publish(plan, 19U)) ++winners;
+    };
+    std::thread a(attempt, std::ref(left));
+    std::thread b(attempt, std::ref(right));
+    while (ready.load() != 2) std::this_thread::yield();
+    start = true;
+    a.join(); b.join();
+    SC13_EXPECT(winners == 1);
+    SC13_EXPECT(registry.Current()->generation() == 3U);
+    SC13_EXPECT(registry.Current()->domain_revision() == 19U);
+}
 /** @summary Creates one typed float patch block for registry tests. */
 [[nodiscard]] sc13::mods::ResourcePatchDefinition MakeResourcePatch(
     const sc13::core::Tgi& target,
@@ -159,5 +285,5 @@ void TestRuntimeResourceCache() {
 }
 
 }
-void TestPatchOwnership() { TestPatchRegistry(); TestRuntimeResourceCache(); }
+void TestPatchOwnership() { TestPreparedPublication(); TestPatchRegistry(); TestRuntimeResourceCache(); }
 }

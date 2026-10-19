@@ -7,9 +7,17 @@
 #include <cmath>
 #include <stdexcept>
 #include <bit>
+#include <limits>
 
 namespace sc13::runtime {
+/** @summary Original cache-owned identity, serialized by its cache mutex. */
+struct CacheControl {std::uint64_t nonce{},reset{1};bool closed{},exhausted{};std::weak_ptr<const void> canonicalState;bool canonicalStateBound{};};
+static_assert(sizeof(CacheControl)<=128&&sizeof(CacheWitness)<=64);
 namespace {
+/** @summary Nonwrapping process cache incarnation issuer. */
+std::atomic<std::uint64_t> cacheNonce{1};
+/** @summary Reserve native cache identity or reject before usable admission. @return Unique nonce. */
+std::uint64_t NextNonce(){auto value=cacheNonce.load();for(;;){if(value==UINT64_MAX)throw std::overflow_error("Cache identity exhausted");if(cacheNonce.compare_exchange_weak(value,value+1))return value;}}
 
 /** Compares complete runtime records without relying on structure padding. */
 [[nodiscard]] bool EqualRecords(
@@ -28,6 +36,14 @@ namespace {
 }
 
 }  // namespace
+
+RuntimeResourceCache::RuntimeResourceCache():control_(std::make_shared<CacheControl>()){control_->nonce=NextNonce();}
+RuntimeResourceCache::~RuntimeResourceCache(){const std::scoped_lock lock(mutex_);control_->closed=true;}
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+bool RuntimeResourceCache::BindCanonicalState(const std::shared_ptr<const void>& state){if(!state)return false;const std::scoped_lock lock(mutex_);if(control_->closed||control_->exhausted)return false;std::weak_ptr<const void> original(state);if(control_->canonicalStateBound)return !original.owner_before(control_->canonicalState)&&!control_->canonicalState.owner_before(original);control_->canonicalState=original;control_->canonicalStateBound=true;return true;}
+#endif
+CacheWitness RuntimeResourceCache::Witness() const {const std::scoped_lock lock(mutex_);CacheWitness witness;if(!control_->closed&&!control_->exhausted){witness.control_=control_;witness.nonce_=control_->nonce;witness.reset_=control_->reset;}return witness;}
+bool RuntimeResourceCache::MatchesLocked(const CacheWitness& witness) const noexcept {const auto original=witness.control_.lock();return original==control_&&witness.nonce_==control_->nonce&&witness.reset_==control_->reset&&!control_->closed&&!control_->exhausted;}
 
 std::optional<RuntimeFloatObservation> RuntimeResourceCache::ReadObservedFloat(
     const core::Tgi& target, std::uint32_t property) const {
@@ -73,6 +89,8 @@ bool RuntimeResourceCache::Prepare(
         bool hadExisting = false;
         {
             const std::scoped_lock lock(mutex_);
+            if(control_->closed||control_->exhausted){error="Runtime resource cache admission closed";return false;}
+            plan.cacheWitness.control_=control_;plan.cacheWitness.nonce_=control_->nonce;plan.cacheWitness.reset_=control_->reset;
             const auto epoch = invalidationEpochs_.find(key.target);
             plan.invalidationEpoch =
                 epoch == invalidationEpochs_.end() ? 0U : epoch->second;
@@ -137,6 +155,7 @@ bool RuntimeResourceCache::Commit(
             return false;
         }
         const std::scoped_lock lock(mutex_);
+        if(!MatchesLocked(plan.cacheWitness)){error="Runtime resource cache owner/reset changed";return false;}
         const auto epoch = invalidationEpochs_.find(plan.key.target);
         const std::uint64_t currentEpoch =
             epoch == invalidationEpochs_.end() ? 0U : epoch->second;
@@ -172,25 +191,34 @@ bool RuntimeResourceCache::Commit(
 
 std::size_t RuntimeResourceCache::Invalidate(
     const std::set<core::Tgi>& affected) noexcept {
+    std::size_t invalidated{};static_cast<void>(InvalidateChecked(affected,invalidated));return invalidated;
+}
+/** @summary Shared preallocate/check/evict/diagnostic algorithm, under the actual cache mutex. */
+template<class Range> CacheEvictionResult RuntimeResourceCache::EvictTargets(const Range& affected,const CacheWitness* expected) noexcept {
+    CacheEvictionResult result;
     try {
         const std::scoped_lock lock(mutex_);
-        std::size_t invalidated = 0U;
-        for (const core::Tgi& target : affected) {
-            ++invalidationEpochs_[target];
-            for (auto& [key, observation] : observations_)
-                if (key.target == target) observation.status = "pending";
-        }
+        if(control_->exhausted){result.status=CacheEvictionStatus::PendingEpochExhausted;return result;}
+        if(control_->closed)return result;
+        if(expected&&!MatchesLocked(*expected)){result.status=CacheEvictionStatus::PendingResetMismatch;return result;}
+        try{for(const auto& target:affected)invalidationEpochs_.try_emplace(target,0);}
+        catch(...){result.status=CacheEvictionStatus::PendingAllocation;return result;}
+        for(const auto& target:affected)if(invalidationEpochs_.find(target)->second==UINT64_MAX){control_->exhausted=true;result.status=CacheEvictionStatus::PendingEpochExhausted;return result;}
+        for(const auto& target:affected)++invalidationEpochs_.find(target)->second;
         for (auto& [key, entry] : entries_) {
-            if (entry.valid && affected.contains(key.target)) {
+            if (entry.valid && std::binary_search(affected.begin(),affected.end(),key.target)) {
                 entry.valid = false;
-                ++invalidated;
+                ++result.invalidated;
             }
         }
-        return invalidated;
-    } catch (...) {
-        return 0U;
-    }
+        result.status=CacheEvictionStatus::Evicted;
+        try{for(auto& [key,observation]:observations_)if(std::binary_search(affected.begin(),affected.end(),key.target))observation.status="pending";}
+        catch(...){result.status=CacheEvictionStatus::EvictedDiagnosticPending;}
+        return result;
+    }catch(...){result.invalidated=0;result.status=CacheEvictionStatus::PendingUnavailable;return result;}
 }
+CacheEvictionResult RuntimeResourceCache::EvictOriginal(std::span<const core::Tgi> affected,const CacheWitness& expected) noexcept {return EvictTargets(affected,&expected);}
+bool RuntimeResourceCache::InvalidateChecked(const std::set<core::Tgi>& affected,std::size_t& invalidated) noexcept {const auto result=EvictTargets(affected,nullptr);const bool complete=result.status==CacheEvictionStatus::Evicted||result.status==CacheEvictionStatus::EvictedDiagnosticPending;invalidated=complete?result.invalidated:0;return complete;}
 
 bool RuntimeResourceCache::Contains(const RuntimeResourceKey& key) const {
     const std::scoped_lock lock(mutex_);
@@ -226,6 +254,7 @@ std::vector<RuntimeResourceRestoreEntry> RuntimeResourceCache::SnapshotForTarget
 void RuntimeResourceCache::Clear() noexcept {
     try {
         const std::scoped_lock lock(mutex_);
+        if(control_->reset==UINT64_MAX)control_->exhausted=true;else ++control_->reset;
         entries_.clear();
         invalidationEpochs_.clear();
         observations_.clear();
@@ -253,6 +282,10 @@ std::vector<RuntimeResourceObservation> RuntimeResourceCache::Observations() con
     return result;
 }
 
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+void RuntimeResourceCacheTestAccess::HoldCache(RuntimeResourceCache& cache,const std::function<void()>& callback){const std::scoped_lock lock(cache.mutex_);callback();}
+std::optional<std::uint64_t> RuntimeResourceCacheTestAccess::Epoch(RuntimeResourceCache& cache,const core::Tgi& target){const std::scoped_lock lock(cache.mutex_);const auto found=cache.invalidationEpochs_.find(target);return found==cache.invalidationEpochs_.end()?std::nullopt:std::optional(found->second);}
+#endif
 const char* RuntimeResourceBuildStatusName(
     RuntimeResourceBuildStatus status) noexcept {
     switch (status) {

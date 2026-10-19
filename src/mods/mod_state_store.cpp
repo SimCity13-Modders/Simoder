@@ -8,8 +8,29 @@
 
 #include <fstream>
 #include <set>
+#include <algorithm>
+#include <limits>
+#include <numeric>
 
 namespace sc13::mods {
+namespace state_detail {
+bool Serialize(std::span<const ModId> enabled,TextSink sink,void* context,std::size_t maximum,std::string& error){
+    if(maximum!=std::numeric_limits<std::size_t>::max()&&enabled.size()>524288){error="Enabled-state input exceeds bounded serializer indices";return false;}
+    std::vector<std::size_t> order(enabled.size());std::iota(order.begin(),order.end(),0);
+    for(const auto& id:enabled)if(!IsValidModId(id)){error="Enabled-state save received an invalid or duplicate mod ID";return false;}
+    std::sort(order.begin(),order.end(),[&](auto a,auto b){return enabled[a]<enabled[b];});
+    for(std::size_t i=1;i<order.size();++i)if(enabled[order[i-1]]==enabled[order[i]]){error="Enabled-state save received an invalid or duplicate mod ID";return false;}
+    std::size_t total{};const auto append=[&](std::string_view value){if(value.size()>maximum-total)return false;if(!sink(context,value))return false;total+=value.size();return true;};
+    if(!append("enabled[")||!append(std::to_string(enabled.size()))||!append(enabled.empty()? "]:\n":"]: "))return false;
+    for(std::size_t i=0;i<enabled.size();++i)if((i&&!append(","))||!append(enabled[i]))return false;
+    return enabled.empty()||append("\n");
+}
+RetryResult PublishWithRetry(Publication call,void* context) noexcept{
+    RetryResult result;const auto start=GetTickCount64();
+    for(;;){std::uint32_t error{};Attempt outcome;try{outcome=call(context,error);}catch(...){result.exception=true;break;}if(outcome==Attempt::Stop)break;++result.calls;if(outcome==Attempt::Succeeded){result.success=true;break;}result.error=error;if(outcome==Attempt::StopAfterEffect)break;const auto delay=platform::FilePublicationRetryDelay(error,result.calls,GetTickCount64()-start);if(!delay)break;result.backoffMs+=delay;Sleep(delay);if(GetTickCount64()-start>=platform::FilePublicationBudgetMs)break;}
+    result.elapsedMs=GetTickCount64()-start;return result;
+}
+}
 
 bool LoadEnabledState(
     const std::filesystem::path& path,
@@ -71,32 +92,10 @@ bool SaveEnabledState(
     std::string& error) noexcept {
     try {
         error.clear();
-        std::set<ModId, std::less<>> unique;
-        for (const ModId& id : enabled) {
-            if (!IsValidModId(id) || !unique.insert(id).second) {
-                error = "Enabled-state save received an invalid or duplicate mod ID";
-                return false;
-            }
-        }
-        std::error_code directoryError;
-        std::filesystem::create_directories(path.parent_path(), directoryError);
-        if (directoryError) {
-            error = "Could not create the state.toon parent directory";
-            return false;
-        }
         std::string text;
-        if (enabled.empty()) {
-            text = "enabled[0]:\n";
-        } else {
-            text = "enabled[" + std::to_string(enabled.size()) + "]: ";
-            for (std::size_t index = 0U; index < enabled.size(); ++index) {
-                if (index != 0U) {
-                    text.push_back(',');
-                }
-                text += enabled[index];
-            }
-            text.push_back('\n');
-        }
+        struct Text {std::string& text;const std::filesystem::path& path;std::string& error;bool parentReady{};} sink{text,path,error};
+        const auto append=[](void* context,std::string_view bytes){auto& sink=*static_cast<Text*>(context);if(!sink.parentReady){std::error_code directoryError;std::filesystem::create_directories(sink.path.parent_path(),directoryError);if(directoryError){sink.error="Could not create the state.toon parent directory";return false;}sink.parentReady=true;}sink.text.append(bytes);return true;};
+        if(!state_detail::Serialize(enabled,append,&sink,std::numeric_limits<std::size_t>::max(),error))return false;
         const std::filesystem::path temporary = path.wstring() + L".tmp";
         {
             std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
@@ -111,23 +110,14 @@ bool SaveEnabledState(
                 return false;
             }
         }
-        const auto started = GetTickCount64();
-        DWORD moveError{};
-        unsigned attempts{};
-        for (;;) {
-            ++attempts;
-            if (MoveFileExW(temporary.c_str(), path.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE) return true;
-            moveError = GetLastError();
-            const auto delay = platform::FilePublicationRetryDelay(moveError, attempts, GetTickCount64() - started);
-            if (!delay) break;
-            Sleep(delay);
-            if (GetTickCount64() - started >= platform::FilePublicationBudgetMs) break;
-        }
+        struct Legacy {const std::filesystem::path& temporary;const std::filesystem::path& path;} legacy{temporary,path};
+        const auto callback=[](void* context,std::uint32_t& error){auto& state=*static_cast<Legacy*>(context);if(MoveFileExW(state.temporary.c_str(),state.path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))return state_detail::Attempt::Succeeded;error=GetLastError();return state_detail::Attempt::Failed;};
+        const auto publication=state_detail::PublishWithRetry(callback,&legacy);if(publication.success)return true;
+        if(publication.exception){error="Enabled-state save failed due to an allocation exception";return false;}
         DeleteFileW(temporary.c_str());
-        error = "Could not atomically publish state.toon; Win32 error " + std::to_string(moveError) +
-                "; attempts=" + std::to_string(attempts) +
-                "; elapsedMs=" + std::to_string(GetTickCount64() - started);
+        error = "Could not atomically publish state.toon; Win32 error " + std::to_string(publication.error) +
+                "; attempts=" + std::to_string(publication.calls) +
+                "; elapsedMs=" + std::to_string(publication.elapsedMs);
         return false;
     } catch (...) {
         error = "Enabled-state save failed due to an allocation exception";

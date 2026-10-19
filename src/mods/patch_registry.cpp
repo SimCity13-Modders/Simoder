@@ -83,100 +83,195 @@ std::shared_ptr<PatchRegistrySnapshot> PatchRegistry::BuildSnapshot(
     return snapshot;
 }
 
-bool PatchRegistry::Activate(
-    const ModId& owner,
+
+/** @summary Retains all allocations before publication and retired objects afterward. */
+struct PatchRegistry::PreparedState final {
+    PatchRegistry* registry{};
+    PatchGeneration expectedGeneration{};
+    std::uint64_t nextSequence{};
+    ActivePatchSets candidate;
+    std::shared_ptr<PatchRegistrySnapshot> snapshot;
+    std::shared_ptr<const PatchRegistrySnapshot> retiredSnapshot;
+    std::set<core::Tgi> affected;
+    bool published{};
+};
+
+PatchRegistry::PreparedPublication::PreparedPublication() noexcept = default;
+PatchRegistry::PreparedPublication::~PreparedPublication() = default;
+PatchRegistry::PreparedPublication::PreparedPublication(PreparedPublication&&) noexcept = default;
+PatchRegistry::PreparedPublication& PatchRegistry::PreparedPublication::operator=(
+    PreparedPublication&&) noexcept = default;
+
+const std::set<core::Tgi>& PatchRegistry::PreparedPublication::Affected() const noexcept {
+    static const std::set<core::Tgi> empty;
+    return state_ ? state_->affected : empty;
+}
+
+PatchGeneration PatchRegistry::PreparedPublication::ExpectedGeneration() const noexcept {
+    return state_ ? state_->expectedGeneration : 0U;
+}
+
+void PatchRegistry::PreparedPublication::TakeAffected(std::set<core::Tgi>& affected) noexcept {
+    if (state_) affected.swap(state_->affected);
+}
+
+PatchRegistry::PublicationGuard::PublicationGuard(PatchRegistry& registry, bool wait) noexcept
+    : registry_(&registry), lock_(registry.mutationMutex_, std::defer_lock) {
+    if (wait) lock_.lock(); else (void)lock_.try_lock();
+}
+
+bool PatchRegistry::PublicationGuard::CanPublish(const PreparedPublication& plan) const noexcept {
+    return lock_.owns_lock() && plan.state_ && plan.state_->registry == registry_ &&
+        !plan.state_->published && plan.state_->snapshot &&
+        plan.state_->expectedGeneration == registry_->generation_;
+}
+
+bool PatchRegistry::PublicationGuard::Publish(
+    PreparedPublication& plan, std::uint64_t domainRevision) noexcept {
+    if (!CanPublish(plan)) return false;
+    auto& state = *plan.state_;
+    state.snapshot->domainRevision_ = domainRevision;
+    registry_->active_.swap(state.candidate);
+    registry_->nextSequence_ = state.nextSequence;
+    registry_->generation_ = state.snapshot->generation_;
+    state.retiredSnapshot = registry_->current_.exchange(
+        std::move(state.snapshot), std::memory_order_acq_rel);
+    state.published = true;
+    return true;
+}
+
+PatchRegistry::PublicationGuard PatchRegistry::TryReservePublication() noexcept {
+    return PublicationGuard(*this, false);
+}
+
+PatchRegistry::PublicationGuard PatchRegistry::ReservePublication(bool wait) noexcept {
+    return PublicationGuard(*this, wait);
+}
+
+bool PatchRegistry::Prepare(ChangeKind kind, const ModId& owner,
     std::span<const ResourcePatchDefinition> patches,
-    std::set<core::Tgi>& affected,
-    std::string& error) noexcept {
+    PreparedPublication& plan, std::string& error) noexcept {
+    return PrepareImpl(kind,owner,patches,{},plan,error);
+}
+bool PatchRegistry::PrepareOwned(ChangeKind kind,const ModId& owner,std::span<const ResourcePatchDefinition> patches,
+    const std::shared_ptr<const void>& incarnation,PreparedPublication& plan,std::string& error,bool* busy) noexcept {
+    if(busy)*busy=false;
+    if(!incarnation) {try {error="Missing native owner incarnation";} catch(...) {} return false;}
+    return PrepareImpl(kind,owner,patches,incarnation,plan,error,{},nullptr,busy);
+}
+bool PatchRegistry::PrepareImpl(ChangeKind kind,const ModId& owner,std::span<const ResourcePatchDefinition> patches,
+    const std::shared_ptr<const void>& incarnation,PreparedPublication& plan,std::string& error,
+    const std::shared_ptr<const void>& successor, bool* absent,bool* busy) noexcept {
     try {
-        affected.clear();
         error.clear();
-        if (owner.empty()) {
-            error = "Activation requires a stable owner (script-only mods may have no patches)";
-            return false;
+        if(busy)*busy=false;
+        if (absent) *absent = false;
+        if (plan.state_) { error = "Preparation requires an empty plan"; return false; }
+        if (owner.empty()) { error = "Patch mutation requires a stable owner"; return false; }
+        auto state = std::make_unique<PreparedState>();
+        state->registry = this;
+        {
+            std::unique_lock lock(mutationMutex_,std::defer_lock);
+            if(busy) {
+                if(!lock.try_lock()){*busy=true;error="Patch preparation writer is busy";return false;}
+            } else lock.lock();
+            state->expectedGeneration = generation_;
+            state->nextSequence = nextSequence_;
+            state->candidate = active_;
         }
-        const std::scoped_lock lock(mutationMutex_);
-        if (active_.contains(owner)) {
-            error = "Patch owner is already active";
-            return false;
+        const bool absentRemoval = absent && kind == ChangeKind::Deactivate && !state->candidate.contains(owner);
+        if (!absentRemoval && state->expectedGeneration == std::numeric_limits<PatchGeneration>::max()) {
+            error = "Patch generation exhausted"; return false;
         }
-        ActivePatchSets candidate = active_;
-        OwnedPatchSet owned;
-        owned.sequence = nextSequence_;
-        owned.patches.assign(patches.begin(), patches.end());
-        candidate.emplace(owner, std::move(owned));
-        const PatchGeneration nextGeneration = generation_ + 1U;
-        std::shared_ptr<PatchRegistrySnapshot> snapshot =
-            BuildSnapshot(candidate, nextGeneration);
-        for (const ResourcePatchDefinition& patch : patches) {
-            affected.insert(patch.target);
+        auto existing = state->candidate.find(owner);
+        if(existing!=state->candidate.end() && existing->second.incarnation!=incarnation) {
+            error="Patch owner belongs to another native incarnation";return false;
         }
-        active_ = std::move(candidate);
-        ++nextSequence_;
-        generation_ = nextGeneration;
-        current_.store(std::move(snapshot), std::memory_order_release);
+        if (absentRemoval) {
+            *absent = true;
+        } else if (kind == ChangeKind::Activate) {
+            if (existing != state->candidate.end()) { error = "Patch owner is already active"; return false; }
+            if (state->nextSequence == std::numeric_limits<std::uint64_t>::max()) {
+                error = "Patch activation sequence exhausted"; return false;
+            }
+            OwnedPatchSet owned;
+            owned.incarnation=incarnation;
+            owned.sequence = state->nextSequence++;
+            owned.patches.assign(patches.begin(), patches.end());
+            state->candidate.emplace(owner, std::move(owned));
+        } else {
+            if (existing == state->candidate.end()) { error = "Patch owner is not active"; return false; }
+            for (const auto& patch : existing->second.patches) state->affected.insert(patch.target);
+            if (kind == ChangeKind::Deactivate) state->candidate.erase(existing);
+            else if (kind == ChangeKind::Replace) {
+                existing->second.patches.assign(patches.begin(), patches.end());
+                if (successor) existing->second.incarnation = successor;
+            }
+            else { error = "Unknown patch mutation"; return false; }
+        }
+        if (kind != ChangeKind::Deactivate) {
+            for (const auto& patch : patches) state->affected.insert(patch.target);
+        }
+        state->snapshot = BuildSnapshot(state->candidate, state->expectedGeneration + (absentRemoval ? 0U : 1U));
+        plan.state_ = std::move(state);
         return true;
     } catch (...) {
-        affected.clear();
-        error = "Patch activation failed transactionally due to an allocation exception";
+        try { error = "Patch preparation failed"; } catch (...) {}
         return false;
     }
 }
 
-bool PatchRegistry::Deactivate(
-    const ModId& owner,
-    std::set<core::Tgi>& affected,
-    std::string& error) noexcept {
-    try {
-        affected.clear();
-        error.clear();
-        const std::scoped_lock lock(mutationMutex_);
-        const auto existing = active_.find(owner);
-        if (existing == active_.end()) {
-            error = "Patch owner is not active";
-            return false;
-        }
-        for (const ResourcePatchDefinition& patch : existing->second.patches) {
-            affected.insert(patch.target);
-        }
-        ActivePatchSets candidate = active_;
-        candidate.erase(owner);
-        const PatchGeneration nextGeneration = generation_ + 1U;
-        std::shared_ptr<PatchRegistrySnapshot> snapshot =
-            BuildSnapshot(candidate, nextGeneration);
-        active_ = std::move(candidate);
-        generation_ = nextGeneration;
-        current_.store(std::move(snapshot), std::memory_order_release);
-        return true;
-    } catch (...) {
-        affected.clear();
-        error = "Patch deactivation failed transactionally due to an allocation exception";
+bool PatchRegistry::PrepareMaintenance(const ModId& owner, const std::shared_ptr<const void>& oldKey,
+    const std::shared_ptr<const void>& newKey, std::span<const ResourcePatchDefinition> patches,
+    PreparedPublication& plan, bool& absent, std::string& error) noexcept {
+    absent = false;
+    if (!oldKey || newKey == oldKey || (!newKey && !patches.empty())) {
+        try { error = "Invalid exact-owner maintenance"; } catch (...) {}
         return false;
     }
+    return PrepareImpl(newKey ? ChangeKind::Replace : ChangeKind::Deactivate,
+        owner, patches, oldKey, plan, error, newKey, &absent);
+}
+
+bool PatchRegistry::Mutate(ChangeKind kind, const ModId& owner,
+    std::span<const ResourcePatchDefinition> patches,
+    std::set<core::Tgi>& affected, std::string& error) noexcept {
+    affected.clear();
+    PreparedPublication plan;
+    const std::scoped_lock standaloneWriter(standaloneWriterMutex_);
+    if (!Prepare(kind, owner, patches, plan, error)) return false;
+    bool published = false;
+    {
+        auto guard = ReservePublication(true);
+        published = guard.Publish(plan, Current()->domain_revision());
+    }
+    if (!published) {
+        try { error = "Patch publication is busy or stale"; } catch (...) {}
+        return false;
+    }
+    plan.TakeAffected(affected);
+    return true;
+}
+
+bool PatchRegistry::Activate(const ModId& owner,
+    std::span<const ResourcePatchDefinition> patches,
+    std::set<core::Tgi>& affected, std::string& error) noexcept {
+    return Mutate(ChangeKind::Activate, owner, patches, affected, error);
+}
+
+bool PatchRegistry::Deactivate(const ModId& owner,
+    std::set<core::Tgi>& affected, std::string& error) noexcept {
+    return Mutate(ChangeKind::Deactivate, owner, {}, affected, error);
+}
+
+bool PatchRegistry::Replace(const ModId& owner,
+    std::span<const ResourcePatchDefinition> patches,
+    std::set<core::Tgi>& affected, std::string& error) noexcept {
+    return Mutate(ChangeKind::Replace, owner, patches, affected, error);
 }
 
 std::shared_ptr<const PatchRegistrySnapshot> PatchRegistry::Current() const noexcept {
     return current_.load(std::memory_order_acquire);
-}
-
-bool PatchRegistry::Replace(const ModId& owner, std::span<const ResourcePatchDefinition> patches,
-    std::set<core::Tgi>& affected, std::string& error) noexcept {
-    try {
-        error.clear(); affected.clear();
-        const std::scoped_lock lock(mutationMutex_);
-        const auto existing = active_.find(owner);
-        if (existing == active_.end()) { error = "Replace requires an active owner"; return false; }
-        auto candidate = active_;
-        for (const auto& patch : existing->second.patches) affected.insert(patch.target);
-        for (const auto& patch : patches) affected.insert(patch.target);
-        candidate.at(owner).patches.assign(patches.begin(), patches.end());
-        const auto nextGeneration = generation_ + 1U;
-        auto snapshot = BuildSnapshot(candidate, nextGeneration);
-        active_ = std::move(candidate);
-        generation_ = nextGeneration;
-        current_.store(std::move(snapshot), std::memory_order_release);
-        return true;
-    } catch (...) { affected.clear(); error = "Patch replacement failed before publication"; return false; }
 }
 
 bool PatchRegistry::IsActive(const ModId& owner) const {

@@ -11,8 +11,12 @@
 #include <optional>
 #include <span>
 #include <vector>
+#include <variant>
+#include "mods/patch_registry.hpp"
 
 namespace sc13::platform { class RuntimeOwner; }
+namespace sc13::scripting { class SemanticBridge; }
+namespace sc13::mods { class OwnerLifecycle; class ManagerCommands; class ManagerClose; class LifecycleDecisionLease; struct LifecycleDecisionTestAccess; struct ManagerCommandTicket; struct ManagerCommandsTestAccess; struct OwnerLifecycleTestAccess; }
 namespace sc13::runtime {
 /** @summary Explicit native stop causes; none asserts graceful game termination. */
 enum class StopReason { ExplicitShutdown, WindowClosing, OwnerLost, ActivationFailed };
@@ -26,14 +30,34 @@ struct ScopeHandle final {
     std::uint64_t serial{};
     bool operator==(const ScopeHandle&) const = default;
 };
-/** @summary Copied operation context; future providers must supply and revalidate these host-owned values. */
+/** @summary Absence of qualified native ingress always denies, without an ordinary-script fallback. */
+struct UnqualifiedOrigin final { bool operator==(const UnqualifiedOrigin&) const = default; };
+/** @summary Exact ordinary-script owner and immutable loaded-content correlation, never an agent login. */
+struct OrdinaryScriptOrigin final {
+    std::uint64_t owner{}, content{};
+    bool operator==(const OrdinaryScriptOrigin&) const = default;
+};
+/** @summary Retained authenticated agent causality; channel and consent-session identities are distinct. */
+struct AgentOrigin final {
+    std::uint64_t owner{}, content{}, actor{}, channel{}, consentSession{}, entity{}, extent{};
+    bool operator==(const AgentOrigin&) const = default;
+};
+/** @summary Closed discriminated ingress; an unqualified producer cannot select a permissive default. */
+using OperationOrigin = std::variant<UnqualifiedOrigin, OrdinaryScriptOrigin, AgentOrigin>;
+/** @summary Reviewed decision identity is distinct from effective authority and operation reservations. */
+struct DecisionReference final {
+    std::uint64_t serial{}, revision{}, action{};
+    bool operator==(const DecisionReference&) const = default;
+};
+/** @summary Copied operation reservation; identities are checked against the sole native grant store. */
 struct OperationContext final {
     std::uint64_t owner{};
     std::uint64_t epoch{};
     std::uint64_t grantGeneration{};
-    std::uint64_t principal{};
-    std::uint64_t session{};
-    std::uint64_t entity{};
+    std::uint64_t grantRevision{};
+    OperationOrigin origin;
+    DecisionReference decision;
+    std::uint64_t reservation{};
     std::uint64_t revision{};
     std::uint32_t opcode{};
     std::uint32_t readiness{RuntimeReady};
@@ -66,6 +90,38 @@ class RuntimeCommitDomain final {
 public:
     /** @summary Creates an initial writer domain; no authority or service is admitted. */
     RuntimeCommitDomain() = default;
+    /** @summary Core-only ordered writer reservation, never an authority token. */
+    class Writer final {
+    public:
+        /** @summary Releases the lane without calling external code. */
+        ~Writer();
+        Writer(const Writer&) = delete;
+        Writer& operator=(const Writer&) = delete;
+        /** @summary Reports successful lane ownership. @return False for contention or same-thread reentry. */
+        bool Acquired() const noexcept { return lock_.owns_lock(); }
+        /** @summary Checks revision capacity and sticky stop before a nonfallible publication. */
+        bool CanAdvance() const noexcept;
+        /** @summary Advances at the prepared publication fence. @return Exact new revision, or zero if unavailable. */
+        std::uint64_t Advance() noexcept;
+        /** @summary Advances only an already committed lifecycle rollback after stop; never admits new work.
+         * @return Exact rollback revision, or zero without capacity/ownership. */
+        std::uint64_t AdvanceRollback() noexcept;
+    private:
+        /** @summary Acquires before any manager/registry locks. @param wait Existing legacy drains may wait; new task admission may not. */
+        Writer(RuntimeCommitDomain& domain, bool wait);
+        RuntimeCommitDomain& domain_;
+        std::unique_lock<std::mutex> lock_;
+        Writer* previous_{};
+        friend class RuntimeCommitDomain;
+        friend class RuntimeScope;
+    };
+    /** @summary Reserves one core writer. @param wait True only for existing synchronous legacy writers outside all other locks.
+     * @return Stack reservation; recursive same-domain admission fails rather than deadlocking. */
+    Writer ReserveWriter(bool wait = false) { return Writer(*this, wait); }
+    /** @summary Detects same-thread native writer reentry before lifecycle preparation or Lua execution. */
+    bool WriterActiveOnCurrentThread() const noexcept;
+    /** @summary Observes the current writer revision without granting publication rights. */
+    std::uint64_t Revision() const noexcept { return revision_.load(); }
     /** @summary Closes all child operation admission without locks, callbacks or joining. */
     void RequestStop() noexcept { stopping_.store(true); }
     /** @summary Observes the sticky shared admission gate. @return True after shared stop. */
@@ -73,6 +129,7 @@ public:
     RuntimeCommitDomain(const RuntimeCommitDomain&) = delete;
     RuntimeCommitDomain& operator=(const RuntimeCommitDomain&) = delete;
 private:
+    static thread_local Writer* activeWriter_;
     std::mutex lane_;
     std::atomic<std::uint64_t> revision_{};
     std::atomic<std::size_t> pending_{};
@@ -86,6 +143,8 @@ private:
 /** @summary Owns generic commit/lifetime state; production admission is closed until a qualified authority exists. */
 class RuntimeScope final {
 public:
+    /** @summary Reserves the existing shared native writer lane without granting authority. */
+    RuntimeCommitDomain::Writer ReserveWriter() { return stateDomain().ReserveWriter(); }
     using CommitCallback = std::function<std::vector<std::byte>(std::span<const std::byte>)>;
     /** @summary Retains one actual freshly acquired owner; no authentication provider is installed.
      * @param owner Core-owned process-lifetime guard, or null for fail-closed construction.
@@ -154,13 +213,127 @@ public:
     /** @summary Cancels queued/running-uncommitted task. @param operation Native handle. @return Cancellation status. */
     ScopeResult CancelValue(ScopeHandle operation);
 private:
+    friend class SemanticTasks;
+    friend struct mods::ManagerCommandTicket;
+    friend class mods::OwnerLifecycle;
+    friend class mods::ManagerCommands;
+    friend class mods::ManagerClose;
+    friend class mods::LifecycleDecisionLease;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct mods::LifecycleDecisionTestAccess;
+    /** @summary Only the separately compiled fixture bridge may reuse existing atomic LifecycleGuard validation. */
+    friend class scripting::SemanticBridge;
+#endif
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct mods::ManagerCommandsTestAccess;
+#endif
+    /** @summary Exact native ticket is release-only bookkeeping, never operational authority. */
+    class CommandTicket final {
+        friend class RuntimeScope;
+        friend struct ScopeRetirementTestAccess;
+        std::uint64_t owner_{},serial_{};
+        std::size_t slot_{};
+    };
+    /** @summary Independent scalar scope certificate; never manager/VM/final loader readiness. */
+    struct RetirementObservation final {
+        ScopeResult result{ScopeResult::NotReady};
+        std::uint64_t generation{},disposalSequence{},disposalAcknowledged{};
+        /** @summary commandTickets is the historical field name for combined exact command and lifecycle tracked tickets. */
+        std::size_t running{},registrations{},operations{},resources{},unknownResources{},commandTickets{},rootReservations{},nonCommandFreshReservations{};
+        std::size_t mailboxWriting{},mailboxReady{},mailboxDraining{},ticketBytes{},disposalBytes{},metadataBytes{};
+        bool stopping{},scopeReady{},disposalPending{},invariant{};
+    };
+    /** @summary Retire one exact ticket immediately or through the existing bounded mailbox.
+     * @param ticket Original native incarnation. @return Ok acknowledged, NotReady transferred, or bounded rejection. */
+    ScopeResult ReleaseCommandTicket(const CommandTicket& ticket) noexcept;
+    /** @summary Scalar-only try-Q observation; no payload extraction or arbitrary destructor.
+     * @return Original scope certificate with explicit pending ownership. */
+    RetirementObservation ObserveRetirement() noexcept;
+    /** @summary Explicit off-lane disposal of at most one node and resource outside all guards.
+     * @pre Native caller owns no publication/State/VM/Q/status guard or current borrowed callback.
+     * @return Bounded admission outcome; accepted native destructor duration is unbounded. */
+    ScopeResult DrainRetirementOne() noexcept;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct ScopeRetirementTestAccess;
+    /** @summary Distinguishes release-only lifecycle bookkeeping from committed command admission; neither role issues authority. */
+    enum class ReservationRole { Command, LifecycleDecision };
+    /** @summary Share exact fresh reservation insertion while the caller owns original Q.
+     * @param context Original reviewed reservation. @param role Native bookkeeping role selecting actual scope phase.
+     * @return Fresh original-scope context or empty admission/capacity rejection. */
+    OperationContext ReserveFreshLocked(const OperationContext& context,ReservationRole role);
+    /** @summary Atomically reserve existing reviewed provenance and exact ticket under the same try-Q.
+     * @param context Original reviewed grant. @param ticket Empty exact native output. @return Fresh context or empty denial. */
+    OperationContext TryReserveCommand(const OperationContext& context,CommandTicket& ticket);
+    /** @summary Shares the exact original fresh producer without creating another grant or reservation budget.
+     * @param context Reviewed original context. @param ticket Empty exact output. @param role Explicit native bookkeeping role, never inferred from status output.
+     * @param status Optional precise admission result.
+     * @return Fresh context coupled to the existing native ticket under one Q. */
+    OperationContext TryReserveTracked(const OperationContext& context,CommandTicket& ticket,ReservationRole role,ScopeResult* status=nullptr);
+    /** @summary Validates exact lifecycle root bookkeeping in the actual original scope phase under try Q without activation, reservation or release.
+     * @param context Original reviewed root. @return Native root lineage/admission result. */
+    ScopeResult CheckRootDecision(const OperationContext& context) noexcept;
+#endif
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct mods::OwnerLifecycleTestAccess;
+#endif
+    /** @summary Closed typed lifecycle fence; never exposes grants or runs caller callbacks. */
+    class LifecycleGuard final {
+    public:
+        /** @summary Try to reserve the actual scope. @param scope Exact retained scope. */
+        explicit LifecycleGuard(RuntimeScope& scope) noexcept;
+        /** @summary Reports nonblocking reservation success. @return Whether the scope mutex is held. */
+        bool Acquired() const noexcept { return lock_.owns_lock(); }
+        /** @summary Reuse the sole grant evaluator for a current or uncommitted candidate owner.
+         * @param context Exact original reservation. @param candidate Require uncommitted candidate state.
+         * @return Current authority without issuing or copying any grant. */
+        ScopeResult Check(const OperationContext& context, bool candidate) const;
+        /** @summary Confirms exact scope/domain identity before any marker.
+         * @param domain Original writer domain. @return Whether this guard belongs to it. */
+        bool InDomain(const RuntimeCommitDomain& domain) const noexcept;
+        /** @summary Copies factual scalars while the actual try-only Q reservation remains held.
+         * @return Current scope snapshot, or a closed empty snapshot when not acquired. */
+        ScopeSnapshot Snapshot() const noexcept;
+        /** @summary Retire epochs, grants and queued operations without releasing retained buffers. */
+        void Retire() noexcept;
+        /** @summary Expose only the candidate that passed Check under this same guard. */
+        void Activate() noexcept;
+    private:
+        RuntimeScope& scope_;
+        std::unique_lock<std::mutex> lock_;
+    };
+    /** @summary Returns the retained native domain; no authority is issued. */
+    RuntimeCommitDomain& stateDomain() noexcept;
+    /** @summary Publishes a typed prepared registry plan on the original task under actual context reservation.
+     * @param operation Original value task. @param writer Actual shared domain reservation.
+     * @param publication Guard validated before the scope fence. @param plan Retained prepared plan.
+     * @param scopeGeneration Captured original scope identity. @param runtimeEpoch Captured original epoch.
+     * @param input Original copied request, checked against the retained task input.
+     * @return Precommit rejection or immutable registry-only outcome. */
+    ScopeResult CommitPreparedValue(ScopeHandle operation, RuntimeCommitDomain::Writer& writer,
+        mods::PatchRegistry::PublicationGuard& publication, mods::PatchRegistry::PreparedPublication& plan,
+        std::uint64_t scopeGeneration, std::uint64_t runtimeEpoch, const copied::Envelope& input);
     struct State;
+    /** @summary Drain exact native command release requests only outside compound publication guards.
+     * @param state Original Q-locked state. */
+    static void DrainCommandReleasesLocked(State& state) noexcept;
+    /** @summary Ack only the exact tracked nonroot reservation under Q. @param state Original state.
+     * @param slot Original ticket record. @param serial Exact incarnation. @return Acknowledgement or invariant failure. */
+    static ScopeResult AcknowledgeCommandLocked(State& state,std::size_t slot,std::uint64_t serial) noexcept;
+    /** @summary Reuse scalar stop/cancellation without destroying payloads. @param state Original Q-held state. @param reason Native reason. */
+    static void RetireLocked(State& state,StopReason reason) noexcept;
+    /** @summary Shares the one scalar snapshot implementation between legacy and typed guarded readers.
+     * @param state Actual state whose mutex is held. @return Copied native facts without authority. */
+    static ScopeSnapshot SnapshotLocked(const State& state) noexcept;
     std::shared_ptr<State> state_;
     /** @summary Validates authoritative state while its mutex is held.
      * @param state Current owned state. @param context Original host-issued context.
      * @param checkRevision Commit/submit require exact revision; result polling does not replay writers.
+     * @param checkGrantRevision False only when issuing a fresh fixture reservation from still-valid prior provenance.
+     * @param checkCapability False only for non-authorizing effective-capability inspection.
+     * @param candidate True only for private lifecycle evaluation of an uncommitted native candidate.
      * @return Current admission outcome. */
-    static ScopeResult Validate(const State& state, const OperationContext& context, bool checkRevision);
+    static ScopeResult Validate(const State& state, const OperationContext& context, bool checkRevision,
+        bool checkGrantRevision = true, bool checkCapability = true, bool candidate = false);
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
     friend struct RuntimeScopeTestAccess;
 #endif
@@ -169,8 +342,47 @@ private:
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 /** @summary Synthetic authority exists only in separately compiled test targets, never runtime/Core. */
 struct RuntimeScopeTestAccess final {
+    friend class RuntimeScope;
+    /** @summary Try-reserve the actual fixture scope mutex for bounded contention/reclamation checks.
+     * @param scope Exact fixture scope. @return Nonblocking native lock; never grants authority. */
+    static std::unique_lock<std::mutex> ReserveState(RuntimeScope& scope);
+    /** @summary Exact reviewed fixture request; never exported or available to production ingress. */
+    struct Review final {
+        OperationOrigin origin;
+        std::uint64_t requested{1}, required{1}, approved{1}, revision{1}, action{1};
+        std::uint32_t opcode{1}, readiness{RuntimeReady};
+        bool supportsRestricted{}, sessionAllowed{}, entityAllowed{}, mandatoryAllowed{true}, allParticipants{};
+        std::chrono::steady_clock::time_point expires{std::chrono::steady_clock::now() + std::chrono::minutes(1)};
+        bool operator==(const Review&) const = default;
+    };
+    /** @summary Non-authoritative bounded pending challenge identity. */
+    struct Challenge final { std::uint64_t owner{}, serial{}; };
+    /** @summary Truthful effective state, independent of feature/transport availability. */
+    struct PermissionView final { std::uint64_t capabilities{}; bool restricted{}, admissionClosed{}; };
+    /** @summary Creates one expiring fixture-only pending human-action challenge. @param scope Native fixture. @param review Exact prompt. @return Zero on denial/capacity. */
+    static Challenge ChallengeDecision(RuntimeScope& scope, const Review& review);
+    /** @summary Consumes an exact fixture human-action proof once into the actual grant store. @param scope Native fixture. @param challenge Original prompt. @param review Unchanged reviewed request. @return Reservation or closed context. */
+    static OperationContext Decide(RuntimeScope& scope, Challenge challenge, const Review& review);
+    /** @summary Creates a new operation reservation without renewing or rewriting the original decision/task. @param scope Native fixture. @param context Existing grant reservation. @return Fresh domain revision bounded by original consent. */
+    static OperationContext Reserve(RuntimeScope& scope, const OperationContext& context);
+    /** @summary Try-only variant of the existing fixture reservation producer, outside publication guards.
+     * @param scope Original fixture scope. @param context Existing reviewed provenance. @return Fresh reservation or empty on contention. */
+    static OperationContext TryReserve(RuntimeScope& scope,const OperationContext& context);
+    /** @summary Authenticates a fixture participant in an explicitly reviewed all-participants session. @param scope Fixture. @param context Governing grant. @param actor Joining actor. @param channel Actual channel. @return Separate bound participant reservation. */
+    static OperationContext Join(RuntimeScope& scope, const OperationContext& context, std::uint64_t actor, std::uint64_t channel);
+    /** @summary Closes consent across every matching agent grant while preserving reviewed entity fallback.
+     * @param scope Fixture. @param consentSession Actual consent-session identity, never a grant identity.
+     * @return Ok after serialized closure, Stale when absent or Busy without a change. */
+    static ScopeResult RevokeSession(RuntimeScope& scope, std::uint64_t consentSession);
+    /** @summary Closes one authenticated channel without replacement-session inheritance.
+     * @param scope Fixture. @param channel Actual channel. @return Ok after closure, Invalid for zero or Busy without effects. */
+    static ScopeResult Disconnect(RuntimeScope& scope, std::uint64_t channel);
+    /** @summary Inspects current effective capabilities without issuing permission. @param scope Fixture. @param context Exact reservation. @return Cleared view on denial. */
+    static PermissionView Inspect(RuntimeScope& scope, const OperationContext& context);
     /** @summary Inspect fixture cleanup without reopening a stopped generation. @param scope Fixture owner. @return Retained continuation slots. */
     static std::size_t Registrations(const RuntimeScope& scope);
+    /** @summary Observe actual retained reservation capacity for isolated cleanup probes. @param scope Original fixture scope. @return Count. */
+    static std::size_t Reservations(const RuntimeScope& scope);
     /** @summary Constructs a closed synthetic owner, never touching the production Global object.
      * @param domain Optional shared test writer lane. @return Test scope with deliberately local authority store. */
     static std::unique_ptr<RuntimeScope> Create(std::shared_ptr<RuntimeCommitDomain> domain = {});
@@ -183,9 +395,35 @@ struct RuntimeScopeTestAccess final {
                                   bool mandatoryAllowed = true, std::uint32_t opcode = 1,
                                   std::chrono::milliseconds lease = std::chrono::minutes(1),
                                   std::uint32_t readiness = RuntimeReady);
-    /** @summary Invalidates an existing grant without altering queued result ownership.
-     * @param scope Test-only scope. @param session Bound session to revoke. */
-    static void Revoke(RuntimeScope& scope, std::uint64_t session);
+    /** @summary Invalidates an exact grant and advances its effective revision without altering retained task outcomes.
+     * @param scope Test-only scope. @param grantIdentity Exact grant identity, never an agent consent-session ID.
+     * @return Ok after serialized revocation, Stale when absent or Busy without effects. */
+    static ScopeResult Revoke(RuntimeScope& scope, std::uint64_t grantIdentity);
+private:
+    /** @summary Share the sole fixture reservation implementation while the caller owns Q outside compound fences.
+     * @param scope Original fixture. @param context Existing reviewed provenance. @return Fresh exact bounded reservation. */
+    static OperationContext ReserveLocked(RuntimeScope& scope,const OperationContext& context);
+};
+/** @summary Fixture-only exact retirement producer/observations; absent from production/Core. */
+struct ScopeRetirementTestAccess final {
+    using Ticket=RuntimeScope::CommandTicket;
+    using Observation=RuntimeScope::RetirementObservation;
+    /** @summary Coupled fresh context and exact release handle. */
+    struct Reservation final {OperationContext context;Ticket ticket;};
+    /** @summary Reserve one exact fresh ticket under actual Q. @param scope Original scope. @param context Existing reviewed provenance. @return Empty on denial. */
+    static Reservation Reserve(RuntimeScope& scope,const OperationContext& context);
+    /** @summary Release only the original native ticket. @param scope Original scope. @param ticket Original handle. @return Actual acknowledgement/transfer state. */
+    static ScopeResult Release(RuntimeScope& scope,const Ticket& ticket);
+    /** @summary Observe original scope without arbitrary destruction. @param scope Original scope. @return Current partial certificate. */
+    static Observation Observe(RuntimeScope& scope);
+    /** @summary Explicit disposal action outside lane/publication ownership. @param scope Original scope. @return Actual action outcome. */
+    static ScopeResult DrainOne(RuntimeScope& scope);
+    /** @summary Enroll a fixture-native manager-independent resource in the existing 64-holder budget.
+     * @param scope Original scope. @param resource Trusted fixture object. @return Whether retained before stop. */
+    static bool RetainSafe(RuntimeScope& scope,std::shared_ptr<void> resource);
+    /** @summary Install deterministic actual reserve/mailbox transfer cuts, outside Q.
+     * @param reserved After atomic successful reserve. @param writing After actual mailbox claim and before Ready publication. */
+    static void Barriers(std::function<void()> reserved,std::function<void()> writing);
 };
 #endif
 }

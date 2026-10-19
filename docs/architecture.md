@@ -7,6 +7,19 @@ See the [internal U1 runtime foundation](architecture/runtime-foundation.md) for
 generic ownership, closed admission, dispatch, and retained shutdown contracts.
 The [native module boundary](architecture/native-module-boundary.md) documents
 the qualified DLL profile, canonical SDK declarations and DevTools fixture scope.
+The [current U3 Base Luau host profile](architecture/u3-host-profile.md) records
+the supported alpha presentation, qualification and remaining acceptance limits.
+
+The [manager ownership integration proposal](architecture/manager-owner-integration-contract.md)
+and [immutable candidate contract](architecture/captured-candidate-contract.md)
+separate isolated qualification from production cutover. The proposed
+[VM/scheduler publication contract](architecture/scheduler-publication-contract.md)
+defines typed reservations, lock ordering and deferred retirement; its new
+publication protocol requires implementation and independent verification.
+The proposed [manager persistence/shutdown contract](architecture/manager-persistence-shutdown-contract.md)
+distinguishes requested disk intent, logical commit, pending cache settlement and
+completed resource closure. It records source gaps and staged qualification;
+it does not activate production startup or replace current teardown behavior.
 
 ## Runtime flow
 
