@@ -40,9 +40,10 @@ std::shared_ptr<SemanticEndpoint> SemanticBridge::Bind(std::shared_ptr<runtime::
     throw std::runtime_error("Base endpoint capacity exhausted");
 }
 runtime::ScopeResult SemanticBridge::Request(const std::shared_ptr<SemanticEndpoint>& endpoint,
-    std::string_view method, const runtime::copied::Envelope& value, runtime::TaskHandle& output,SemanticContextLease& context) {
+    std::string_view method, const runtime::copied::Envelope& value, runtime::TaskHandle& output,SemanticContextLease& context,
+    const SemanticContextLease* expected,const SemanticEndpointBinding* binding) {
     using runtime::ScopeResult;
-    output = {};
+    output = {}; context = {};
     const std::scoped_lock lock(mutex_);
     if (closed_ || !readyGeneration_) return ScopeResult::NotReady;
     if (!endpoint || endpoint->bridge.get() != this || endpoint->closed || !endpoint->generation) return ScopeResult::Stale;
@@ -50,17 +51,52 @@ runtime::ScopeResult SemanticBridge::Request(const std::shared_ptr<SemanticEndpo
     while (index < methods_.size() && methods_[index].id != method) ++index;
     if (index == methods_.size()) return ScopeResult::NotReady;
     if (!value || value.Schema() != methods_[index].inputSchema) return ScopeResult::Invalid;
-    const auto resolved=ResolveContext(*endpoint,methods_[index],value,context);
+    if(binding){const auto exact=ValidateBindingLocked(endpoint,*binding);if(exact!=ScopeResult::Ok)return exact;}
+    SemanticContextLease captured;
+    const auto resolved=ResolveContext(*endpoint,methods_[index],value,captured);
     if (resolved!=ScopeResult::Ok) return resolved;
+    if(expected){
+        // @summary Preserve the original invocation's facts atomically with native admission, rather than silently rebinding newer observations.
+        const auto current=ValidateContextLocked(*endpoint,*expected);
+        if(current!=ScopeResult::Ok)return current;
+        if(captured.baseEpoch!=expected->baseEpoch||captured.vmGeneration!=expected->vmGeneration||
+            captured.scopeGeneration!=expected->scopeGeneration||captured.runtimeEpoch!=expected->runtimeEpoch||
+            (captured.mask&expected->mask)!=expected->mask)return ScopeResult::Stale;
+        for(std::size_t i=0;i<captured.facts.size();++i)
+            if((expected->mask&(1U<<i))&&!(captured.facts[i]==expected->facts[i]))return ScopeResult::Stale;
+    }
     const auto size = value.Encode().size();
     if (count_ == queue_.size() || size > 1024U * 1024U - bytes_) return ScopeResult::Busy;
     if(nextOperation_==UINT64_MAX)return ScopeResult::Busy;
-    context.operation=nextOperation_++;
+    captured.operation=nextOperation_++;
     const auto admitted = endpoint->tasks->Admit(endpoint->context, value, methods_[index].maxResultBytes, output);
     if (admitted != ScopeResult::Ok) return admitted;
-    queue_[(first_ + count_) % queue_.size()] = {endpoint, output, value, endpoint->generation, epoch_, index,context};
+    queue_[(first_ + count_) % queue_.size()] = {endpoint, output, value, endpoint->generation, epoch_, index,captured};
     ++count_; bytes_ += size;
+    context=captured;
     return ScopeResult::Ok;
+}
+runtime::ScopeResult SemanticBridge::CaptureBinding(const std::shared_ptr<SemanticEndpoint>& endpoint,SemanticEndpointBinding& output) const {
+    output={};
+    SemanticEndpointBinding captured;
+    {
+        const std::scoped_lock lock(mutex_);
+        if(closed_)return runtime::ScopeResult::Stale;
+        if(!readyGeneration_)return runtime::ScopeResult::NotReady;
+        if(!endpoint||endpoint->closed||endpoint->bridge.get()!=this||!endpoint->scope||!endpoint->tasks||!endpoint->generation||
+            !std::any_of(endpoints_.begin(),endpoints_.end(),[&](const auto& entry){return !entry.owner_before(endpoint)&&!endpoint.owner_before(entry);}))
+            return runtime::ScopeResult::Stale;
+        captured={endpoint,endpoint->scope,endpoint->tasks,endpoint->context,endpoint->generation,endpoint->storageOwner,epoch_,readyGeneration_};
+    }
+    output=std::move(captured);return runtime::ScopeResult::Ok;
+}
+runtime::ScopeResult SemanticBridge::ValidateBindingLocked(const std::shared_ptr<SemanticEndpoint>& endpoint,const SemanticEndpointBinding& expected) const {
+    if(closed_||!endpoint||endpoint->closed)return runtime::ScopeResult::Stale;
+    if(!readyGeneration_)return runtime::ScopeResult::NotReady;
+    if(expected.endpoint!=endpoint||endpoint->bridge.get()!=this||expected.scope!=endpoint->scope||expected.tasks!=endpoint->tasks||
+        expected.authority!=endpoint->context||expected.generation!=endpoint->generation||expected.storageOwner!=endpoint->storageOwner||
+        expected.baseEpoch!=epoch_||expected.baseGeneration!=readyGeneration_)return runtime::ScopeResult::Stale;
+    return runtime::ScopeResult::Ok;
 }
 bool SemanticBridge::Take(SemanticInvocation& output) {
     const std::scoped_lock lock(mutex_);
@@ -200,6 +236,9 @@ runtime::ScopeResult SemanticBridge::NextPublication(std::uint64_t& cursor, Sema
     return runtime::ScopeResult::Ok;
 }
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+runtime::ScopeResult SemanticBridgeTestAccess::CaptureBinding(const SemanticBridge& bridge,const std::shared_ptr<SemanticEndpoint>& endpoint,SemanticEndpointBinding& output){
+    return bridge.CaptureBinding(endpoint,output);
+}
 std::unique_lock<std::mutex> SemanticBridgeTestAccess::ReserveObservation(SemanticBridge& bridge) {
     return std::unique_lock<std::mutex>(bridge.mutex_, std::try_to_lock);
 }

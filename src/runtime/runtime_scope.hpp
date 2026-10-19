@@ -17,6 +17,7 @@
 namespace sc13::platform { class RuntimeOwner; }
 namespace sc13::scripting { class SemanticBridge; }
 namespace sc13::mods { class OwnerLifecycle; class ManagerCommands; class ManagerClose; class LifecycleDecisionLease; struct LifecycleDecisionTestAccess; struct ManagerCommandTicket; struct ManagerCommandsTestAccess; struct OwnerLifecycleTestAccess; }
+namespace sc13::mods::native { class NativeProvider; }
 namespace sc13::runtime {
 /** @summary Explicit native stop causes; none asserts graceful game termination. */
 enum class StopReason { ExplicitShutdown, WindowClosing, OwnerLost, ActivationFailed };
@@ -214,6 +215,7 @@ public:
     ScopeResult CancelValue(ScopeHandle operation);
 private:
     friend class SemanticTasks;
+    friend class mods::native::NativeProvider;
     friend struct mods::ManagerCommandTicket;
     friend class mods::OwnerLifecycle;
     friend class mods::ManagerCommands;
