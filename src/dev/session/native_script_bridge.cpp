@@ -1,5 +1,5 @@
 #include "dev/session/native_script_bridge.hpp"
-#include "dev/session/native_owner_capture.hpp"
+#include "dev/session/native_bindings_status.hpp"
 #include "session_router.hpp"
 #include "reverse/build_compatibility.hpp"
 #include <array>
@@ -106,8 +106,6 @@ bool InitializeScriptBridge(const reverse::BuildFingerprint& fingerprint, std::s
         return false;
     }
     g_base.store(base);
-    std::string captureError;
-    static_cast<void>(InitializeOwnerCapture(captureError));
     return true;
 }
 
@@ -135,11 +133,6 @@ ScriptReply ExecuteScriptPacket(HWND window, std::string_view packetJson) noexce
         const int count = reinterpret_cast<Count>(Method(root, 0x54, 0x935f10))(root);
         if (count <= 0 || count > 16) throw std::runtime_error("Native view inventory is not ready or exceeds its bound.");
         const auto contextAt = reinterpret_cast<Context>(Method(root, 0x4c, 0xa3bb80));
-        /* @summary Keep callback owner capture scoped to this admitted, game-thread native invocation. */
-        struct CaptureScope final {
-            CaptureScope() noexcept { BeginOwnerCapture(); }
-            ~CaptureScope() { EndOwnerCapture(); }
-        } captureScope;
         const std::string packet(packetJson);
         void* selectedContext{};
         int selectedIndex = -1;
@@ -193,10 +186,7 @@ ScriptReply ExecuteScriptPacket(HWND window, std::string_view packetJson) noexce
         if (!invoke(selectedContext, function.Scope(), result.Scope(), argument.Scope()))
             throw std::runtime_error("Native script invocation failed; mutation completion is unknown.");
         reply.json = CopyResult(result.Value());
-        if (packetJson.find("\"op\":\"world-units\"") != std::string_view::npos &&
-            reply.json.size() >= 2 && reply.json.substr(reply.json.size() - 2) == "}}" &&
-            reply.json.find("\"ok\":true") != std::string::npos)
-            reply.json.insert(reply.json.size() - 2, ",\"nativeBindings\":" + OwnerObservationJson());
+        AppendNativeBindingsStatus(packetJson, reply.json);
         reply.viewIndex = static_cast<unsigned int>(selectedIndex);
         reply.success = true;
     } catch (const std::exception& exception) { reply.error = exception.what(); }
@@ -204,9 +194,7 @@ ScriptReply ExecuteScriptPacket(HWND window, std::string_view packetJson) noexce
     return reply;
 }
 
-bool ShutdownScriptBridge(std::string& error) noexcept {
-    if (!ShutdownOwnerCapture(error)) return false;
+void ShutdownScriptBridge() noexcept {
     g_base.store(0);
-    return true;
 }
 }

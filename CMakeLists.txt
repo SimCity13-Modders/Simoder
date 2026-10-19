@@ -60,7 +60,6 @@ add_library(sc13_core STATIC
     src/dev/runtime_diagnostics.cpp
     src/dev/runtime_control.cpp
     src/dev/session/session_transport.cpp
-    src/dev/session/owner_capture_lifecycle.cpp
     src/formats/dbpf/dbpf_reader.cpp
     src/formats/dbpf/refpack.cpp
     src/formats/prop/prop_document.cpp
@@ -85,6 +84,7 @@ add_library(sc13_core STATIC
 src/mods/state_path_writer.cpp
     src/mods/mod_types.cpp
     src/mods/native/native_module_loader.cpp
+    src/mods/native/native_provider.cpp
     src/mods/resource_project.cpp
     src/mods/patch_registry.cpp
     src/reverse/pe_file.cpp
@@ -181,7 +181,6 @@ if(SC13_BUILD_RUNTIME)
         src/ui/window_message_hook.cpp
         src/ui/mod_panel.cpp
         src/dev/session/native_script_bridge.cpp
-        src/dev/session/native_owner_capture.cpp
     )
     # @summary Embed the fixed semantic session router without adding a production sidecar.
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/dev/session/session_router.js" SC13_SESSION_ROUTER_SOURCE)
@@ -261,6 +260,12 @@ if(SC13_BUILD_TESTS)
     target_link_libraries(simoder-semantic-bridge-tests PRIVATE sc13-semantic-test-support)
     sc13_enable_warnings(simoder-semantic-bridge-tests)
     if(SC13_BASE_SOURCE_DIR)
+        # @summary Qualify the actual closed native adapter through the existing Base/scope fixture path.
+        add_executable(simoder-native-provider-tests tests/native_provider_tests.cpp)
+        target_link_libraries(simoder-native-provider-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-native-provider-tests)
+        add_test(NAME simoder-native-provider-tests COMMAND simoder-native-provider-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-native-provider-tests PROPERTIES TIMEOUT 90)
         # @summary Exercise actual captured preparation without operational or production activation.
         add_executable(simoder-manager-preparation-tests tests/manager_preparation_tests.cpp tests/mod_fixture.cpp tests/test_harness.cpp)
         target_link_libraries(simoder-manager-preparation-tests PRIVATE sc13-semantic-test-support)
@@ -363,11 +368,12 @@ if(SC13_BUILD_TESTS)
     sc13_enable_warnings(simoder-game-window-dispatch-tests)
     add_test(NAME simoder-game-window-dispatch-tests COMMAND simoder-game-window-dispatch-tests)
     set_tests_properties(simoder-game-window-dispatch-tests PROPERTIES TIMEOUT 30)
-    add_executable(simoder-native-owner-capture-lifecycle-tests tests/native_owner_capture_lifecycle_tests.cpp)
-    target_link_libraries(simoder-native-owner-capture-lifecycle-tests PRIVATE sc13_core)
-    sc13_enable_warnings(simoder-native-owner-capture-lifecycle-tests)
-    add_test(NAME simoder-native-owner-capture-lifecycle-tests COMMAND simoder-native-owner-capture-lifecycle-tests)
-    set_tests_properties(simoder-native-owner-capture-lifecycle-tests PROPERTIES TIMEOUT 30)
+    # @summary Verify actual world-unit unavailable-status serialization after complete owner-hook retirement.
+    add_executable(simoder-native-bindings-status-tests tests/native_bindings_status_tests.cpp)
+    target_include_directories(simoder-native-bindings-status-tests PRIVATE src)
+    sc13_enable_warnings(simoder-native-bindings-status-tests)
+    add_test(NAME simoder-native-bindings-status-tests COMMAND simoder-native-bindings-status-tests)
+    set_tests_properties(simoder-native-bindings-status-tests PROPERTIES TIMEOUT 30)
     add_executable(simoder-native-session-transport-tests tests/native_session_transport_tests.cpp)
     target_link_libraries(simoder-native-session-transport-tests PRIVATE sc13_core user32)
     sc13_enable_warnings(simoder-native-session-transport-tests)
