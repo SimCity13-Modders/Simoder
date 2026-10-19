@@ -13,15 +13,23 @@ namespace {
 constexpr std::uint32_t Slots = 128;
 /** @summary Each provider receives disjoint public slots; exhaustion never wraps. */
 std::atomic_uint32_t nextBlock{1};
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+/** @summary Fixture-thread scheduling cut only; absent from production and never consulted for identity or authority. */
+thread_local std::function<void()> afterOriginalPoll;
+/** @summary Fixture-only pending reservation cut, absent from production and original admission decisions. */
+thread_local std::function<void()> afterTaskReserve;
+#endif
 /** @summary Compare opaque identities without reinterpretation. @param a First identity. @param b Second identity. @return Exact equality. */
 bool Same(SdHandle a, SdHandle b) noexcept { return a.slot == b.slot && a.generation == b.generation; }
 /** @summary Validate identity shape only, never establish authority. @param value Opaque identity. @return Nonzero components. */
 bool Present(SdHandle value) noexcept { return value.slot && value.generation; }
-/** @summary Allocate disjoint invocation/task ranges before exposing any reference. @return First slot, or throw on exhaustion. */
+/** @summary Reserved public width covers invocation, task and informational execution-context kinds. */
+constexpr std::uint32_t BlockWidth = 3*Slots;
+/** @summary Allocate disjoint typed ranges before exposing any reference. @return First slot, or throw on exhaustion. */
 std::uint32_t Block() {
     auto value=nextBlock.load();
-    do { if(value>UINT32_MAX-2*Slots) throw std::runtime_error("Native provider identity exhausted"); }
-    while(!nextBlock.compare_exchange_weak(value,value+2*Slots));
+    do { if(value>UINT32_MAX-BlockWidth) throw std::runtime_error("Native provider identity exhausted"); }
+    while(!nextBlock.compare_exchange_weak(value,value+BlockWidth));
     return value;
 }
 /** @summary Clear supplied valid native storage; not a sandbox for hostile native pointers.
@@ -74,10 +82,12 @@ struct NativeProvider::State final {
         const auto& slot=table[handle.slot-block-offset];
         return slot.generation==handle.generation?slot.value:nullptr;
     }
-    /** @summary Publish a prepared entry without entering scope or VM.
+    /** @summary Reserve the shared live invocation/task ceiling before publishing any kind, without entering scope or VM.
      * @param table Fixed kind table. @param value Prepared lease. @param offset Kind range. @return Issued identity or zero at capacity. */
     template<class T> SdHandle Add(std::array<Slot<T>,Slots>& table,const std::shared_ptr<T>& value,std::uint32_t offset) {
         const std::lock_guard lock(mutex);
+        const auto retained=[](const auto& slots){return static_cast<std::size_t>(std::count_if(slots.begin(),slots.end(),[](const auto& slot){return bool(slot.value);}));};
+        if(retained(invocations)+retained(tasks)>=Slots)return {};
         for(std::uint32_t i=0;i<Slots;++i)if(!table[i].value&&table[i].generation){table[i].value=value;return {block+offset+i,table[i].generation};}
         return {};
     }
@@ -149,6 +159,7 @@ runtime::ScopeResult NativeProvider::CheckFacts() const {
 SdResult NativeProvider::Bind(SdHandle owner,SdHandle session,std::uint32_t method,SdHandle target,std::uint64_t revision,SdHandle* output) noexcept try {
     if(output)*output={};if(!output)return SD_INVALID;auto& s=*state_;
     if(!Same(owner,s.owner))return SD_DENIED;if(!s.Role(session))return SD_DENIED;
+    if(target.slot>=s.block+2*Slots&&target.slot<s.block+BlockWidth)return SD_STALE;
     const auto auth=CheckAuthority();if(auth!=runtime::ScopeResult::Ok)return Map(auth);
     if(revision!=s.binding.authority.revision)return SD_CONFLICT;
     for(std::size_t i=0;i<s.routes.size();++i)if(s.routes[i].method==method){
@@ -171,7 +182,12 @@ SdResult NativeProvider::Invoke(SdHandle owner,SdHandle invocation,std::uint32_t
     if(decoded!=runtime::copied::Status::Ok)return decoded==runtime::copied::Status::ResourceLimit?SD_RESOURCE_LIMIT:SD_INVALID;
     auto task=std::make_shared<State::Task>();task->invocation=origin;const auto handle=s.Add(s.tasks,task,Slots);if(!Present(handle))return SD_RESOURCE_LIMIT;
     runtime::ScopeResult admitted;
-    try { admitted=s.endpoint->bridge->Request(s.endpoint,route.name,value,task->task,task->context,&route.context,&s.binding); }
+    try {
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        if(afterTaskReserve)afterTaskReserve();
+#endif
+        admitted=s.endpoint->bridge->Request(s.endpoint,route.name,value,task->task,task->context,&route.context,&s.binding);
+    }
     catch (...) {s.Remove(s.tasks,handle,Slots,task);throw;}
     if(admitted!=runtime::ScopeResult::Ok){s.Remove(s.tasks,handle,Slots,task);return Map(admitted);}
     task->pending.store(false);*output=handle;return SD_OK;
@@ -183,8 +199,37 @@ SdResult NativeProvider::Poll(SdHandle owner,SdHandle invocation,SdHandle task,S
     if(work->invocation!=origin)return SD_DENIED;if(work->pending||work->releasing)return SD_BUSY;
     const auto facts=CheckFacts();if(facts!=runtime::ScopeResult::Ok)return Map(facts);
     const auto context=s.endpoint->bridge->ValidateContext(*s.endpoint,work->context);if(context!=runtime::ScopeResult::Ok)return Map(context);
-    runtime::TaskSnapshot hidden;const auto auth=s.binding.tasks->Poll(work->task,hidden);
-    return auth==runtime::ScopeResult::Ok?SD_NOT_READY:Map(auth);
+    runtime::TaskSnapshot observed;const auto auth=s.binding.tasks->Poll(work->task,observed);
+    if(auth!=runtime::ScopeResult::Ok)return Map(auth);
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    if(afterOriginalPoll)afterOriginalPoll();
+#endif
+    // @summary Delivery follows revalidation of the same full original binding and input-augmented execution lease.
+    const auto current=CheckFacts();if(current!=runtime::ScopeResult::Ok)return Map(current);
+    const auto fence=s.endpoint->bridge->ValidateContext(*s.endpoint,work->context);if(fence!=runtime::ScopeResult::Ok)return Map(fence);
+    // @summary Reuse the original task's delivery evaluator, which preserves admitted revision across committed effects.
+    const auto delivery=s.binding.tasks->Poll(work->task,observed);if(delivery!=runtime::ScopeResult::Ok)return Map(delivery);
+    // @summary Encode borrows this one final charged immutable snapshot; no task/result is reconstructed or rerun.
+    const auto bytes=observed.value.Encode();
+    if(bytes.size()>runtime::copied::Storage::EnvelopeLimit)return SD_OPERATION_FAILED;
+    const auto finalFacts=CheckFacts();if(finalFacts!=runtime::ScopeResult::Ok)return Map(finalFacts);
+    const auto finalContext=s.endpoint->bridge->ValidateContext(*s.endpoint,work->context);if(finalContext!=runtime::ScopeResult::Ok)return Map(finalContext);
+    if(bytes.size()>capacity){*required=static_cast<std::uint32_t>(bytes.size());return SD_BUFFER_SMALL;}
+    SdTaskInfo delivered{{sizeof(SdTaskInfo),1}};delivered.task=task;
+    // @summary The same task slot/generation maps the retained full lease into a disjoint non-authoritative kind.
+    delivered.context={task.slot+Slots,task.generation};
+    switch(observed.state){
+    case runtime::TaskState::Queued:delivered.phase=SD_TASK_QUEUED;break;
+    case runtime::TaskState::Running:delivered.phase=SD_TASK_RUNNING;break;
+    case runtime::TaskState::Succeeded:delivered.phase=SD_TASK_SUCCEEDED;break;
+    case runtime::TaskState::Failed:delivered.phase=SD_TASK_FAILED;break;
+    case runtime::TaskState::Cancelled:delivered.phase=SD_TASK_CANCELLED;break;
+    case runtime::TaskState::Indeterminate:delivered.phase=SD_TASK_INDETERMINATE;break;
+    }
+    delivered.error=Map(observed.outcome);delivered.flags=observed.committed?SD_TASK_COMMITTED:0;
+    delivered.revision=observed.revision;delivered.sequence=observed.sequence;
+    if(!bytes.empty())std::memcpy(output,bytes.data(),bytes.size());
+    *required=static_cast<std::uint32_t>(bytes.size());*info=delivered;return SD_OK;
 }catch(...){return SD_OPERATION_FAILED;}
 SdResult NativeProvider::Snapshot(SdHandle owner,SdHandle invocation,std::uint32_t method,SdSnapshotInfo* info,std::uint8_t* output,std::uint32_t capacity,std::uint32_t* required) noexcept try {
     const auto header=Clear(info);const bool buffer=Buffer(output,capacity,required);if(header!=SD_OK)return header;if(!buffer)return SD_INVALID;
@@ -217,4 +262,12 @@ SdResult NativeProvider::ReleaseInvocation(SdHandle owner,SdHandle invocation) n
     return SD_OK;
 }catch(...){return SD_OPERATION_FAILED;}
 void NativeProvider::Close() noexcept {if(state_&&!state_->closed.exchange(true))state_->binding.scope->RequestStop();}
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+bool NativeProviderTestAccess::ExhaustBlockRange() noexcept {
+    std::uint32_t unused=1;
+    return nextBlock.compare_exchange_strong(unused,UINT32_MAX-BlockWidth+1);
+}
+void NativeProviderTestAccess::AfterPoll(std::function<void()> callback){afterOriginalPoll=std::move(callback);}
+void NativeProviderTestAccess::AfterTaskReserve(std::function<void()> callback){afterTaskReserve=std::move(callback);}
+#endif
 }

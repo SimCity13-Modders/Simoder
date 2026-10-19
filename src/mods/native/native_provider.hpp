@@ -4,6 +4,7 @@
 #include "scripting/semantic_bridge.hpp"
 #include "runtime/runtime_lifecycle.hpp"
 #include <memory>
+#include <functional>
 #include <vector>
 
 namespace sc13::mods::native {
@@ -44,10 +45,11 @@ public:
      * @param invocation Bound reference. @param method Same reviewed ID. @param input Caller bytes.
      * @param output Cleared native task reference. @return Admission only. */
     SdResult Invoke(SdHandle owner, SdHandle invocation, std::uint32_t method, SdBytes input, SdHandle* output) noexcept;
-    /** @summary Remains unavailable until an original-task metadata producer qualifies.
+    /** @summary Delivers one authorized original task publication and its task-scoped informational execution context.
      * @param owner Original owner. @param invocation Original reference. @param task Original task.
-     * @param info Caller-sized sanitized output. @param output Caller buffer cleared without result disclosure.
-     * @param capacity Output bytes. @param required Always zero in A2a. @return Validated NOT_READY or denial. */
+     * @param info Caller-sized output, header-only on failure. @param output Caller buffer, cleared before validation.
+     * @param capacity Output bytes. @param required Exact result bytes on OK or authorized BUFFER_SMALL; otherwise zero.
+     * @return OK for an observation independently of its task outcome; BUFFER_SMALL discloses only required length. */
     SdResult Poll(SdHandle owner, SdHandle invocation, SdHandle task, SdTaskInfo* info,
         std::uint8_t* output, std::uint32_t capacity, std::uint32_t* required) noexcept;
     /** @summary Cached method snapshots are unavailable without a factual producer.
@@ -75,4 +77,18 @@ private:
     /** @summary Validates the immutable whole binding using the actual B-protected source snapshot. @return Factual binding status. */
     runtime::ScopeResult CheckFacts() const;
 };
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+/** @summary Fresh-process exhaustion witness, unavailable in production and incapable of restoring issued identities. */
+struct NativeProviderTestAccess final {
+    /** @summary Burn an entirely unused allocator to its first rejected width; no arbitrary seed or reset.
+     * @return True only before any provider block has ever been issued in this process. */
+    static bool ExhaustBlockRange() noexcept;
+    /** @summary Install a fixture-thread observation cut after original task capture and before delivery revalidation.
+     * @param callback Owned fixture callback, or empty to remove it; never an authority or ambient identity source. */
+    static void AfterPoll(std::function<void()> callback);
+    /** @summary Install a fixture-thread scheduling cut after shared native task reservation and before original Request.
+     * @param callback Owned deterministic observation callback, or empty to remove; never an authority/identity source. */
+    static void AfterTaskReserve(std::function<void()> callback);
+};
+#endif
 }

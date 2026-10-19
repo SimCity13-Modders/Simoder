@@ -103,7 +103,11 @@ void BindingRace(const std::filesystem::path& package){
     Check(fresh.Invoke(owner,invocation,41,{reinterpret_cast<const std::uint8_t*>(wire.data()),static_cast<std::uint32_t>(wire.size())},&task)==SD_OK,"unchanged fresh binding admits once");
     base->Pump();Check(effects==1,"unchanged actual Base path executes once");
     SdTaskInfo info{{sizeof(SdTaskInfo),1}};std::uint32_t required=999;
-    Check(fresh.Poll(owner,invocation,task,&info,nullptr,0,&required)==SD_NOT_READY&&required==0&&!info.task.slot,"fresh public poll still unavailable");
+    Check(fresh.Poll(owner,invocation,task,&info,nullptr,0,&required)==SD_BUFFER_SMALL&&required==wire.size()&&!info.task.slot&&!info.sequence,"fresh completed poll exposes authorized sizing only");
+    std::vector<std::uint8_t> copied(required);
+    Check(fresh.Poll(owner,invocation,task,&info,copied.data(),static_cast<std::uint32_t>(copied.size()),&required)==SD_OK&&
+        info.phase==SD_TASK_SUCCEEDED&&info.error==SD_OK&&info.flags==SD_TASK_COMMITTED&&info.sequence==4&&info.context.slot&&
+        std::string_view(reinterpret_cast<const char*>(copied.data()),required)==wire,"fresh original completion and payload");
     Check(fresh.Release(owner,task)==SD_OK&&fresh.ReleaseInvocation(owner,invocation)==SD_OK,"fresh original cleanup");
     fresh.Close();old.Close();vm->Stop();origin.reset();
 }
@@ -232,7 +236,9 @@ void Exercise(const std::filesystem::path& package){
     Check(provider.Poll(owner,invocation,task,&info,buffer.data(),buffer.size(),&required)==SD_VERSION&&required==0&&info.header.version==99&&!info.task.slot,"wrong header sanitized");
     info.header.version=1;
     Check(provider.Poll({18,1},invocation,task,&info,buffer.data(),buffer.size(),&required)==SD_DENIED&&required==0,"foreign poll denied");
-    Check(provider.Poll(owner,invocation,task,&info,buffer.data(),buffer.size(),&required)==SD_NOT_READY&&required==0&&info.sequence==0&&!info.task.slot,"public task observation remains closed");
+    Check(provider.Poll(owner,invocation,task,&info,buffer.data(),buffer.size(),&required)==SD_OK&&required==0&&info.sequence==1&&
+        info.task.slot==task.slot&&info.context.slot&&info.phase==SD_TASK_QUEUED&&info.error==SD_BUSY&&!info.flags&&
+        info.revision==context.revision,"queued original observation without a payload");
     Check(std::all_of(buffer.begin(),buffer.end(),[](auto byte){return byte==0;}),"poll cleared caller storage");
     SdHandle other{};Check(provider.Bind(owner,session,41,target,context.revision,&other)==SD_OK,"second invocation");
     Check(provider.Poll(owner,other,task,&info,buffer.data(),buffer.size(),&required)==SD_DENIED&&required==0,"task cannot change invocation");
@@ -251,7 +257,12 @@ void Exercise(const std::filesystem::path& package){
     Check(provider.Invoke(owner,invocation,41,bytes,&task)==SD_OK,"second original enqueue");base->Pump();Check(calls==1,"actual Base pump executes once");
     Check(provider.Cancel(owner,invocation,task)==SD_BUSY,"committed cancel does not undo");
     info={{sizeof(SdTaskInfo),1}};required=999;
-    Check(provider.Poll(owner,invocation,task,&info,buffer.data(),buffer.size(),&required)==SD_NOT_READY&&info.phase==0&&info.flags==0&&required==0,"no fabricated completion metadata");
+    Check(provider.Poll(owner,invocation,task,&info,buffer.data(),buffer.size(),&required)==SD_BUFFER_SMALL&&info.phase==0&&info.flags==0&&
+        !info.task.slot&&!info.context.slot&&!info.sequence&&!info.revision&&required==wire.size(),"completed short buffer exposes only actual required bytes");
+    std::vector<std::uint8_t> completed(required);
+    Check(provider.Poll(owner,invocation,task,&info,completed.data(),static_cast<std::uint32_t>(completed.size()),&required)==SD_OK&&
+        info.phase==SD_TASK_SUCCEEDED&&info.error==SD_OK&&info.flags==SD_TASK_COMMITTED&&info.sequence==4&&
+        std::string_view(reinterpret_cast<const char*>(completed.data()),required)==wire,"completed original metadata and actual copied payload");
     Check(runtime::RuntimeScopeTestAccess::Revoke(*scope,context.grantGeneration)==runtime::ScopeResult::Ok,"actual grant revoked");
     Check(provider.Poll(owner,invocation,task,&info,buffer.data(),buffer.size(),&required)==SD_DENIED&&required==0,"revocation suppresses retained result");
     Check(provider.Release({18,1},task)==SD_DENIED,"foreign cleanup denied");

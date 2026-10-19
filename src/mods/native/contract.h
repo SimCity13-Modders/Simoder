@@ -3,7 +3,7 @@
 #define SIMODER_U2A_SEMANTIC_CONTRACT_H
 #include "abi_v1.h"
 /* @summary Complete normative bundle identity, excluding generated outputs. */
-#define SD_CONTRACT_SHA256_HEX "23113084f15988a4003f379650b8b098589ffb059ac2ce5576b1358cf98657fb"
+#define SD_CONTRACT_SHA256_HEX "00c98e36f669c6c4f16f7ffd9073130ae9798543b3d0759d7c1937f443e6e236"
 #define SD_U2A_HOST_VERSION 2u
 #define SD_SEMANTIC_VERSION 1u
 #define SD_BASE_CONTRACT_VERSION 1u
@@ -32,7 +32,10 @@
 /* @summary Task commit reservation flag. */
 #define SD_TASK_COMMITTED 1u
 #pragma pack(push, 4)
-/* @summary Copied task status; error is SdResult domain, flags only defined bits; no result credentials. */
+/** @summary Original copied task observation; error is SdResult domain, flags only defined bits.
+ * @remarks context identifies this task full execution lease, scoped to owner/provider generation and task lifetime; informational, not a Bind target or credential.
+ * Sequence starts1 on insertion and changes only on tuple publication; revision retains original admission or exact commit writer revision.
+ */
 typedef struct SdTaskInfo { SdHeader header; SdHandle task; SdHandle context; uint32_t phase; uint32_t error; uint32_t flags; uint64_t revision; uint64_t sequence; } SdTaskInfo;
 /* @summary Metadata for the immutable snapshot returned in this call; identities are observations, not authority. */
 typedef struct SdSnapshotInfo { SdHeader header; uint64_t runtime_epoch; uint64_t base_generation; SdHandle context; uint64_t context_epoch; uint64_t revision; uint64_t sequence; uint64_t observed_monotonic_ms; } SdSnapshotInfo;

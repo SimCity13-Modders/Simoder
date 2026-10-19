@@ -266,6 +266,16 @@ if(SC13_BUILD_TESTS)
         sc13_enable_warnings(simoder-native-provider-tests)
         add_test(NAME simoder-native-provider-tests COMMAND simoder-native-provider-tests "${SC13_BASE_SOURCE_DIR}")
         set_tests_properties(simoder-native-provider-tests PROPERTIES TIMEOUT 90)
+        # @summary Qualify original task delivery and the shared native reference ceiling in the private host.
+        add_executable(simoder-native-provider-poll-tests tests/native_provider_poll_tests.cpp)
+        target_link_libraries(simoder-native-provider-poll-tests PRIVATE sc13-semantic-test-support)
+        sc13_enable_warnings(simoder-native-provider-poll-tests)
+        add_test(NAME simoder-native-provider-poll-tests COMMAND simoder-native-provider-poll-tests "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-native-provider-poll-tests PROPERTIES TIMEOUT 90)
+        # @summary Exhaust the checked process-wide handle range only in its own fresh fixture process.
+        add_test(NAME simoder-native-provider-range-exhaustion-tests COMMAND simoder-native-provider-poll-tests
+            "${SC13_BASE_SOURCE_DIR}" --block-exhaustion)
+        set_tests_properties(simoder-native-provider-range-exhaustion-tests PROPERTIES TIMEOUT 90)
         # @summary Qualify original task publication sequence and revision with the actual isolated Base/writer path.
         add_executable(simoder-task-publication-metadata-tests tests/task_publication_metadata_tests.cpp)
         target_link_libraries(simoder-task-publication-metadata-tests PRIVATE sc13-semantic-test-support)

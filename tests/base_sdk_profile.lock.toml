@@ -1,8 +1,8 @@
 schemaVersion = 1
 sdkPackageVersion = "0.2.0"
 profile = "base-luau-alpha-v1"
-sdkManifestSha256 = "a1f6a716fa9b0c32184e32cc6d844b65c52d19d661c8708dd9e026e5f712a49f"
+sdkManifestSha256 = "8ab7096f9dbe928e3a245df59dbb02dda302b67dc9225e23c7ffdec4c8d28bdc"
 baseDeclarationSha256 = "5d4c438800f03ba2a5338a242634c0120c8fae622a4b5f721477d45b5c467dcf"
-examplesSdkLockSha256 = "74323686f884b4650e13029acd9dcfed46b31208d509ea43f68a89ee14445cc5"
+examplesSdkLockSha256 = "ad32dbc65a439e4030b1d5fa5cdfc2005bf6d64c4462d17db8692135ed23dd98"
 publishedScriptSha256 = "1c8508bfcaa210c0132ba78140b8be750da67aaada531bfde02c55b6b0973e1a"
 taskFixtureSha256 = "6c9a8e7ed30a8fd45bc02eb559058158ef5c47903a61c20e25f397aecaebe0a9"
