@@ -63,6 +63,10 @@ struct NativeParticipantTestAccess final {
      * @param module Successfully returned original module retained by the caller.
      * @pre Caller holds no publication or loader/State/Registry guard. */
     static void StopOriginalScope(NativeModule& module) noexcept;
+    /** @summary Reads actual foreign close invocation attempts on the original retained State.
+     * @param module Original module retained by the caller.
+     * @return Quiesce then Drain attempt counts; coherent after a completed serialized close call. */
+    static std::array<std::uint32_t, 2> ForeignCloseCalls(const NativeModule& module) noexcept;
 };
 #endif
 

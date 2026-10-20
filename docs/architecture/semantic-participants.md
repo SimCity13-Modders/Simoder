@@ -22,6 +22,16 @@ The native adapter remains closed. It can capture the actual original identity a
 
 Real native operation authority, authenticated actor/context sources and canonical manager membership are subsequent migration work. None may be simulated with an ordinary-script origin, caller-supplied session, boolean approval or replacement authority store. This internal foundation is not a declaration that native MCP tools or native mod permissions are operational.
 
+`RuntimeAuthoritySource` is a private boundary for source identity and review,
+participant and control proofs. The original scope retains the sole challenge,
+grant and reservation store and the common decision algorithms. Its production
+source and proof constructors are not available yet; a copied ordinary-native
+origin cannot establish permission or substitute for a script or agent origin.
+Isolated fixtures exercise those same algorithms through private wrappers.
+Allocation-failure controls and accounting observations are excluded from
+production. Failed publication releases unpublished charges, does not reuse
+burned identities and cannot replay a consumed review.
+
 ## Verification
 
 The ordinary `simoder-semantic-participant-tests` target uses actual Base and script VMs. It checks identity substitution, aliased binding outputs, original task delivery, off-lock final scope disposal, endpoint exhaustion and owner-pool rollback. Configure the usual explicit Base and SDK profile to include it with the existing Core regressions.

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <array>
+#include <new>
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY) && defined(SIMODER_SCRIPT_LANE_TEST_WITNESS)
 #include "scripting/script_runtime.hpp"
 #endif
@@ -31,6 +32,15 @@ constexpr std::uint64_t TicketWord(std::uint64_t serial,TicketPhase phase) noexc
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 /** @summary Fixture-thread interleavings never run while Q is held. */
 thread_local std::function<void()> commandReservedBarrier,commandWritingBarrier;
+/** @summary A fixture-only negative cut cannot install a source or grant. */
+thread_local RuntimeScopeTestAccess::AllocationCut authorityAllocationCut{};
+/** @summary Throw once at an original allocation boundary in a separately compiled fixture.
+ * @param cut Allocation being attempted. */
+void FailAuthorityAllocation(RuntimeScopeTestAccess::AllocationCut cut) {
+    if(authorityAllocationCut!=cut)return;
+    authorityAllocationCut=RuntimeScopeTestAccess::AllocationCut::None;
+    throw std::bad_alloc{};
+}
 #endif
 /** @summary Process-local generation allocator; zero means exhausted and always denies. */
 std::atomic<std::uint64_t> nextGeneration{1};
@@ -96,7 +106,7 @@ struct RuntimeScope::State final {
         std::uint64_t nextTicket{1};
         bool invariant{};
     } retirement;
-    /** @summary Internal fixture grant records; production store remains unavailable and empty. */
+    /** @summary Sole original grant records; production remains empty without an actual private source/proof. */
     struct Grant final {
         OperationContext context;
         std::map<std::uint64_t, OperationContext> reservations;
@@ -173,17 +183,15 @@ struct RuntimeScope::State final {
     std::uint64_t nextReservation{1};
     std::size_t retainedReservations{};
     bool admissionClosed{};
-    std::uint64_t fixtureContent{};
-#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
-    std::map<std::uint64_t, RuntimeScopeTestAccess::Review> challenges;
-    std::optional<RuntimeScopeTestAccess::Review> currentReview;
+    /** @summary Once-bound immutable source; no production constructor exists in C0. */
+    std::optional<RuntimeAuthoritySource> authoritySource;
+    std::map<std::uint64_t, AuthorityReview> challenges;
+    std::optional<AuthorityReview> currentReview;
     std::uint64_t nextChallenge{1};
-#endif
     std::size_t running{};
     std::size_t registrations{};
     std::uint32_t readiness{};
     bool ownerAvailable{};
-    bool authorityAvailable{};
     bool committed{};
     bool stopping{};
     bool safelyDrained{};
@@ -402,13 +410,14 @@ ScopeResult RuntimeScope::Validate(const State& state, const OperationContext& c
     if (!state.generation || context.owner != state.generation || context.epoch != state.epoch) return ScopeResult::Stale;
     if (state.stopping || state.domain->IsStopping() || (!candidate && !state.committed) ||
         (candidate && state.committed) || !state.ownerAvailable) return ScopeResult::NotReady;
-    if (!state.authorityAvailable) return ScopeResult::Denied;
+    if (!SourceMatches(state,context.origin)) return ScopeResult::Denied;
     if (state.admissionClosed || !context.opcode ||
         !context.readiness || (context.readiness & ~(RuntimeReady | MenuReady | CityReady)) != 0 ||
         std::chrono::steady_clock::now() >= context.deadline) return ScopeResult::Denied;
     const auto grant = state.grants.find(context.grantGeneration);
     if (grant == state.grants.end() || grant->second.revoked) return ScopeResult::Denied;
     const auto& effective = grant->second;
+    if(effective.context.origin.index()!=context.origin.index())return ScopeResult::Denied;
     const auto reservation = effective.reservations.find(context.reservation);
     if (reservation == effective.reservations.end() || reservation->second != context ||
         (checkGrantRevision && context.grantRevision != effective.revision) ||
@@ -774,31 +783,26 @@ bool RuntimeScopeTestAccess::SeedTaskSequence(RuntimeScope& scope,ScopeHandle ta
 std::unique_lock<std::mutex> RuntimeScopeTestAccess::ReserveState(RuntimeScope& scope) {
     return std::unique_lock<std::mutex>(scope.state_->mutex, std::try_to_lock);
 }
-namespace {
-/** @summary Rejects malformed synthetic native identities before a challenge can be displayed.
- * @param origin Captured fixture ingress. @param owner Actual fixture scope. @return Whether every selected role field is bound. */
-bool QualifiedOrigin(const OperationOrigin& origin, std::uint64_t owner) {
+#endif
+bool RuntimeScope::SourceMatches(const State& state,const OperationOrigin& origin) noexcept {
+    if(!state.authoritySource || state.authoritySource->owner_!=state.generation || !state.authoritySource->content_)return false;
     if (const auto* script = std::get_if<OrdinaryScriptOrigin>(&origin))
-        return script->owner == owner && script->content;
+        return script->owner == state.generation && script->content==state.authoritySource->content_;
     if (const auto* agent = std::get_if<AgentOrigin>(&origin))
-        return agent->owner == owner && agent->content && agent->actor && agent->channel &&
+        return agent->owner == state.generation && agent->content==state.authoritySource->content_ && agent->actor && agent->channel &&
             agent->consentSession && agent->entity && agent->extent;
+    // @summary C0 has no actual Native State/current-content source constructor; scalar native claims always deny.
     return false;
 }
-}
-RuntimeScopeTestAccess::Challenge RuntimeScopeTestAccess::ChallengeDecision(RuntimeScope& scope, const Review& review) {
-    const std::lock_guard lock(scope.state_->mutex);
-    auto& state = *scope.state_;
-    if (!state.authorityAvailable || state.stopping || state.admissionClosed || state.domain->IsStopping() ||
+RuntimeScope::AuthorityChallenge RuntimeScope::ChallengeAuthority(const AuthorityReview& review) {
+    const std::lock_guard lock(state_->mutex);
+    auto& state = *state_;
+    if (state.stopping || state.admissionClosed || state.domain->IsStopping() ||
         state.nextChallenge == UINT64_MAX ||
-        !QualifiedOrigin(review.origin, state.generation) || !state.fixtureContent ||
+        !SourceMatches(state,review.origin) ||
         (std::holds_alternative<OrdinaryScriptOrigin>(review.origin) &&
             (review.sessionAllowed || review.entityAllowed || review.allParticipants)) ||
-        std::visit([&](const auto& origin) {
-            using T = std::decay_t<decltype(origin)>;
-            if constexpr (std::is_same_v<T, UnqualifiedOrigin>) return true;
-            else return origin.content != state.fixtureContent;
-        }, review.origin) || !review.revision || !review.action ||
+        !review.revision || !review.action ||
         !review.requested || (review.required & ~review.requested) || (review.approved & ~review.requested) ||
         !review.opcode || review.opcode > 64 || !review.readiness ||
         (review.readiness & ~(RuntimeReady | MenuReady | CityReady)) ||
@@ -810,27 +814,35 @@ RuntimeScopeTestAccess::Challenge RuntimeScopeTestAccess::ChallengeDecision(Runt
     if (state.currentReview && review.revision < state.currentReview->revision) return {};
     if (state.currentReview && *state.currentReview != review) state.challenges.clear();
     if (state.challenges.size() >= MaxRetainedOperations) return {};
-    state.currentReview = review;
     const auto serial = state.nextChallenge++;
-    state.challenges.emplace(serial, review);
+    try {
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        FailAuthorityAllocation(RuntimeScopeTestAccess::AllocationCut::Challenge);
+#endif
+        state.challenges.emplace(serial, review);
+    }
+    catch(...){return {};}
+    state.currentReview = review;
     return {state.generation, serial};
 }
-OperationContext RuntimeScopeTestAccess::Decide(RuntimeScope& scope, Challenge challenge, const Review& review) {
-    auto writer = scope.state_->domain->ReserveWriter();
+OperationContext RuntimeScope::DecideAuthority(const RuntimeAuthoritySource::Decision& decision) {
+    auto writer = state_->domain->ReserveWriter();
     if (!writer.Acquired()) return {};
-    const std::lock_guard lock(scope.state_->mutex);
-    auto& state = *scope.state_;
+    const std::lock_guard lock(state_->mutex);
+    auto& state = *state_;
+    const auto& review=decision.review_;const auto challenge=decision.challenge_;
+    if(!state.authoritySource || decision.owner_!=state.generation || decision.content_!=state.authoritySource->content_)return {};
     if (challenge.owner != state.generation) return {};
     const auto found = state.challenges.find(challenge.serial);
     if (found == state.challenges.end()) return {};
     const auto reviewed = found->second;
     state.challenges.erase(found);
-    if (reviewed != review || !state.authorityAvailable || state.stopping || state.admissionClosed ||
+    if (reviewed != review || !SourceMatches(state,review.origin) || state.stopping || state.admissionClosed ||
         state.domain->IsStopping() || review.expires <= std::chrono::steady_clock::now())
         return {};
     if ((review.required & review.approved) != review.required ||
         (review.approved != review.requested && !review.supportsRestricted)) {
-        // @summary Close admission before deferred retirement; this fixture never performs physical patch cleanup.
+        // @summary Close admission before deferred retirement; authority bookkeeping never performs physical patch cleanup.
         state.admissionClosed = true;
         for (auto& [id, grant] : state.grants) { (void)id; grant.revoked = true; }
         return {};
@@ -845,15 +857,26 @@ OperationContext RuntimeScopeTestAccess::Decide(RuntimeScope& scope, Challenge c
     context.reservation = state.nextReservation++; context.revision = state.domain->Revision();
     context.opcode = review.opcode; context.readiness = review.readiness; context.deadline = review.expires;
     RuntimeScope::State::Grant grant;
-    grant.context = context; grant.reservations.emplace(context.reservation, context);
+    grant.context = context;
     grant.capabilities = review.approved; grant.required = review.required;
     grant.restricted = review.approved != review.requested; grant.allParticipants = review.allParticipants;
     grant.sessionAllowed = review.sessionAllowed; grant.entityAllowed = review.entityAllowed;
     grant.mandatoryAllowed = review.mandatoryAllowed;
-    state.grants.emplace(serial, std::move(grant));
+    try {
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        FailAuthorityAllocation(RuntimeScopeTestAccess::AllocationCut::RootReservation);
+#endif
+        grant.reservations.emplace(context.reservation,context);
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        FailAuthorityAllocation(RuntimeScopeTestAccess::AllocationCut::Grant);
+#endif
+        state.grants.emplace(serial,std::move(grant));
+    }
+    catch(...){return {};}
     ++state.retainedReservations;
     return context;
 }
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 OperationContext RuntimeScopeTestAccess::Reserve(RuntimeScope& scope, const OperationContext& context) {
     const std::lock_guard lock(scope.state_->mutex);
     return ReserveLocked(scope,context);
@@ -862,6 +885,7 @@ OperationContext RuntimeScopeTestAccess::TryReserve(RuntimeScope& scope,const Op
     std::unique_lock lock(scope.state_->mutex,std::try_to_lock);if(!lock.owns_lock())return {};
     return ReserveLocked(scope,context);
 }
+#endif
 OperationContext RuntimeScope::TryReserveCommand(const OperationContext& context,CommandTicket& ticket) {
     if(ticket.serial_ || context.opcode!=1)return {};
     return TryReserveTracked(context,ticket,ReservationRole::Command);
@@ -896,11 +920,14 @@ OperationContext RuntimeScope::TryReserveTracked(const OperationContext& context
         ++state_->retirement.outstandingTickets;
         record.word.store(TicketWord(ticket.serial_,TicketPhase::Live),std::memory_order_release);
     }
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
     try{if(commandReservedBarrier)commandReservedBarrier();}
     catch(...){static_cast<void>(ReleaseCommandTicket(ticket));ticket={};return {};}
+#endif
     if(status)*status=ScopeResult::Ok;
     return fresh;
 }
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 ScopeRetirementTestAccess::Reservation ScopeRetirementTestAccess::Reserve(RuntimeScope& scope,const OperationContext& context){
     Reservation result;result.context=scope.TryReserveCommand(context,result.ticket);return result;
 }
@@ -918,6 +945,7 @@ void ScopeRetirementTestAccess::Barriers(std::function<void()> reserved,std::fun
 OperationContext RuntimeScopeTestAccess::ReserveLocked(RuntimeScope& scope,const OperationContext& context) {
     return scope.ReserveFreshLocked(context,RuntimeScope::ReservationRole::Command);
 }
+#endif
 OperationContext RuntimeScope::ReserveFreshLocked(const OperationContext& context,ReservationRole role) {
     DrainCommandReleasesLocked(*state_);
     auto& state = *state_;
@@ -928,18 +956,26 @@ OperationContext RuntimeScope::ReserveFreshLocked(const OperationContext& contex
     auto fresh = context;
     fresh.grantRevision = grant.revision;
     fresh.reservation = state.nextReservation++; fresh.revision = state.domain->Revision();
-    grant.reservations.emplace(fresh.reservation, fresh);
+    try{
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        FailAuthorityAllocation(RuntimeScopeTestAccess::AllocationCut::FreshReservation);
+#endif
+        grant.reservations.emplace(fresh.reservation, fresh);
+    }catch(...){return {};}
     ++state.retainedReservations;
     return fresh;
 }
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 std::size_t RuntimeScopeTestAccess::Reservations(const RuntimeScope& scope) {
     const std::lock_guard lock(scope.state_->mutex);
     RuntimeScope::DrainCommandReleasesLocked(*scope.state_);return scope.state_->retainedReservations;
 }
-OperationContext RuntimeScopeTestAccess::Join(RuntimeScope& scope, const OperationContext& context,
-    std::uint64_t actor, std::uint64_t channel) {
-    const std::lock_guard lock(scope.state_->mutex);
-    auto& state = *scope.state_;
+#endif
+OperationContext RuntimeScope::JoinAuthority(const OperationContext& context,const RuntimeAuthoritySource::Participant& participant) {
+    const std::lock_guard lock(state_->mutex);
+    auto& state = *state_;
+    const auto actor=participant.actor_,channel=participant.channel_;
+    if(!state.authoritySource || participant.owner_!=state.generation || participant.content_!=state.authoritySource->content_)return {};
     if (!actor || !channel || RuntimeScope::Validate(state, context, false) != ScopeResult::Ok ||
         state.nextReservation == UINT64_MAX || state.retainedReservations >= MaxRetainedOperations) return {};
     auto& grant = state.grants.at(context.grantGeneration);
@@ -951,22 +987,29 @@ OperationContext RuntimeScopeTestAccess::Join(RuntimeScope& scope, const Operati
     origin.actor = actor; origin.channel = channel;
     // @summary Entity consent belongs to its originally reviewed actor; session membership alone cannot borrow it.
     joined.reservation = state.nextReservation++; joined.revision = state.domain->Revision();
-    grant.reservations.emplace(joined.reservation, joined);
+    try{
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        FailAuthorityAllocation(RuntimeScopeTestAccess::AllocationCut::JoinedReservation);
+#endif
+        grant.reservations.emplace(joined.reservation, joined);
+    }catch(...){return {};}
     ++state.retainedReservations;
     return joined;
 }
-ScopeResult RuntimeScopeTestAccess::RevokeSession(RuntimeScope& scope, std::uint64_t identity) {
-    auto writer = scope.state_->domain->ReserveWriter();
+ScopeResult RuntimeScope::RevokeAuthoritySession(const RuntimeAuthoritySource::Control& control) {
+    auto writer = state_->domain->ReserveWriter();
     if (!writer.Acquired()) return ScopeResult::Busy;
-    const std::lock_guard lock(scope.state_->mutex);
+    const std::lock_guard lock(state_->mutex);
+    if(!state_->authoritySource || control.owner_!=state_->generation || control.content_!=state_->authoritySource->content_)return ScopeResult::Denied;
+    const auto identity=control.subject_;
     bool matched{};
-    for (auto pending = scope.state_->challenges.begin(); pending != scope.state_->challenges.end();) {
+    for (auto pending = state_->challenges.begin(); pending != state_->challenges.end();) {
         const auto* origin = std::get_if<AgentOrigin>(&pending->second.origin);
         if (origin && origin->consentSession == identity) {
-            matched = true; pending = scope.state_->challenges.erase(pending);
+            matched = true; pending = state_->challenges.erase(pending);
         } else ++pending;
     }
-    for (auto& [id, grant] : scope.state_->grants) {
+    for (auto& [id, grant] : state_->grants) {
         (void)id;
         const auto* origin = std::get_if<AgentOrigin>(&grant.context.origin);
         if (!origin || origin->consentSession != identity) continue;
@@ -976,30 +1019,38 @@ ScopeResult RuntimeScopeTestAccess::RevokeSession(RuntimeScope& scope, std::uint
     }
     return matched ? ScopeResult::Ok : ScopeResult::Stale;
 }
-ScopeResult RuntimeScopeTestAccess::Disconnect(RuntimeScope& scope, std::uint64_t channel) {
-    auto writer = scope.state_->domain->ReserveWriter();
+ScopeResult RuntimeScope::DisconnectAuthority(const RuntimeAuthoritySource::Control& control) {
+    auto writer = state_->domain->ReserveWriter();
     if (!writer.Acquired()) return ScopeResult::Busy;
-    const std::lock_guard lock(scope.state_->mutex);
+    const std::lock_guard lock(state_->mutex);
+    if(!state_->authoritySource || control.owner_!=state_->generation || control.content_!=state_->authoritySource->content_)return ScopeResult::Denied;
+    const auto channel=control.subject_;
     if (!channel) return ScopeResult::Invalid;
-    for (auto pending = scope.state_->challenges.begin(); pending != scope.state_->challenges.end();) {
+    for (auto pending = state_->challenges.begin(); pending != state_->challenges.end();) {
         const auto* origin = std::get_if<AgentOrigin>(&pending->second.origin);
-        if (origin && origin->channel == channel) pending = scope.state_->challenges.erase(pending);
+        if (origin && origin->channel == channel) pending = state_->challenges.erase(pending);
         else ++pending;
     }
-    auto& closed = scope.state_->disconnectedChannels;
+    auto& closed = state_->disconnectedChannels;
     if (std::find(closed.begin(), closed.end(), channel) != closed.end()) return ScopeResult::Ok;
-    if (closed.size() < MaxRetainedOperations) closed.push_back(channel);
-    else scope.state_->admissionClosed = true;
+    if (closed.size() < MaxRetainedOperations){try{
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        FailAuthorityAllocation(RuntimeScopeTestAccess::AllocationCut::Disconnect);
+#endif
+        closed.push_back(channel);
+    }catch(...){state_->admissionClosed=true;}}
+    else state_->admissionClosed = true;
     return ScopeResult::Ok;
 }
-RuntimeScopeTestAccess::PermissionView RuntimeScopeTestAccess::Inspect(RuntimeScope& scope, const OperationContext& context) {
-    const std::lock_guard lock(scope.state_->mutex);
-    const auto& state = *scope.state_;
+RuntimeScope::AuthorityPermission RuntimeScope::InspectAuthority(const OperationContext& context) const {
+    const std::lock_guard lock(state_->mutex);
+    const auto& state = *state_;
     if (RuntimeScope::Validate(state, context, false, true, false) != ScopeResult::Ok)
         return {0, false, state.admissionClosed};
     const auto& grant = state.grants.at(context.grantGeneration);
     return {grant.capabilities, grant.restricted, false};
 }
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 std::size_t RuntimeScopeTestAccess::Registrations(const RuntimeScope& scope) {
     const std::lock_guard lock(scope.state_->mutex);
     return scope.state_->registrations;
@@ -1007,9 +1058,8 @@ std::size_t RuntimeScopeTestAccess::Registrations(const RuntimeScope& scope) {
 std::unique_ptr<RuntimeScope> RuntimeScopeTestAccess::Create(std::shared_ptr<RuntimeCommitDomain> domain) {
     auto scope = std::make_unique<RuntimeScope>(nullptr, std::move(domain));
     scope->state_->ownerAvailable = true;
-    scope->state_->authorityAvailable = true;
-    // @summary Opaque isolated loaded-content pin, explicitly not a durable source/dependency identity.
-    scope->state_->fixtureContent = 1;
+    // @summary Constructor is present only in this independent fixture build, never a production source factory.
+    scope->state_->authoritySource=RuntimeAuthoritySource(scope->state_->generation,1);
     return scope;
 }
 OperationContext RuntimeScopeTestAccess::Issue(RuntimeScope& scope, bool sessionAllowed, bool entityAllowed,
@@ -1028,20 +1078,52 @@ OperationContext RuntimeScopeTestAccess::Issue(RuntimeScope& scope, bool session
     }
     return context;
 }
-ScopeResult RuntimeScopeTestAccess::Revoke(RuntimeScope& scope, std::uint64_t grantIdentity) {
-    auto writer = scope.state_->domain->ReserveWriter();
+#endif
+ScopeResult RuntimeScope::RevokeAuthority(const RuntimeAuthoritySource::Control& control) {
+    auto writer = state_->domain->ReserveWriter();
     if (!writer.Acquired()) return ScopeResult::Busy;
-    const std::lock_guard lock(scope.state_->mutex);
-    const auto found = scope.state_->grants.find(grantIdentity);
-    if (found != scope.state_->grants.end()) {
+    const std::lock_guard lock(state_->mutex);
+    if(!state_->authoritySource || control.owner_!=state_->generation || control.content_!=state_->authoritySource->content_)return ScopeResult::Denied;
+    const auto found = state_->grants.find(control.subject_);
+    if (found != state_->grants.end()) {
         // @summary A fresh reviewed action is required after revocation; an older pending prompt cannot restore admission.
-        scope.state_->challenges.clear();
+        state_->challenges.clear();
         found->second.revoked = true;
         if (found->second.revision != UINT64_MAX) ++found->second.revision;
-        if (found->second.required) scope.state_->admissionClosed = true;
+        if (found->second.required) state_->admissionClosed = true;
         return ScopeResult::Ok;
     }
     return ScopeResult::Stale;
 }
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+void RuntimeScopeTestAccess::FailAllocation(AllocationCut cut) noexcept {authorityAllocationCut=cut;}
+RuntimeScopeTestAccess::AuthorityObservation RuntimeScopeTestAccess::ObserveAuthority(const RuntimeScope& scope){
+    const std::lock_guard lock(scope.state_->mutex);
+    const auto& state=*scope.state_;
+    return {state.challenges.size(),state.grants.size(),state.retainedReservations,
+        state.nextChallenge,state.nextGrant,state.nextReservation,state.authoritySource.has_value(),state.admissionClosed};
+}
+RuntimeScopeTestAccess::Challenge RuntimeScopeTestAccess::ChallengeDecision(RuntimeScope& scope,const Review& review){return scope.ChallengeAuthority(review);}
+OperationContext RuntimeScopeTestAccess::Decide(RuntimeScope& scope,Challenge challenge,const Review& review){
+    if(!scope.state_->authoritySource)return {};
+    return scope.DecideAuthority(RuntimeAuthoritySource::Decision(*scope.state_->authoritySource,challenge,review));
+}
+OperationContext RuntimeScopeTestAccess::Join(RuntimeScope& scope,const OperationContext& context,std::uint64_t actor,std::uint64_t channel){
+    if(!scope.state_->authoritySource)return {};
+    return scope.JoinAuthority(context,RuntimeAuthoritySource::Participant(*scope.state_->authoritySource,actor,channel));
+}
+ScopeResult RuntimeScopeTestAccess::RevokeSession(RuntimeScope& scope,std::uint64_t session){
+    if(!scope.state_->authoritySource)return ScopeResult::Denied;
+    return scope.RevokeAuthoritySession(RuntimeAuthoritySource::Control(*scope.state_->authoritySource,session));
+}
+ScopeResult RuntimeScopeTestAccess::Disconnect(RuntimeScope& scope,std::uint64_t channel){
+    if(!scope.state_->authoritySource)return ScopeResult::Denied;
+    return scope.DisconnectAuthority(RuntimeAuthoritySource::Control(*scope.state_->authoritySource,channel));
+}
+ScopeResult RuntimeScopeTestAccess::Revoke(RuntimeScope& scope,std::uint64_t grant){
+    if(!scope.state_->authoritySource)return ScopeResult::Denied;
+    return scope.RevokeAuthority(RuntimeAuthoritySource::Control(*scope.state_->authoritySource,grant));
+}
+RuntimeScopeTestAccess::PermissionView RuntimeScopeTestAccess::Inspect(RuntimeScope& scope,const OperationContext& context){return scope.InspectAuthority(context);}
 #endif
 }

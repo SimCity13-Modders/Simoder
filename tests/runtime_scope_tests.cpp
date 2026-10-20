@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <thread>
 #include <string>
+#include <type_traits>
 
 using namespace sc13::runtime;
 using namespace std::chrono_literals;
@@ -488,9 +489,69 @@ void PendingDecisionRevocation() {
     Require(!RuntimeScopeTestAccess::Decide(*agent, channelPrompt, review).owner, "pending channel prompt resurrected authentication");
     Require(!RuntimeScopeTestAccess::ChallengeDecision(*agent, review).serial, "fresh prompt reused disconnected channel");
 }
+/** @summary Verify source absence/category separation and exception-safe reuse of the sole issuer algorithm. */
+void SourceBoundaryAndAllocationCuts() {
+    using A=RuntimeScopeTestAccess;
+    static_assert(!std::is_default_constructible_v<RuntimeAuthoritySource>);
+    static_assert(!std::is_constructible_v<RuntimeAuthoritySource,std::uint64_t,std::uint64_t>);
+    RuntimeScope absent;
+    auto absentReview=ScriptReview(absent);
+    Require(!A::ObserveAuthority(absent).source&&!A::ChallengeDecision(absent,absentReview).serial,
+        "production-constructed scope acquired source from fixture wrapper");
+    auto scope=Active();auto review=ScriptReview(*scope);
+    const auto before=A::ObserveAuthority(*scope);
+    auto native=review;
+    native.origin=OrdinaryNativeOrigin{scope->Current().generation,1,1,1,1,{}};
+    Require(!A::ChallengeDecision(*scope,native).serial,"native scalar fabricated an actual retained-State source");
+    Require(A::ObserveAuthority(*scope).nextChallenge==before.nextChallenge,"closed native review consumed challenge identity");
+    A::FailAllocation(A::AllocationCut::Challenge);
+    Require(!A::ChallengeDecision(*scope,review).serial,"challenge allocation cut ignored");
+    auto after=A::ObserveAuthority(*scope);
+    Require(after.challenges==0&&after.grants==0&&after.reservations==0&&after.nextChallenge==before.nextChallenge+1,
+        "challenge failure leaked a node or reused a burned identity");
+    for(const auto cut:{A::AllocationCut::RootReservation,A::AllocationCut::Grant}) {
+        const auto prompt=A::ChallengeDecision(*scope,review);const auto counts=A::ObserveAuthority(*scope);
+        A::FailAllocation(cut);
+        Require(!A::Decide(*scope,prompt,review).owner,"partial grant escaped failed allocation");
+        after=A::ObserveAuthority(*scope);
+        Require(after.challenges==0&&after.grants==0&&after.reservations==0&&
+            after.nextGrant==counts.nextGrant+1&&after.nextReservation==counts.nextReservation+1,
+            "failed grant retained partial accounting or reused identity");
+        Require(!A::Decide(*scope,prompt,review).owner,"failed decision prompt replayed");
+    }
+    const auto granted=A::Decide(*scope,A::ChallengeDecision(*scope,review),review);
+    Require(granted.owner!=0,"original script algorithm unavailable after negative cuts");
+    auto forged=granted;forged.origin=native.origin;ScopeHandle output;
+    Require(scope->Queue(forged,{},output)==ScopeResult::Denied&&output==ScopeHandle{},"script grant reinterpreted as native provenance");
+    const auto count=A::ObserveAuthority(*scope);
+    A::FailAllocation(A::AllocationCut::FreshReservation);
+    Require(!A::Reserve(*scope,granted).owner,"fresh allocation cut ignored");
+    after=A::ObserveAuthority(*scope);
+    Require(after.reservations==count.reservations&&after.nextReservation==count.nextReservation+1&&
+        A::Inspect(*scope,granted).capabilities==review.approved,"fresh failure corrupted original root grant");
+    auto agents=Active();auto agent=ScriptReview(*agents);
+    agent.origin=AgentOrigin{agents->Current().generation,1,7,13,17,11,1};
+    agent.sessionAllowed=true;agent.allParticipants=true;
+    const auto original=A::Decide(*agents,A::ChallengeDecision(*agents,agent),agent);
+    Require(original.owner!=0,"same source algorithm did not retain agent session");
+    const auto agentCounts=A::ObserveAuthority(*agents);
+    A::FailAllocation(A::AllocationCut::JoinedReservation);
+    Require(!A::Join(*agents,original,29,31).owner,"join allocation cut ignored");
+    after=A::ObserveAuthority(*agents);
+    Require(after.reservations==agentCounts.reservations&&after.nextReservation==agentCounts.nextReservation+1,
+        "failed joined reservation retained accounting");
+    const auto joined=A::Join(*agents,original,29,31);
+    Require(joined.owner!=0&&std::get<AgentOrigin>(joined.origin).actor==29,"fresh verified fixture join unavailable");
+    A::FailAllocation(A::AllocationCut::Disconnect);
+    Require(A::Disconnect(*agents,31)==ScopeResult::Ok&&A::ObserveAuthority(*agents).admissionClosed,
+        "failed channel retention did not close all admission");
+    Require(agents->Queue(original,{},output)==ScopeResult::Denied&&agents->Queue(joined,{},output)==ScopeResult::Denied,
+        "allocation-failed disconnect retained agent authority");
+    A::FailAllocation(A::AllocationCut::None);
+}
 }
 /** @summary Executes native generic foundation checks without loading the game or a transport. */
 int main() {
-    try { Gates(); Commits(); RunningStop(); BoundsAndFailures(); ReentrantStop(); SharedDomain(); LegacyWriterDomain(); TypedDecisions(); AgentDecisions(); DecisionBudgetsAndExpiry(); PendingDecisionRevocation(); std::cout << "Runtime scope gates, revisions, drain, ownership and typed provenance passed.\n"; return 0; }
+    try { Gates(); Commits(); RunningStop(); BoundsAndFailures(); ReentrantStop(); SharedDomain(); LegacyWriterDomain(); TypedDecisions(); AgentDecisions(); DecisionBudgetsAndExpiry(); PendingDecisionRevocation(); SourceBoundaryAndAllocationCuts(); std::cout << "Runtime scope gates, revisions, drain, ownership and typed provenance passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

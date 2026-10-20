@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include "runtime/copied_value.hpp"
+#include "runtime/runtime_authority_source.hpp"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -31,20 +32,6 @@ struct ScopeHandle final {
     std::uint64_t serial{};
     bool operator==(const ScopeHandle&) const = default;
 };
-/** @summary Absence of qualified native ingress always denies, without an ordinary-script fallback. */
-struct UnqualifiedOrigin final { bool operator==(const UnqualifiedOrigin&) const = default; };
-/** @summary Exact ordinary-script owner and immutable loaded-content correlation, never an agent login. */
-struct OrdinaryScriptOrigin final {
-    std::uint64_t owner{}, content{};
-    bool operator==(const OrdinaryScriptOrigin&) const = default;
-};
-/** @summary Retained authenticated agent causality; channel and consent-session identities are distinct. */
-struct AgentOrigin final {
-    std::uint64_t owner{}, content{}, actor{}, channel{}, consentSession{}, entity{}, extent{};
-    bool operator==(const AgentOrigin&) const = default;
-};
-/** @summary Closed discriminated ingress; an unqualified producer cannot select a permissive default. */
-using OperationOrigin = std::variant<UnqualifiedOrigin, OrdinaryScriptOrigin, AgentOrigin>;
 /** @summary Reviewed decision identity is distinct from effective authority and operation reservations. */
 struct DecisionReference final {
     std::uint64_t serial{}, revision{}, action{};
@@ -218,6 +205,35 @@ public:
     /** @summary Cancels queued/running-uncommitted task. @param operation Native handle. @return Cancellation status. */
     ScopeResult CancelValue(ScopeHandle operation);
 private:
+    struct State;
+    using AuthorityReview=RuntimeAuthoritySource::Review;
+    using AuthorityChallenge=RuntimeAuthoritySource::Challenge;
+    using AuthorityPermission=RuntimeAuthoritySource::PermissionView;
+    /** @summary Match the original privately installed source, never a scalar role assertion.
+     * @param state Original Q-held scope. @param origin Captured provenance. @return Qualified source/category/content. */
+    static bool SourceMatches(const State& state,const OperationOrigin& origin) noexcept;
+    /** @summary Prepare one bounded original review without issuing authority.
+     * @param review Source-qualified immutable request. @return Original pending reference, or empty rejection. */
+    AuthorityChallenge ChallengeAuthority(const AuthorityReview& review);
+    /** @summary Consume one exact typed source/local-action proof into the original grant store once.
+     * @param decision Actual source-bound proof; fixture drivers exist only in test builds. @return Original context, empty on rejection. */
+    OperationContext DecideAuthority(const RuntimeAuthoritySource::Decision& decision);
+    /** @summary Join through the actual source-bound participant proof, preserving original grant causality.
+     * @param context Existing reviewed original reservation. @param participant Verified original source/actor/channel.
+     * @return Separate original reservation, never a renewed decision. */
+    OperationContext JoinAuthority(const OperationContext& context,const RuntimeAuthoritySource::Participant& participant);
+    /** @summary Revoke one actual source-bound consent session under original D/Q.
+     * @param control Exact original source and session. @return Actual revoke outcome. */
+    ScopeResult RevokeAuthoritySession(const RuntimeAuthoritySource::Control& control);
+    /** @summary Close an original authenticated channel without inheritance.
+     * @param control Actual source and channel. @return Actual disconnect outcome. */
+    ScopeResult DisconnectAuthority(const RuntimeAuthoritySource::Control& control);
+    /** @summary Revoke a retained original grant without replay or result mutation.
+     * @param control Actual source and grant. @return Actual revoke outcome. */
+    ScopeResult RevokeAuthority(const RuntimeAuthoritySource::Control& control);
+    /** @summary Inspect only through the same original evaluator.
+     * @param context Original reservation. @return Sanitized effective projection. */
+    AuthorityPermission InspectAuthority(const OperationContext& context) const;
     friend class SemanticTasks;
     friend class mods::native::NativeProvider;
     friend struct mods::ManagerCommandTicket;
@@ -261,6 +277,7 @@ private:
     ScopeResult DrainRetirementOne() noexcept;
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
     friend struct ScopeRetirementTestAccess;
+#endif
     /** @summary Distinguishes release-only lifecycle bookkeeping from committed command admission; neither role issues authority. */
     enum class ReservationRole { Command, LifecycleDecision };
     /** @summary Share exact fresh reservation insertion while the caller owns original Q.
@@ -278,7 +295,6 @@ private:
     /** @summary Validates exact lifecycle root bookkeeping in the actual original scope phase under try Q without activation, reservation or release.
      * @param context Original reviewed root. @return Native root lineage/admission result. */
     ScopeResult CheckRootDecision(const OperationContext& context) noexcept;
-#endif
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
     friend struct mods::OwnerLifecycleTestAccess;
 #endif
@@ -318,7 +334,6 @@ private:
     ScopeResult CommitPreparedValue(ScopeHandle operation, RuntimeCommitDomain::Writer& writer,
         mods::PatchRegistry::PublicationGuard& publication, mods::PatchRegistry::PreparedPublication& plan,
         std::uint64_t scopeGeneration, std::uint64_t runtimeEpoch, const copied::Envelope& input);
-    struct State;
     /** @summary Drain exact native command release requests only outside compound publication guards.
      * @param state Original Q-locked state. */
     static void DrainCommandReleasesLocked(State& state) noexcept;
@@ -348,6 +363,20 @@ private:
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 /** @summary Synthetic authority exists only in separately compiled test targets, never runtime/Core. */
 struct RuntimeScopeTestAccess final {
+    /** @summary Negative allocation cuts exist only in fixture builds, never as authority setters. */
+    enum class AllocationCut { None, Challenge, RootReservation, Grant, FreshReservation, JoinedReservation, Disconnect };
+    /** @summary Scalar accounting from the original Q-held store; contains no source/proof or payload. */
+    struct AuthorityObservation final {
+        std::size_t challenges{},grants{},reservations{};
+        std::uint64_t nextChallenge{},nextGrant{},nextReservation{};
+        bool source{},admissionClosed{};
+    };
+    /** @summary Fail the next matching original allocation on this fixture thread once.
+     * @param cut Exact negative cut; None clears a previously armed cut. */
+    static void FailAllocation(AllocationCut cut) noexcept;
+    /** @summary Read original source/store accounting without acquiring any owner.
+     * @param scope Original fixture or source-absent production-constructed scope. @return Copied scalars only. */
+    static AuthorityObservation ObserveAuthority(const RuntimeScope& scope);
     /** @summary Seed only a retained nonterminal fixture task near sequence exhaustion, without authority changes.
      * @param scope Actual isolated scope. @param task Original value-task handle.
      * @param sequence UINT64_MAX-2 or UINT64_MAX-1, retaining at least one terminal publication.
@@ -358,18 +387,11 @@ struct RuntimeScopeTestAccess final {
      * @param scope Exact fixture scope. @return Nonblocking native lock; never grants authority. */
     static std::unique_lock<std::mutex> ReserveState(RuntimeScope& scope);
     /** @summary Exact reviewed fixture request; never exported or available to production ingress. */
-    struct Review final {
-        OperationOrigin origin;
-        std::uint64_t requested{1}, required{1}, approved{1}, revision{1}, action{1};
-        std::uint32_t opcode{1}, readiness{RuntimeReady};
-        bool supportsRestricted{}, sessionAllowed{}, entityAllowed{}, mandatoryAllowed{true}, allParticipants{};
-        std::chrono::steady_clock::time_point expires{std::chrono::steady_clock::now() + std::chrono::minutes(1)};
-        bool operator==(const Review&) const = default;
-    };
+    using Review=RuntimeAuthoritySource::Review;
     /** @summary Non-authoritative bounded pending challenge identity. */
-    struct Challenge final { std::uint64_t owner{}, serial{}; };
+    using Challenge=RuntimeAuthoritySource::Challenge;
     /** @summary Truthful effective state, independent of feature/transport availability. */
-    struct PermissionView final { std::uint64_t capabilities{}; bool restricted{}, admissionClosed{}; };
+    using PermissionView=RuntimeAuthoritySource::PermissionView;
     /** @summary Creates one expiring fixture-only pending human-action challenge. @param scope Native fixture. @param review Exact prompt. @return Zero on denial/capacity. */
     static Challenge ChallengeDecision(RuntimeScope& scope, const Review& review);
     /** @summary Consumes an exact fixture human-action proof once into the actual grant store. @param scope Native fixture. @param challenge Original prompt. @param review Unchanged reviewed request. @return Reservation or closed context. */

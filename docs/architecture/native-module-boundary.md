@@ -52,6 +52,13 @@ has drained, never a second active service for the same ID.
 
 Quiesce closes host admission before invoking module code, outside host locks.
 Drain returns BUSY while callbacks, registration or cooperative resources remain.
+The module drains its own registrations before Core cleans up residual host
+registrations. Core retains the first successful module Drain in the original
+State. If residual callback or scope cleanup is still BUSY, subsequent attempts
+retry that host cleanup without calling module Drain or Quiesce again: the
+module's successful Drain has already ended its borrow. This private milestone
+does not prove callback completion or final Core Drained; both still require
+their original fences. No host lock spans a module export call.
 A successful drain does not authorize `FreeLibrary`. Every loaded image, failed
 preparation and borrowed host state stays retained to process exit. Unknown native
 threads cannot be forcibly proven safe or stopped by a cooperative ABI. Native

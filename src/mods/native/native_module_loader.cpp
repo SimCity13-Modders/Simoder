@@ -302,6 +302,12 @@ struct NativeModule::State final {
     std::atomic_bool calling{};
     std::atomic<std::size_t> subscribing{};
     std::atomic_bool quiesced{};
+    /** @summary Monotonic foreign-borrow completion; read and written only under the original Call reservation. */
+    bool foreignDrainSucceeded{};
+#if defined(SIMODER_NATIVE_TEST_HOST)
+    /** @summary Counts actual original foreign Invoke attempts, never host-only close observations. */
+    std::atomic<std::uint32_t> foreignQuiesceCalls{}, foreignDrainCalls{};
+#endif
     std::shared_ptr<Image> image;
     std::string moduleId;
     std::shared_ptr<runtime::RuntimeScope> scope;
@@ -468,6 +474,9 @@ SdResult NativeModule::Admit() {
 void NativeParticipantTestAccess::StopOriginalScope(NativeModule& module) noexcept {
     module.state_->scope->RequestStop();
 }
+std::array<std::uint32_t, 2> NativeParticipantTestAccess::ForeignCloseCalls(const NativeModule& module) noexcept {
+    return {module.state_->foreignQuiesceCalls.load(), module.state_->foreignDrainCalls.load()};
+}
 SdResult NativeModule::AdmitSynthetic() {
     SdResult result{};
     {
@@ -487,7 +496,11 @@ SdResult NativeModule::Quiesce() {
     state_->scope->RequestStop();
     Call call(state_->calling); if (!call.acquired) return SD_BUSY;
     if (state_->Phase() == ModulePhase::Drained) return SD_OK;
+    if (state_->foreignDrainSucceeded) return SD_OK;
     state_->PublishPhase(ModulePhase::Stopping);
+#if defined(SIMODER_NATIVE_TEST_HOST)
+    state_->foreignQuiesceCalls.fetch_add(1);
+#endif
     const auto result = Invoke(state_->image->quiesce, state_->host.owner);
     if (result == SD_OK) state_->quiesced = true;
     return result;
@@ -497,14 +510,20 @@ SdResult NativeModule::Drain() {
     Call call(state_->calling); if (!call.acquired) return SD_BUSY;
     if (state_->Phase() == ModulePhase::Drained) return SD_OK;
     if (!state_->quiesced || state_->subscribing.load()) return SD_BUSY;
+    if (!state_->foreignDrainSucceeded) {
+#if defined(SIMODER_NATIVE_TEST_HOST)
+        state_->foreignDrainCalls.fetch_add(1);
+#endif
+        const auto result = Invoke(state_->image->drain, state_->host.owner);
+        if (result != SD_OK) return result;
+        state_->foreignDrainSucceeded = true;
+    }
     for (std::size_t i = 0; i < state_->subscriptions.size(); ++i) {
         SdHandle handle{};
         { const std::lock_guard lock(state_->mutex); const auto& entry = state_->subscriptions[i];
           if (entry.used && entry.id) handle = {state_->host.owner.slot * static_cast<std::uint32_t>(MaxSubscriptions) + static_cast<std::uint32_t>(i), entry.generation}; }
         if (handle.slot) { const auto retired = Unsubscribe(handle); if (retired != SD_OK && retired != SD_STALE) return retired; }
     }
-    const auto result = Invoke(state_->image->drain, state_->host.owner);
-    if (result != SD_OK) return result;
     if (!state_->scope->DrainFor(std::chrono::milliseconds(0))) return SD_BUSY;
     state_->PublishPhase(ModulePhase::Drained); return SD_OK;
 }

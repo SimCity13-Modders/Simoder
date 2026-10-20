@@ -61,6 +61,19 @@ void CandidateOperationalDenial(){auto domain=std::make_shared<RuntimeCommitDoma
     const auto after=scope->Current();const auto retained=Observe(*scope);Check(!after.activationCommitted&&after.epoch==before.epoch&&after.revision==before.revision&&after.retainedOperations==before.retainedOperations&&domain->Revision()==revision,"denied operational work causes no activation or marker");Check(retained.commandTickets==counts.commandTickets&&retained.rootReservations==counts.rootReservations&&retained.nonCommandFreshReservations==counts.nonCommandFreshReservations,"denied operational producers retain exact original counts");
     Fixture active;const auto noncommand=Authority::Issue(*active.scope,false,true,true,2);Check(noncommand.owner!=0,"actual active noncommand grant");Check(Access::Reserve(*active.scope,noncommand).context.owner==0,"active command wrapper still restricts opcode1");auto accepted=active.Reserve();Check(Access::Release(*active.scope,accepted.ticket)==ScopeResult::Ok,"active opcode1 native command remains supported");
 }
+/** @summary Failed original fresh reservation must not publish a ticket or damage subsequent exact cleanup. */
+void FailedAuthorityReservation(){
+    Fixture fixture;const auto before=Observe(*fixture.scope);const auto original=Authority::ObserveAuthority(*fixture.scope);
+    Authority::FailAllocation(Authority::AllocationCut::FreshReservation);
+    const auto failed=Access::Reserve(*fixture.scope,fixture.root);
+    const auto after=Observe(*fixture.scope);const auto counts=Authority::ObserveAuthority(*fixture.scope);
+    Check(!failed.context.owner&&after.commandTickets==before.commandTickets&&after.rootReservations==before.rootReservations&&
+        after.nonCommandFreshReservations==before.nonCommandFreshReservations&&counts.reservations==original.reservations,
+        "failed sole issuer reservation published partial tracked ownership");
+    Check(counts.nextReservation==original.nextReservation+1,"failed tracked identity was reused");
+    auto accepted=fixture.Reserve();Check(Access::Release(*fixture.scope,accepted.ticket)==ScopeResult::Ok,"post-failure exact cleanup");
+    Ready(*fixture.scope);Authority::FailAllocation(Authority::AllocationCut::None);
+}
 /** @summary Qualify root exclusion, exact once-only acknowledgement and recycled native ticket identity. */
 void Tickets(){Fixture fixture;auto first=fixture.Reserve();auto before=Observe(*fixture.scope);Check(before.commandTickets==1&&before.rootReservations==1&&before.nonCommandFreshReservations==0,"root and fresh ticket are separate native owners");Check(Access::Release(*fixture.scope,first.ticket)==ScopeResult::Ok,"immediate exact release acknowledged");Check(Access::Release(*fixture.scope,first.ticket)==ScopeResult::Ok,"acknowledged release repeat harmless");auto second=fixture.Reserve();Check(second.context.reservation!=first.context.reservation,"fresh reservation sequence never reused");Check(Access::Release(*fixture.scope,first.ticket)!=ScopeResult::Ok,"recycled old ticket cannot acknowledge new incarnation");Check(Observe(*fixture.scope).commandTickets==1,"stale old handle preserves actual new ticket");Check(Access::Release(*fixture.scope,second.ticket)==ScopeResult::Ok,"new incarnation acknowledged");auto final=Ready(*fixture.scope);Check(final.rootReservations==1,"revoked root bookkeeping preserved");Check(Access::Reserve(*fixture.scope,fixture.root).context.owner==0,"retiring scope admits no fresh ticket");}
 /** @summary Verify Q contention and held live ticket with a genuinely empty mailbox. */
@@ -102,5 +115,5 @@ void DelayedEnvelope(const std::filesystem::path& package){
 int main(int argc,char** argv){try{
     /** @summary Flush fixed scenario identity before native interleavings. @param label Scenario. @param test Actual body. */
     const auto run=[](const char* label,const auto& test){std::cerr<<"scope retirement begin "<<label<<std::endl;test();};
-    run("candidate operational denial",CandidateOperationalDenial);run("tickets",Tickets);run("contention live",ContentionAndLive);run("constructor",ConstructorCut);run("mailbox",Mailbox);run("capacity",Capacity);run("unknown registration",UnknownAndRegistration);run("disposal",Disposal);run("running",Running);run("copied payload",CopiedPayload);run("stopped foreign",StoppedAndForeign);Check(argc==2,"actual Base source argument required");run("actual delayed envelope",[&]{DelayedEnvelope(argv[1]);});Check(sc13::tests::FailureCount()==0,"shared fixture setup");std::cout<<checks.load()<<" scope retirement checks passed\n";return 0;
+    run("candidate operational denial",CandidateOperationalDenial);run("failed authority reservation",FailedAuthorityReservation);run("tickets",Tickets);run("contention live",ContentionAndLive);run("constructor",ConstructorCut);run("mailbox",Mailbox);run("capacity",Capacity);run("unknown registration",UnknownAndRegistration);run("disposal",Disposal);run("running",Running);run("copied payload",CopiedPayload);run("stopped foreign",StoppedAndForeign);Check(argc==2,"actual Base source argument required");run("actual delayed envelope",[&]{DelayedEnvelope(argv[1]);});Check(sc13::tests::FailureCount()==0,"shared fixture setup");std::cout<<checks.load()<<" scope retirement checks passed\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

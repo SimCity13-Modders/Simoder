@@ -42,12 +42,14 @@ struct Barrier final {
     std::mutex mutex;
     std::condition_variable changed;
     bool armed{}, entered{}, release{};
+    std::size_t deliveries{};
 };
 /** @summary Blocks the original admitted lifecycle callback until its original host releases it.
  * @param user Original barrier retained beyond publisher join. */
 void SD_CALL Wait(void* user, const SdState*) {
     auto& barrier = *static_cast<Barrier*>(user);
     std::unique_lock lock(barrier.mutex);
+    ++barrier.deliveries;
     if (!barrier.armed) return;
     barrier.entered = true; barrier.changed.notify_all();
     barrier.changed.wait(lock, [&] { return barrier.release; });
@@ -138,15 +140,28 @@ int main(int argc, char** argv) {
             } else if (mode == "inflight") {
                 Barrier barrier; SdHandle subscription{};
                 Check(module->Host().lifecycle->subscribe_current(module->Host().owner, Wait, &barrier, &subscription) == SD_OK, "original callback registration");
+                Check(barrier.deliveries == 1, "initial original callback returns before arming host gate");
                 { const std::lock_guard lock(barrier.mutex); barrier.armed = true; }
-                Publisher publisher{barrier, std::thread([&] { lifecycle->Publish({0, true, true, false, false}); })};
+                bool published{};
+                Publisher publisher{barrier, std::thread([&] { published = lifecycle->Publish({0, true, true, false, false}); })};
                 bool entered{};
                 { std::unique_lock lock(barrier.mutex); entered = barrier.changed.wait_for(lock, std::chrono::seconds(5), [&] { return barrier.entered; }); }
                 Check(entered, "bounded original publisher barrier entry");
                 Check(module->Quiesce() == SD_OK && module->Drain() == SD_BUSY, "inflight callback retains original State through Busy"); Closed(*module, *participant);
+                Check(module->Phase() == ModulePhase::Stopping && NativeParticipantTestAccess::ForeignCloseCalls(*module) == std::array<std::uint32_t, 2>{1, 1}, "foreign drain succeeds once before actual host callback fence");
+                std::shared_ptr<NativeModule> replacement;
+                Check(loader.Prepare(registration, replacement) == SD_CONFLICT && !replacement, "original host callback prevents successor generation");
+                Check(module->Drain() == SD_BUSY && module->Quiesce() == SD_OK && module->Drain() == SD_BUSY,
+                    "repeated residual observations preserve actual callback Busy");
+                Check(NativeParticipantTestAccess::ForeignCloseCalls(*module) == std::array<std::uint32_t, 2>{1, 1}, "successful foreign borrow is never replayed while host cleanup is pending");
                 { const std::lock_guard lock(barrier.mutex); barrier.release = true; }
                 barrier.changed.notify_all(); publisher.thread.join();
-                Check(module->Drain() == SD_OK, "only genuine terminal callback permits drain");
+                Check(published && barrier.deliveries == 2, "same original publisher and host callback reach genuine terminal");
+                Check(module->Drain() == SD_OK && module->Phase() == ModulePhase::Drained, "only genuine terminal callback permits drain");
+                Check(module->Quiesce() == SD_OK && module->Drain() == SD_OK &&
+                    NativeParticipantTestAccess::ForeignCloseCalls(*module) == std::array<std::uint32_t, 2>{1, 1}, "final host close and drain do not replay foreign exports");
+                Check(lifecycle->Publish({0, true, false, true, false}) && barrier.deliveries == 2, "no callback enters after actual original unsubscribe fence");
+                Check(module->Host().lifecycle->unsubscribe(subscription) == SD_STALE, "exact original token is retired only after callback fence");
             } else if (mode == "capture-race") {
                 std::atomic_bool start{}; std::atomic_bool coherent{true};
                 std::thread reader([&] {
@@ -167,6 +182,7 @@ int main(int argc, char** argv) {
                 Check(module->Drain() == SD_OK, "race participants genuinely terminal");
             } else if (mode == "busy") {
                 Check(module->Quiesce() == SD_OK && module->Drain() == SD_BUSY && module->Drain() == SD_BUSY, "foreign cooperative Busy never represented as drained"); Closed(*module, *participant);
+                Check(NativeParticipantTestAccess::ForeignCloseCalls(*module) == std::array<std::uint32_t, 2>{1, 2}, "foreign Busy preserves genuine retry attempts before success");
                 Check(module->Phase() == ModulePhase::Stopping && NativeModuleLoader::Usage().generations == 1, "busy original image/state retained");
             } else if (mode == "admit-failure") {
                 Check(module->AdmitSynthetic() != SD_OK, "actual synthetic Admit failure"); Closed(*module, *participant);

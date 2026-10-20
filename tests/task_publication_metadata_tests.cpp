@@ -78,6 +78,22 @@ void Publications(){
     Check(f.tasks.Poll(task,observed)==ScopeResult::Denied&&observed.sequence==0&&observed.revision==0&&!observed.value&&!observed.committed,"denial clears metadata atomically");
     Check(f.tasks.Release(task)==ScopeResult::Ok&&other.tasks.Release(another)==ScopeResult::Ok,"owner cleanup after revoke");
 }
+/** @summary Unpublished failed authority decisions cannot replace the original immutable task publication. */
+void FailedDecisionPreservesTask(){
+    Fixture fixture;const auto task=fixture.Admit();
+    Check(fixture.tasks.Begin(task)==ScopeResult::Ok&&fixture.tasks.Commit(task,Echo)==ScopeResult::Ok,"actual terminal before issuer failure");
+    TaskSnapshot before,after;Check(fixture.tasks.Poll(task,before)==ScopeResult::Ok,"original terminal observed");
+    RuntimeScopeTestAccess::Review review;review.origin=fixture.context.origin;review.required=0;review.entityAllowed=true;
+    const auto challenge=RuntimeScopeTestAccess::ChallengeDecision(*fixture.scope,review);
+    Check(challenge.serial!=0,"separate exact review pending");
+    RuntimeScopeTestAccess::FailAllocation(RuntimeScopeTestAccess::AllocationCut::Grant);
+    Check(!RuntimeScopeTestAccess::Decide(*fixture.scope,challenge,review).owner,"failed issuer published replacement grant");
+    Check(fixture.tasks.Poll(task,after)==ScopeResult::Ok&&before.sequence==after.sequence&&before.revision==after.revision&&
+        before.committed==after.committed&&before.state==after.state&&before.outcome==after.outcome&&before.value.Encode()==after.value.Encode(),
+        "failed unpublished grant changed original terminal tuple");
+    Check(fixture.tasks.Release(task)==ScopeResult::Ok,"actual terminal cleanup after unrelated issuer failure");
+    RuntimeScopeTestAccess::FailAllocation(RuntimeScopeTestAccess::AllocationCut::None);
+}
 /** @summary Verify all precommit terminal paths and uncertain factual completion. */
 void Terminals(){
     for(int mode=0;mode!=5;++mode){Fixture f;auto task=f.Admit();TaskSnapshot snapshot;
@@ -155,6 +171,6 @@ void Prepared(const std::filesystem::path& package){
 }
 /** @summary Run only isolated actual-source metadata qualification. @param argc Count. @param argv Actual Base path. @return Test process result. */
 int main(int argc,char** argv)try{
-    Check(argc==2,"actual Base path required");Publications();Terminals();Exhaustion();Prepared(argv[1]);
+    Check(argc==2,"actual Base path required");Publications();FailedDecisionPreservesTask();Terminals();Exhaustion();Prepared(argv[1]);
     std::cout<<"task-publication metadata checks="<<checks<<" PASS\n";return 0;
 }catch(const std::exception& failure){std::cerr<<"task-publication metadata FAIL: "<<failure.what()<<'\n';return 1;}
