@@ -1,4 +1,5 @@
 #include "bootstrap/loader.hpp"
+#include "bootstrap/runtime_context.hpp"
 
 #include "config/loader_config.hpp"
 #include "core/sha256.hpp"
@@ -35,7 +36,8 @@ namespace sc13::bootstrap {
 namespace {
 
 HMODULE g_module = nullptr;
-std::atomic_bool g_initialized = false;
+/** @summary Cache exact real startup outcome instead of treating an earlier attempt as success. */
+RootInitializationAttempt g_initializationAttempt;
 /** @summary A stopped runtime requires process restart; retained detours cannot be re-admitted. */
 std::atomic_bool g_retired{};
 /** @summary Serialize bootstrap ownership mutations without waiting on a callback or reentrant caller. */
@@ -53,11 +55,10 @@ std::unique_ptr<mods::PatchRegistry> g_patchRegistry;
 std::unique_ptr<runtime::RuntimeResourceCache> g_resourceCache;
 std::unique_ptr<mods::ModManager> g_modManager;
 std::unique_ptr<dev::RuntimeDiagnostics> g_runtimeDiagnostics;
-std::shared_ptr<platform::RuntimeOwner> g_runtimeOwner;
-std::shared_ptr<runtime::RuntimeScope> g_runtimeScope;
-/** @summary Shared serial writer lane and revision for core and all mod scopes. */
-std::shared_ptr<runtime::RuntimeCommitDomain> g_commitDomain;
-std::unique_ptr<runtime::RuntimeLifecycle> g_runtimeLifecycle;
+/** @summary Retain the original process owner even after failed context construction. */
+std::shared_ptr<platform::RuntimeOwner> g_processOwner;
+/** @summary One original composed context, retained through all local close outcomes. */
+std::unique_ptr<RuntimeContext> g_runtimeContext;
 std::atomic_bool g_stopRequested{};
 config::LoaderConfig g_loaderConfig;
 
@@ -65,8 +66,7 @@ config::LoaderConfig g_loaderConfig;
 void RequestCoreStop() noexcept {
     g_retired.store(true);
     g_stopRequested.store(true);
-    if (g_commitDomain) g_commitDomain->RequestStop();
-    if (g_runtimeScope) g_runtimeScope->RequestStop(runtime::StopReason::WindowClosing);
+    if (g_runtimeContext) g_runtimeContext->RequestStopIntent(runtime::StopReason::WindowClosing);
     dev::session::ShutdownSessionTransport();
 }
 
@@ -95,15 +95,6 @@ bool DispatchCoreWindowMessage(HWND window, UINT message, WPARAM word, LPARAM va
     return _wcsicmp(path.filename().c_str(), L"SimCity.exe") == 0;
 }
 
-/** Releases high-level mod services after all hooks have stopped using them. */
-void ResetModServices() noexcept {
-    g_runtimeDiagnostics.reset();
-    g_modManager.reset();
-    g_resourceCache.reset();
-    g_patchRegistry.reset();
-    g_loaderConfig = {};
-}
-
 }  // namespace
 
 void SetModuleHandle(HMODULE module) noexcept {
@@ -118,15 +109,9 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
     using sc13::logging::Level;
 
     if (sc13::bootstrap::g_retired.load()) return ERROR_SHUTDOWN_IN_PROGRESS;
-    bool expected = false;
-    if (!sc13::bootstrap::g_initialized.compare_exchange_strong(expected, true)) {
-        return 0;
-    }
-
     try {
         std::filesystem::path dllPath;
         if (!sc13::bootstrap::ReadModulePath(dllPath)) {
-            sc13::bootstrap::g_initialized.store(false);
             return 10;
         }
         const std::filesystem::path simoderDirectory(context.dataRoot);
@@ -151,7 +136,6 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
         static_cast<void>(levelValid);
         // @summary Rejected initialization writes only to disk and never creates a transient console.
         if (!AsyncLogger::Instance().Start(logPath)) {
-            sc13::bootstrap::g_initialized.store(false);
             return 11;
         }
 
@@ -224,17 +208,16 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
         }
 
         // @summary Acquire one fresh process-lifetime owner before any mod/service can initialize.
-        sc13::bootstrap::g_runtimeOwner = std::make_shared<sc13::platform::RuntimeOwner>();
-        if (!sc13::bootstrap::g_runtimeOwner->IsAcquired()) {
+        sc13::bootstrap::g_processOwner = std::make_shared<sc13::platform::RuntimeOwner>();
+        if (!sc13::bootstrap::g_processOwner->IsAcquired()) {
             AsyncLogger::Instance().WriteFormat(Level::Error,
                 "Runtime owner unavailable (Win32 %u); no mods or developer services admitted",
-                sc13::bootstrap::g_runtimeOwner->Error());
+                sc13::bootstrap::g_processOwner->Error());
             return ERROR_BUSY;
         }
         sc13::bootstrap::g_stopRequested.store(false);
-        sc13::bootstrap::g_commitDomain = std::make_shared<sc13::runtime::RuntimeCommitDomain>();
-        sc13::bootstrap::g_runtimeScope = std::make_shared<sc13::runtime::RuntimeScope>(sc13::bootstrap::g_runtimeOwner, sc13::bootstrap::g_commitDomain);
-        sc13::bootstrap::g_runtimeLifecycle = std::make_unique<sc13::runtime::RuntimeLifecycle>();
+        sc13::bootstrap::g_runtimeContext = std::make_unique<sc13::bootstrap::RuntimeContext>(
+            sc13::bootstrap::g_processOwner);
         sc13::platform::ConfigureGameWindowDispatch(&sc13::bootstrap::DispatchCoreWindowMessage,
                                                    &sc13::bootstrap::RequestCoreStop);
 
@@ -255,7 +238,7 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
             [](const std::string& owner, const std::string& message) {
                 sc13::logging::AsyncLogger::Instance().WriteEventFormat(sc13::logging::Level::Info,
                     sc13::logging::SourceType::Mod, owner.c_str(), "[Luau] %s", message.c_str());
-            }, sc13::bootstrap::g_runtimeOwner, sc13::bootstrap::g_commitDomain);
+            }, sc13::bootstrap::g_runtimeContext->Owner(), sc13::bootstrap::g_runtimeContext->Domain());
         error.clear();
         if (!sc13::bootstrap::g_modManager->Initialize(error)) {
             AsyncLogger::Instance().WriteFormat(
@@ -336,10 +319,9 @@ static DWORD InitializeImpl(const sc13::bootstrap::InstallContext& context) noex
             AsyncLogger::Instance().Write(Level::Warning,
                 "Developer snapshot/watch worker unavailable; runtime mods remain enabled");
         }
-        if (!sc13::bootstrap::g_runtimeScope->CommitActivation()) return ERROR_BUSY;
-        sc13::bootstrap::g_runtimeScope->SetReadiness(true);
-        static_cast<void>(sc13::bootstrap::g_runtimeLifecycle->Publish({0, true, false, false, false}));
-        return 0;
+        const DWORD prepared = sc13::bootstrap::g_runtimeContext->Prepare();
+        if (prepared != ERROR_SUCCESS) sc13::bootstrap::RequestCoreStop();
+        return prepared;
     } catch (...) {
         AsyncLogger::Instance().Write(
             Level::Error, "Initialization caught an exception; no unsafe game boundary was crossed");
@@ -355,41 +337,35 @@ DWORD Initialize(const InstallContext& context) noexcept {
     const LifecycleOperation active;
     if (context.size != sizeof(context) || context.version != 1 ||
         !context.gameRoot || !context.dataRoot) return ERROR_INVALID_PARAMETER;
-    return InitializeImpl(context);
+    if (g_retired.load()) return ERROR_SHUTDOWN_IN_PROGRESS;
+    if (g_runtimeContext && g_runtimeContext->Domain()->WriterActiveOnCurrentThread()) return ERROR_BUSY;
+    const auto route = g_initializationAttempt.Enter(g_retired.load(), g_runtimeContext.get());
+    if (!route.start) {
+        if (g_runtimeContext && g_runtimeContext->Domain()->IsStopping()) RequestCoreStop();
+        return route.result;
+    }
+    return g_initializationAttempt.Finish(InitializeImpl(context));
 }
 
-/** @summary Release runtime services outside loader lock; the process owns final teardown. */
+/** @summary Cooperatively close local state while retaining every service until actual global teardown qualifies. */
 DWORD Shutdown() noexcept {
     const std::unique_lock operation(g_lifecycleOperation, std::try_to_lock);
     if (!operation.owns_lock() || g_lifecycleOperationActive) return ERROR_BUSY;
     const LifecycleOperation active;
-    sc13::bootstrap::g_retired.store(true);
+    if (g_runtimeContext && g_runtimeContext->Domain()->WriterActiveOnCurrentThread()) return ERROR_BUSY;
     sc13::bootstrap::RequestCoreStop();
     sc13::ui::RequestStopSimoderOverlay();
     sc13::platform::ShutdownGameWindowDispatch();
     if (!sc13::dev::session::SessionTransportDrained() || !sc13::platform::GameWindowDispatchDrained() ||
         !sc13::ui::SimoderOverlayDrained()) return ERROR_BUSY;
-    if (sc13::bootstrap::g_runtimeScope &&
-        !sc13::bootstrap::g_runtimeScope->DrainFor(std::chrono::milliseconds(0))) return ERROR_BUSY;
-    if (sc13::bootstrap::g_modManager) {
-        sc13::bootstrap::g_modManager->RequestRuntimeStop();
-        if (!sc13::bootstrap::g_modManager->RuntimeScopesDrained()) return ERROR_BUSY;
-    }
-    if (sc13::bootstrap::g_runtimeLifecycle)
-        static_cast<void>(sc13::bootstrap::g_runtimeLifecycle->Publish({0, false, false, false, true}));
+    RuntimeContext::CloseObservation local;
+    if (g_runtimeContext) static_cast<void>(RetainRuntimeShutdown(*g_runtimeContext,g_modManager.get(),local));
+    if (g_runtimeContext && (!local.scopeDrained || !local.managerScopesDrained ||
+        local.receiptStatus != runtime::LifecycleObservationStatus::Ok ||
+        local.receipt.phase != runtime::LifecycleClosePhase::Closed)) return ERROR_BUSY;
     if (!sc13::hooks::UninstallRuntimeHooks()) return ERROR_BUSY;
-    sc13::bootstrap::g_runtimeDiagnostics.reset();
-    sc13::runtime::StopPatchAppliedSignal();
-    sc13::bootstrap::ResetModServices();
-    sc13::bootstrap::g_runtimeScope.reset();
-    sc13::bootstrap::g_runtimeLifecycle.reset();
-    sc13::bootstrap::g_commitDomain.reset();
-    // @summary Keep the kernel owner for this process lifetime, including disabled retained detours.
-    sc13::logging::AsyncLogger::Instance().Write(
-        sc13::logging::Level::Info, "SC13 Mod Loader shutting down");
-    sc13::logging::AsyncLogger::Instance().Stop();
-    sc13::bootstrap::g_initialized.store(false);
-    return 0;
+    // @summary Original services, publisher, scope, domain and owner remain retained; local facts cannot prove E5.
+    return ERROR_BUSY;
 }
 
 } // namespace sc13::bootstrap

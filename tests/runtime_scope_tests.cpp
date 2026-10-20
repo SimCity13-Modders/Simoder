@@ -549,9 +549,37 @@ void SourceBoundaryAndAllocationCuts() {
         "allocation-failed disconnect retained agent authority");
     A::FailAllocation(A::AllocationCut::None);
 }
+/** @summary Read actual original readiness independently from activation, then preserve sticky stop semantics. */
+void ReadinessSnapshots(){
+    auto scope=RuntimeScopeTestAccess::Create();
+    const auto fresh=scope->Current();
+    Require(!fresh.activationCommitted&&!fresh.stopping&&fresh.readiness==0,"fresh original scope inferred readiness");
+    Require(scope->CommitActivation(),"readiness fixture original activation");
+    const auto committed=scope->Current();
+    Require(committed.activationCommitted&&!committed.stopping&&committed.readiness==0,
+        "activation falsely supplied RuntimeReady fact");
+    for(std::uint32_t mask=0;mask!=8;++mask){
+        scope->SetReadiness((mask&RuntimeReady)!=0,(mask&MenuReady)!=0,(mask&CityReady)!=0);
+        const auto observed=scope->Current();
+        Require(observed.readiness==mask&&observed.activationCommitted&&!observed.stopping&&
+            observed.generation==fresh.generation&&observed.epoch==fresh.epoch&&observed.revision==fresh.revision&&
+            observed.running==0&&observed.retainedOperations==0,"snapshot did not copy exact original readiness bits");
+    }
+    scope->SetReadiness(false,false,false);
+    Require(scope->Current().readiness==0,"original readiness clearing not observed");
+    scope->SetReadiness(true,true,true);
+    scope->RequestStop(StopReason::ExplicitShutdown);
+    const auto stopped=scope->Current();
+    Require(stopped.stopping&&stopped.readiness==0&&stopped.epoch==fresh.epoch+1,
+        "actual original stop did not clear snapshot readiness");
+    scope->SetReadiness(true,true,true);
+    const auto repeated=scope->Current();
+    Require(repeated.stopping&&repeated.readiness==0&&repeated.epoch==stopped.epoch&&
+        repeated.generation==stopped.generation,"later setter reopened stopped scope readiness");
+}
 }
 /** @summary Executes native generic foundation checks without loading the game or a transport. */
 int main() {
-    try { Gates(); Commits(); RunningStop(); BoundsAndFailures(); ReentrantStop(); SharedDomain(); LegacyWriterDomain(); TypedDecisions(); AgentDecisions(); DecisionBudgetsAndExpiry(); PendingDecisionRevocation(); SourceBoundaryAndAllocationCuts(); std::cout << "Runtime scope gates, revisions, drain, ownership and typed provenance passed.\n"; return 0; }
+    try { Gates(); Commits(); RunningStop(); BoundsAndFailures(); ReentrantStop(); SharedDomain(); LegacyWriterDomain(); TypedDecisions(); AgentDecisions(); DecisionBudgetsAndExpiry(); PendingDecisionRevocation(); SourceBoundaryAndAllocationCuts(); ReadinessSnapshots(); std::cout << "Runtime scope gates, revisions, drain, ownership and typed provenance passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

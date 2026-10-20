@@ -387,9 +387,87 @@ void PendingReentry(){
     Require(lifecycle.Publish({0,false,false,false,true})&&stops==1&&lifecycle.Current().sequence==1&&A::Observe(lifecycle).queued==0,
         "original pending stop did not finalize once after same-D rejection");
 }
+/** @summary Original delivery observer rejects top/non-top D and real L contention without changing outputs or facts. */
+void DeliveryCheckedFailures(){
+    using A=RuntimeLifecycleTestAccess;using Status=LifecycleObservationStatus;
+    auto domain=std::make_shared<RuntimeCommitDomain>();RuntimeLifecycle lifecycle(domain);RuntimeCommitDomain inner;
+    auto source=A::Source(lifecycle,*domain);const auto initial=lifecycle.Current();
+    RuntimeLifecycle::DeliveryStatus output{91,true};
+    std::array<unsigned char,sizeof(output)> sentinel{};std::memcpy(sentinel.data(),&output,sizeof(output));
+    const auto rejected=[&]{Require(lifecycle.TryDeliveryStatus(output)==Status::Busy&&
+        std::memcmp(sentinel.data(),&output,sizeof(output))==0,"same-D delivery observer changed output or acquired L");};
+    {
+        auto original=domain->ReserveWriter();Require(original.Acquired(),"delivery observer original D");rejected();
+        {auto nested=inner.ReserveWriter();Require(nested.Acquired(),"delivery observer actual non-top D");rejected();}
+    }
+    {
+        OriginalHold held([&](const auto& pause){auto lock=A::ReserveState(lifecycle);pause();});
+        Require(lifecycle.TryDeliveryStatus(output)==Status::Busy&&std::memcmp(sentinel.data(),&output,sizeof(output))==0,
+            "original L contention changed delivery output");
+    }
+    Require(lifecycle.Current().sequence==initial.sequence&&source->Phase()==LifecycleClosePhase::Open&&
+        lifecycle.CloseStatus().reason==LifecycleCloseReason::None&&!domain->IsStopping(),"delivery observer mutated original source/sequence");
+    Require(lifecycle.TryDeliveryStatus(output)==Status::Ok&&output.queued==0&&!output.delivering,"empty original delivery facts");
+}
+/** @summary Retain the original publishing callback participant through every supported fixture exit. */
+struct DeliveryParticipant final {
+    RuntimeLifecycle& lifecycle;RuntimeLifecycle::Subscription subscription{};
+    std::promise<void> entered,release;std::shared_future<void> signal=release.get_future().share();
+    std::future<bool> original;bool released{},accepted{};
+    /** @summary Stage the owning receiver off guards. @param owner Original publisher. @param capture Actual retained disposal witness. */
+    DeliveryParticipant(RuntimeLifecycle& owner,const std::shared_ptr<CheckedCapture>& capture):lifecycle(owner){
+        subscription=lifecycle.SubscribeCurrent([this,capture](const auto& observed){
+            if(observed.sequence==1){entered.set_value();Require(signal.wait_for(10s)==std::future_status::ready,"delivery observer original callback release timeout");}
+        });
+        Require(subscription!=0,"delivery observer original receiver registration");
+    }
+    /** @summary Start and retain the original accepted publisher, with bounded actual callback entry. */
+    void Start(){
+        auto ready=entered.get_future();
+        original=std::async(std::launch::async,[this]{return lifecycle.Publish({0,true});});
+        Require(ready.wait_for(5s)==std::future_status::ready,"delivery observer original callback did not enter");
+    }
+    /** @summary Release and join the same original participant outside guards. */
+    void Finish(){if(!released){release.set_value();released=true;}if(original.valid())accepted=original.get();}
+    /** @summary Dispose only the original subscription after its producer returned. */
+    void Unsubscribe(){Require(lifecycle.Unsubscribe(subscription),"delivery observer actual receiver drain");subscription=0;}
+    /** @summary Supported failure paths release/join before disposing the actual capture owner. */
+    ~DeliveryParticipant(){
+        try{Finish();}catch(...){fixtureFailure=true;}
+        try{if(subscription&&!lifecycle.Unsubscribe(subscription))fixtureFailure=true;}catch(...){fixtureFailure=true;}
+    }
+};
+/** @summary Queue/delivery facts remain diagnostic while original callbacks and idle owning captures are retained. */
+void DeliveryOriginalFacts(){
+    using Status=LifecycleObservationStatus;
+    auto domain=std::make_shared<RuntimeCommitDomain>();RuntimeLifecycle lifecycle(domain);
+    RuntimeLifecycle::DeliveryStatus observed{99,true};
+    Require(lifecycle.TryDeliveryStatus(observed)==Status::Ok&&observed.queued==0&&!observed.delivering,"fresh delivery observer");
+    bool destroyed{},outside{};auto capture=std::make_shared<CheckedCapture>();
+    capture->lifecycle=&lifecycle;capture->domain=domain;capture->destroyed=&destroyed;capture->outside=&outside;
+    DeliveryParticipant participant(lifecycle,capture);capture.reset();participant.Start();
+    const auto initial=lifecycle.Current();
+    Require(lifecycle.TryDeliveryStatus(observed)==Status::Ok&&observed.queued==0&&observed.delivering&&!destroyed&&
+        lifecycle.Current().sequence==initial.sequence,"active original callback hidden by empty queue diagnostic");
+    Require(lifecycle.Publish({0,true,true})&&lifecycle.Publish({0,true,false,true}),"original queued delivery facts");
+    const auto queued=lifecycle.Current();
+    Require(lifecycle.TryDeliveryStatus(observed)==Status::Ok&&observed.queued==2&&observed.delivering&&!destroyed&&
+        lifecycle.Current().sequence==queued.sequence,"observer did not read original queued/delivering tuple");
+    Require(lifecycle.Publish({0,false,false,false,true})&&lifecycle.CloseStatus().phase==LifecycleClosePhase::Closed,
+        "original authority close for retained delivery fixture");
+    const auto closed=lifecycle.Current();
+    Require(lifecycle.TryDeliveryStatus(observed)==Status::Ok&&observed.queued==3&&observed.delivering&&!destroyed&&
+        lifecycle.Current().sequence==closed.sequence,"Closed receipt falsely implied original callback completion");
+    participant.Finish();Require(participant.accepted,"original publisher failed after actual callback release");
+    Require(lifecycle.TryDeliveryStatus(observed)==Status::Ok&&observed.queued==0&&!observed.delivering&&!destroyed&&
+        lifecycle.Current().sequence==closed.sequence,"idle observer disposed capture or changed original sequence");
+    participant.Unsubscribe();Require(destroyed&&outside,"actual retained capture did not dispose off D/L after original unsubscribe");
+    Require(lifecycle.TryDeliveryStatus(observed)==Status::Ok&&observed.queued==0&&!observed.delivering,
+        "closed publisher delivery diagnostics unavailable after concrete cleanup");
+}
 }
 /** @summary Executes isolated factual lifecycle ordering and callback-lifetime tests. */
 int main() {
-    try { Ordering(); ConcurrentUnsubscribe(); Destruction(); ResourceAndBounds(); BoundCheckpoint(); BoundActiveDelivery(); ExplicitStopFullQueue(); BoundFailures(); BoundDestruction(); CheckedObservations(); ReentrantEntries(); CaptureOwnership(); PendingReentry(); Require(!fixtureFailure,"original fixture holder failed"); std::cout << "Lifecycle ordering, bounded delivery and callback drain passed.\n"; return 0; }
+    try { Ordering(); ConcurrentUnsubscribe(); Destruction(); ResourceAndBounds(); BoundCheckpoint(); BoundActiveDelivery(); ExplicitStopFullQueue(); BoundFailures(); BoundDestruction(); CheckedObservations(); ReentrantEntries(); CaptureOwnership(); PendingReentry(); DeliveryCheckedFailures(); DeliveryOriginalFacts(); Require(!fixtureFailure,"original fixture holder failed"); std::cout << "Lifecycle ordering, bounded delivery and callback drain passed.\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

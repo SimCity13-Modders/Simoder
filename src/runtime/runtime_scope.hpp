@@ -62,6 +62,8 @@ struct ScopeSnapshot final {
     bool activationCommitted{};
     bool stopping{};
     bool drained{};
+    /** @summary Copied original readiness mask under the existing scope mutex, never permission. */
+    std::uint32_t readiness{};
 };
 /** @summary Task phase is independent of its irreversible commit marker. */
 enum class TaskState { Queued, Running, Succeeded, Failed, Cancelled, Indeterminate };

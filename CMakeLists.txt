@@ -47,6 +47,8 @@ function(sc13_enable_warnings target)
 endfunction()
 
 add_library(sc13_core STATIC
+    # @summary Share original bootstrap composition with the isolated acceptance host.
+    src/bootstrap/runtime_context.cpp
     src/config/loader_config.cpp
     src/core/resource_filter.cpp
     src/core/runtime_property_table.cpp
@@ -257,6 +259,16 @@ if(SC13_BUILD_TESTS)
     target_compile_definitions(sc13-semantic-test-support PRIVATE SC13_SEMANTIC_BUILD_ID="${SC13_SEMANTIC_BUILD_ID}" SC13_SEMANTIC_BUILD_CONFIG="$<CONFIG>")
     target_link_libraries(sc13-semantic-test-support PUBLIC bcrypt version advapi32 user32 Luau.VM Luau.Compiler)
     sc13_enable_warnings(sc13-semantic-test-support)
+    # @summary Exercise the production composition and retained close with original owners and callbacks.
+    add_executable(bootstrap-runtime-context-tests tests/bootstrap_runtime_context_tests.cpp
+        tests/mod_fixture.cpp tests/test_harness.cpp)
+    target_link_libraries(bootstrap-runtime-context-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(bootstrap-runtime-context-tests)
+    foreach(context_case prepare root-failures reentry foreign-writer delivery capacity allocation capture manager-lease)
+        add_test(NAME simoder-bootstrap-runtime-context-${context_case}
+            COMMAND bootstrap-runtime-context-tests ${context_case} "${CMAKE_CURRENT_SOURCE_DIR}/.analysis")
+        set_tests_properties(simoder-bootstrap-runtime-context-${context_case} PROPERTIES TIMEOUT 30)
+    endforeach()
     add_executable(simoder-semantic-bridge-tests tests/semantic_bridge_tests.cpp)
     target_link_libraries(simoder-semantic-bridge-tests PRIVATE sc13-semantic-test-support)
     sc13_enable_warnings(simoder-semantic-bridge-tests)

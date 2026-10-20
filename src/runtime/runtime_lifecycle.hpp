@@ -63,6 +63,13 @@ public:
      * @return Unbound for a factual-only publisher, Pending as Closing, or actual checkpoint result.
      * @pre Caller holds no original D/publication/State/L guard; guarded consumers use TryCloseStatus. */
     CloseReceipt CloseStatus() const;
+    /** @summary Original delivery diagnostics only; neither producer/capture quiescence nor reset permission. */
+    struct DeliveryStatus final {std::size_t queued{};bool delivering{};};
+    /** @summary Read only original queue count and serialized delivery state with a checked nonblocking observation.
+     * @param output Unchanged unless Ok copies both actual scalars. @return Ok, Busy or Unavailable.
+     * @pre Publisher remains alive; caller does not own original L. Same/non-top original D rejects before L/owners.
+     * This snapshot never certifies producer fences, capture disposal or global finalization. */
+    LifecycleObservationStatus TryDeliveryStatus(DeliveryStatus& output) const noexcept;
     /** @summary Nonthrow observation rejects actual same-D reentry before L/ownership/output changes.
      * @param output Unchanged unless Ok copies actual historical Current. @return Ok, Busy or Unavailable.
      * @pre Publisher remains alive; caller does not own original L. No authority is inferred from historical facts. */

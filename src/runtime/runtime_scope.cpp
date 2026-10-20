@@ -331,7 +331,7 @@ ScopeResult RuntimeScope::ReleaseCommandTicket(const CommandTicket& ticket) noex
 }
 ScopeSnapshot RuntimeScope::SnapshotLocked(const State& state) noexcept {
     return {state.generation,state.epoch,state.domain->revision_.load(),state.running,state.operations.size(),
-        state.committed,state.stopping,state.safelyDrained};
+        state.committed,state.stopping,state.safelyDrained,state.readiness};
 }
 RuntimeScope::RetirementObservation RuntimeScope::ObserveRetirement() noexcept {
     const auto state=state_;RetirementObservation output;output.generation=state->generation;

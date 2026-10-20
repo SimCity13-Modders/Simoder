@@ -227,6 +227,16 @@ LifecycleObservationStatus RuntimeLifecycle::TryCloseStatus(CloseReceipt& output
         const auto observed=ReceiptLocked(*state);output=observed;return LifecycleObservationStatus::Ok;
     }catch(...){return LifecycleObservationStatus::Unavailable;}
 }
+LifecycleObservationStatus RuntimeLifecycle::TryDeliveryStatus(DeliveryStatus& output) const noexcept{
+    auto* const state=state_.get();
+    if(state->domain&&state->domain->WriterActiveOnCurrentThread())return LifecycleObservationStatus::Busy;
+    try{
+        std::unique_lock lock(state->mutex,std::try_to_lock);
+        if(!lock.owns_lock())return LifecycleObservationStatus::Busy;
+        const DeliveryStatus observed{state->events.size(),state->delivering};
+        output=observed;return LifecycleObservationStatus::Ok;
+    }catch(...){return LifecycleObservationStatus::Unavailable;}
+}
 std::shared_ptr<const LifecycleAuthoritySource> RuntimeLifecycle::StageAuthoritySource(const RuntimeCommitDomain& expected) const{
     if(state_->domain&&state_->domain->WriterActiveOnCurrentThread())return {};
     const auto state=state_;
