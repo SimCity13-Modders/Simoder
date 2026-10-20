@@ -1,4 +1,5 @@
 #include "mods/native/native_module_loader.hpp"
+#include "mods/native/native_participant.hpp"
 #include "core/sha256.hpp"
 #include "platform/runtime_owner.hpp"
 #ifndef WIN32_LEAN_AND_MEAN
@@ -292,7 +293,12 @@ std::array<unsigned char, 32> ContractIdentity() {
 struct NativeModule::State final {
     struct Subscription final { runtime::RuntimeLifecycle::Subscription id{}; std::uint32_t generation{1}; bool used{}; };
     std::mutex mutex;
-    std::atomic<ModulePhase> phase{ModulePhase::Prepared};
+    /** @summary Sole coherent local phase/retirement source; retirement never clears. */
+    std::atomic<std::uint32_t> lifetime{static_cast<std::uint32_t>(ModulePhase::Prepared)};
+    /** @summary Published only after successful foreign Prepare and final original-owner checks. */
+    std::atomic_bool prepared{};
+    /** @summary Original scope generation staged once before foreign Prepare, never refreshed by a fence. */
+    std::uint64_t scopeGeneration{};
     std::atomic_bool calling{};
     std::atomic<std::size_t> subscribing{};
     std::atomic_bool quiesced{};
@@ -303,6 +309,30 @@ struct NativeModule::State final {
     std::shared_ptr<runtime::RuntimeLifecycle> lifecycle;
     SdHostApiV2 host{};
     std::array<Subscription, MaxSubscriptions> subscriptions{};
+    static constexpr std::uint32_t Retired = 0x100;
+    static constexpr std::uint32_t PhaseMask = 0xff;
+    /** @summary Reads the phase from the sole local word. @return Current cooperative phase. */
+    ModulePhase Phase() const noexcept { return static_cast<ModulePhase>(lifetime.load() & PhaseMask); }
+    /** @summary Closes the local lifetime before any loader-owned stop request or foreign cleanup. */
+    void Retire() noexcept { lifetime.fetch_or(Retired); }
+    /** @summary Publishes a valid phase while preserving sticky retirement on every CAS.
+     * @param next Actual cooperative lifecycle phase. @return False for invalid or terminal reversal. */
+    bool PublishPhase(ModulePhase next) noexcept {
+        if (next < ModulePhase::Prepared || next > ModulePhase::Faulted) return false;
+        auto original = lifetime.load();
+        do {
+            const auto before = static_cast<ModulePhase>(original & PhaseMask);
+            const bool valid = before == next ||
+                (before == ModulePhase::Prepared && (next == ModulePhase::Active || next == ModulePhase::Stopping || next == ModulePhase::Faulted)) ||
+                (before == ModulePhase::Active && (next == ModulePhase::Stopping || next == ModulePhase::Faulted)) ||
+                (before == ModulePhase::Faulted && next == ModulePhase::Stopping) ||
+                (before == ModulePhase::Stopping && next == ModulePhase::Drained);
+            if (!valid) return false;
+            auto desired = (original & Retired) | static_cast<std::uint32_t>(next);
+            if (next == ModulePhase::Stopping || next == ModulePhase::Drained || next == ModulePhase::Faulted) desired |= Retired;
+            if (lifetime.compare_exchange_weak(original, desired)) return true;
+        } while (true);
+    }
 };
 
 namespace {
@@ -349,7 +379,7 @@ SdResult SD_CALL Subscribe(SdHandle owner, SdStateCallback callback, void* user,
         id = state->lifecycle->SubscribeCurrent([state, callback, user](const runtime::LifecycleSnapshot& observed) {
             if (state->scope->Current().stopping || state->domain->IsStopping() || state->lifecycle->Current().stopping) return;
             const auto snapshot = Snapshot(*state, observed);
-            try { callback(user, &snapshot); } catch (...) { state->scope->RequestStop(runtime::StopReason::ActivationFailed); }
+            try { callback(user, &snapshot); } catch (...) { state->Retire(); state->scope->RequestStop(runtime::StopReason::ActivationFailed); }
         });
     } catch (...) {
         const std::lock_guard lock(state->mutex); state->subscriptions[slot].used = false;
@@ -401,20 +431,41 @@ template<class Function, class... Args> SdResult Invoke(Function function, Args.
 
 NativeModule::NativeModule(std::shared_ptr<State> state) : state_(std::move(state)) {}
 const SdHostApiV2& NativeModule::Host() const noexcept { return state_->host; }
-ModulePhase NativeModule::Phase() const noexcept { return state_->phase.load(); }
+ModulePhase NativeModule::Phase() const noexcept { return state_->Phase(); }
+NativeParticipant::NativeParticipant(std::shared_ptr<NativeModule::State> state) noexcept : state_(std::move(state)) {}
+NativeParticipantFence NativeParticipant::ObserveLocalFence() const noexcept {
+    const auto word = state_->lifetime.load();
+    return {{state_->host.owner, state_->image->digest, state_->scopeGeneration, state_->host.owner.slot},
+        static_cast<ModulePhase>(word & NativeModule::State::PhaseMask),
+        (word & NativeModule::State::Retired) != 0, state_->domain->IsStopping()};
+}
+bool NativeParticipant::SameIdentity(const NativeParticipant& other) const noexcept {
+    return state_ == other.state_;
+}
+SdResult NativeModule::CaptureParticipant(std::optional<NativeParticipant>& output) const {
+    output.reset();
+    if (!state_->prepared.load()) return SD_NOT_READY;
+    // @summary These off-guard observations deny known external stop without claiming an atomic whole-runtime fence.
+    if (state_->scope->Current().stopping || state_->domain->IsStopping() || state_->lifecycle->Current().stopping ||
+        (state_->lifetime.load() & State::Retired)) return SD_STALE;
+    output = NativeParticipant(state_);
+    return SD_OK;
+}
 SdResult NativeModule::Admit() {
-    return state_->scope->Current().stopping || state_->domain->IsStopping() || state_->lifecycle->Current().stopping ? SD_STALE : SD_NOT_READY;
+    return (state_->lifetime.load() & State::Retired) || state_->scope->Current().stopping || state_->domain->IsStopping() || state_->lifecycle->Current().stopping ? SD_STALE : SD_NOT_READY;
 }
 #if defined(SIMODER_NATIVE_TEST_HOST)
+void NativeParticipantTestAccess::StopOriginalScope(NativeModule& module) noexcept {
+    module.state_->scope->RequestStop();
+}
 SdResult NativeModule::AdmitSynthetic() {
     SdResult result{};
     {
         Call call(state_->calling); if (!call.acquired) return SD_BUSY;
-        if (state_->phase != ModulePhase::Prepared || state_->scope->Current().stopping || state_->domain->IsStopping() || state_->lifecycle->Current().stopping) return SD_STALE;
-        if (!state_->scope->CommitActivation()) return SD_NOT_READY;
-        result = Invoke(state_->image->admit, state_->host.owner);
+        if ((state_->lifetime.load() & State::Retired) || state_->Phase() != ModulePhase::Prepared || state_->scope->Current().stopping || state_->domain->IsStopping() || state_->lifecycle->Current().stopping) { state_->Retire(); return SD_STALE; }
+        result = state_->scope->CommitActivation() ? Invoke(state_->image->admit, state_->host.owner) : SD_NOT_READY;
         if (result == SD_OK && (state_->scope->Current().stopping || state_->domain->IsStopping() || state_->lifecycle->Current().stopping)) result = SD_INDETERMINATE;
-        state_->phase = result == SD_OK ? ModulePhase::Active : ModulePhase::Faulted;
+        state_->PublishPhase(result == SD_OK ? ModulePhase::Active : ModulePhase::Faulted);
         if (result != SD_OK) state_->scope->RequestStop(runtime::StopReason::ActivationFailed);
     }
     if (result != SD_OK) { Quiesce(); Drain(); }
@@ -422,10 +473,11 @@ SdResult NativeModule::AdmitSynthetic() {
 }
 #endif
 SdResult NativeModule::Quiesce() {
+    state_->Retire();
     state_->scope->RequestStop();
     Call call(state_->calling); if (!call.acquired) return SD_BUSY;
-    if (state_->phase == ModulePhase::Drained) return SD_OK;
-    state_->phase = ModulePhase::Stopping;
+    if (state_->Phase() == ModulePhase::Drained) return SD_OK;
+    state_->PublishPhase(ModulePhase::Stopping);
     const auto result = Invoke(state_->image->quiesce, state_->host.owner);
     if (result == SD_OK) state_->quiesced = true;
     return result;
@@ -433,7 +485,7 @@ SdResult NativeModule::Quiesce() {
 SdResult NativeModule::Drain() {
     if (!state_->scope->Current().stopping) return SD_NOT_READY;
     Call call(state_->calling); if (!call.acquired) return SD_BUSY;
-    if (state_->phase == ModulePhase::Drained) return SD_OK;
+    if (state_->Phase() == ModulePhase::Drained) return SD_OK;
     if (!state_->quiesced || state_->subscribing.load()) return SD_BUSY;
     for (std::size_t i = 0; i < state_->subscriptions.size(); ++i) {
         SdHandle handle{};
@@ -444,7 +496,7 @@ SdResult NativeModule::Drain() {
     const auto result = Invoke(state_->image->drain, state_->host.owner);
     if (result != SD_OK) return result;
     if (!state_->scope->DrainFor(std::chrono::milliseconds(0))) return SD_BUSY;
-    state_->phase = ModulePhase::Drained; return SD_OK;
+    state_->PublishPhase(ModulePhase::Drained); return SD_OK;
 }
 NativeModuleLoader::NativeModuleLoader(std::filesystem::path root, std::shared_ptr<platform::RuntimeOwner> owner,
     std::shared_ptr<runtime::RuntimeCommitDomain> domain, std::shared_ptr<runtime::RuntimeLifecycle> lifecycle)
@@ -467,7 +519,7 @@ SdResult NativeModuleLoader::Prepare(const ReviewedModule& registration, std::sh
         if (registry.loading) return fail(SD_BUSY, "Another native image is being verified/loaded");
         if (registry.poisoned) return fail(SD_RESTART_REQUIRED, "A failed native initialization requires process restart");
         if (registry.states.size() >= MaxGenerations) return fail(SD_RESTART_REQUIRED, "Native owner retention budget exhausted");
-        for (const auto& state : registry.states) if (state->moduleId == registration.moduleId && state->phase != ModulePhase::Drained) return fail(SD_CONFLICT, "A logical module generation has not drained");
+        for (const auto& state : registry.states) if (state->moduleId == registration.moduleId && state->Phase() != ModulePhase::Drained) return fail(SD_CONFLICT, "A logical module generation has not drained");
         for (const auto& candidate : registry.images) if (candidate->digest == digest) { image = candidate; break; }
         if (!image && (registry.images.size() >= MaxImages || facts.imageSize > MaxMappedBytes - registry.mappedBytes)) return fail(SD_RESTART_REQUIRED, "Native image retention budget exhausted");
         if (!image && registry.stagingAttempts >= MaxGenerations) return fail(SD_RESTART_REQUIRED, "Native staging attempt budget exhausted");
@@ -511,6 +563,7 @@ SdResult NativeModuleLoader::Prepare(const ReviewedModule& registration, std::sh
     auto state = std::make_shared<NativeModule::State>(); state->image = image; state->lifecycle = lifecycle_; state->moduleId = registration.moduleId;
     state->domain = domain_;
     state->scope = std::make_shared<runtime::RuntimeScope>(owner_, domain_);
+    state->scopeGeneration = state->scope->Current().generation;
     {
         const std::lock_guard lock(registry.mutex);
         state->host = {{sizeof(SdHostApiV2), SD_U2A_HOST_VERSION}, {static_cast<std::uint32_t>(registry.states.size() + 1), 1}, &LifecycleApi, nullptr, nullptr, nullptr};
@@ -518,11 +571,12 @@ SdResult NativeModuleLoader::Prepare(const ReviewedModule& registration, std::sh
     }
     result = Invoke(image->prepare, &state->host);
     auto module = std::shared_ptr<NativeModule>(new NativeModule(state));
-    if (result == SD_OK && (domain_->IsStopping() || lifecycle_->Current().stopping || !owner_->IsAcquired())) result = SD_CANCELLED;
+    if (result == SD_OK && (state->scope->Current().stopping || domain_->IsStopping() || lifecycle_->Current().stopping || !owner_->IsAcquired())) result = SD_CANCELLED;
     if (result != SD_OK) {
-        state->phase = ModulePhase::Faulted; module->Quiesce(); module->Drain();
+        state->PublishPhase(ModulePhase::Faulted); module->Quiesce(); module->Drain();
         return fail(result, "Native preparation rejected; generation and image retained");
     }
+    state->prepared.store(true);
     output = std::move(module); return SD_OK;
 }
 ImageUsage NativeModuleLoader::Usage() {

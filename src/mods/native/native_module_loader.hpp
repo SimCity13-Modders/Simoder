@@ -6,9 +6,11 @@
 #include <array>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace sc13::mods::native {
+class NativeParticipant;
 /** @summary Core-reviewed registration, never deserialized from a native module's own claims. */
 struct ReviewedModule final {
     std::string moduleId;
@@ -35,6 +37,11 @@ public:
     const SdHostApiV2& Host() const noexcept;
     /** @summary Copies the logical generation phase. @return Current phase. */
     ModulePhase Phase() const noexcept;
+    /** @summary Stage a retained original native identity outside all publication guards.
+     * @param output Cleared outside guards on rejection; receives a prepared lifetime only.
+     * @return OK for successfully prepared locally live identity, STALE after observed stop.
+     * @pre Caller holds no D/M/S/V/R/B/Q/T guard. This grants no runtime authority. */
+    SdResult CaptureParticipant(std::optional<NativeParticipant>& output) const;
 #if defined(SIMODER_NATIVE_TEST_HOST)
     /** @summary Synthetic postcommit base gate, absent from every production target. @return Fixture admission outcome. */
     SdResult AdmitSynthetic();
@@ -44,7 +51,20 @@ private:
     explicit NativeModule(std::shared_ptr<State> state);
     std::shared_ptr<State> state_;
     friend class NativeModuleLoader;
+#if defined(SIMODER_NATIVE_TEST_HOST)
+    friend struct NativeParticipantTestAccess;
+#endif
 };
+
+#if defined(SIMODER_NATIVE_TEST_HOST)
+/** @summary Isolated observation cut on the original retained scope; no production identity or authority factory. */
+struct NativeParticipantTestAccess final {
+    /** @summary Request real external scope stop without manufacturing State-local retirement.
+     * @param module Successfully returned original module retained by the caller.
+     * @pre Caller holds no publication or loader/State/Registry guard. */
+    static void StopOriginalScope(NativeModule& module) noexcept;
+};
+#endif
 
 /** @summary Bounded trusted-code loader; each instance requires serialized core callers, while the process registry serializes images. Native DLLs are not sandboxed. */
 class NativeModuleLoader final {
