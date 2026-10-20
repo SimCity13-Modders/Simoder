@@ -130,7 +130,7 @@ runtime::ScopeResult ManagerPublication::Prepare(ModManager& manager,ManagerPrep
         preparation.state_!=manager.state_)return ScopeResult::Invalid;
     const ModManager::Lease lifetime(manager.state_);if(!lifetime)return ScopeResult::Cancelled;
     if(!ManagerPreparation::OriginalBase(preparation) || preparation.endpoint_->scope!=preparation.scope_ ||
-        preparation.endpoint_->generation!=preparation.vmGeneration_ || preparation.domain_!=manager.runtimeDomain_)
+        preparation.endpoint_->ScriptGeneration()!=preparation.vmGeneration_ || preparation.domain_!=manager.runtimeDomain_)
         return ScopeResult::Stale;
     auto binding=Binding(manager,preparation.owner_);if(!binding)return ScopeResult::Busy;
     const auto cacheBound=ManagerCache::Ensure(manager,preparation.owner_);if(cacheBound!=ScopeResult::Ok)return cacheBound;

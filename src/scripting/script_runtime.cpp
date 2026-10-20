@@ -1017,7 +1017,7 @@ runtime::ScopeResult ScriptScheduler::BindPreparation(const std::shared_ptr<Scri
     std::unique_lock guard(vm->mutex_,std::try_to_lock);if(!guard.owns_lock())return ScopeResult::Busy;
     if(!vm->preparation_ || vm->bootstrap_ || vm->lane_!=lane_ || !vm->state_ || !vm->running_ || vm->committed_ || vm->sealed_ ||
         vm->scheduled_.load() || vm->stopping_ || vm->retired_ || vm->stopRequested_.load() || vm->laneReleased_.load() ||
-        !vm->host_.semantic || !vm->host_.semantic->scope || vm->host_.semantic->generation!=vm->vmGeneration_ ||
+        !vm->host_.semantic || !vm->host_.semantic->scope || vm->host_.semantic->ScriptGeneration()!=vm->vmGeneration_ ||
         (vm->schedulerHost_ && vm->schedulerHost_!=host_))return ScopeResult::Denied;
     return lane_->TryBind(vm->laneSlot_,vm,host_);
 }

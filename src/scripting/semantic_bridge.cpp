@@ -1,5 +1,6 @@
 #include "scripting/semantic_bridge.hpp"
 #include "mods/owned_publication.hpp"
+#include "scripting/script_runtime.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -31,22 +32,56 @@ std::shared_ptr<SemanticEndpoint> SemanticBridge::Bind(std::shared_ptr<runtime::
     endpoint->storageOwner = scope->Current().generation;
     endpoint->scope=scope;
     endpoint->tasks = std::make_shared<runtime::SemanticTasks>(std::move(scope), values_);
+    return Register(std::move(endpoint));
+}
+std::shared_ptr<SemanticEndpoint> SemanticBridge::BindNative(const mods::native::NativeParticipant& participant) {
+    std::shared_ptr<runtime::RuntimeScope> scope;
+    std::shared_ptr<runtime::RuntimeLifecycle> lifecycle;
+    if(!participant.StageLifetime(scope,lifecycle))throw std::invalid_argument("Stopped native participant");
+    const auto identity=participant.ObserveLocalFence().identity;
+    runtime::copied::Reservation accounting;
+    if(values_->Account(identity.scopeGeneration,sizeof(SemanticEndpoint)+sizeof(runtime::SemanticTasks)+128,accounting)!=runtime::copied::Status::Ok)
+        throw std::runtime_error("Semantic endpoint storage exhausted");
+    auto endpoint=std::make_shared<SemanticEndpoint>();
+    endpoint->accounting=std::move(accounting);endpoint->bridge=shared_from_this();
+    endpoint->storageOwner=identity.scopeGeneration;endpoint->scope=scope;
+    endpoint->tasks=std::make_shared<runtime::SemanticTasks>(std::move(scope),values_);
+    endpoint->participant_=SemanticParticipant(participant);
+    // @summary A captured native lifetime has no operation origin or reservation in B1b.
+    if(!participant.ObserveLocalFence().LocallyLive() || endpoint->scope->Current().stopping || lifecycle->Current().stopping)
+        throw std::invalid_argument("Stopped native participant");
+    return Register(std::move(endpoint));
+}
+std::shared_ptr<SemanticEndpoint> SemanticBridge::Register(std::shared_ptr<SemanticEndpoint> endpoint) {
+    std::weak_ptr<SemanticEndpoint> retired;
     const std::scoped_lock lock(mutex_);
     if (closed_) throw std::runtime_error("Base transport is closed");
     if(!accounting_){std::size_t metadata=methods_.capacity()*sizeof(SemanticMethod);
         for(const auto& method:methods_)metadata+=method.id.capacity()+method.inputSchema.capacity()+method.lane.capacity()+method.context.capacity()+method.capability.capacity()+method.postcondition.capacity();
         if(values_->Account(endpoint->storageOwner,sizeof(SemanticBridge)+metadata+64,accounting_)!=runtime::copied::Status::Ok)throw std::runtime_error("Base transport storage exhausted");}
-    for (auto& slot:endpoints_) if (slot.expired()) {slot=endpoint;return endpoint;}
+    for (auto& slot:endpoints_) if (slot.expired()) {retired.swap(slot);slot=endpoint;return endpoint;}
     throw std::runtime_error("Base endpoint capacity exhausted");
+}
+bool SemanticBridge::InitializeScript(const std::shared_ptr<SemanticEndpoint>& endpoint,const ScriptRuntime& runtime) noexcept {
+    const std::scoped_lock lock(mutex_);
+    if(closed_ || !endpoint || endpoint->closed || endpoint->bridge.get()!=this ||
+        runtime.host_.semantic!=endpoint || !std::any_of(endpoints_.begin(),endpoints_.end(),[&](const auto& entry){
+            return !entry.owner_before(endpoint)&&!endpoint.owner_before(entry);}))return false;
+    return endpoint->participant_.InitializeScript(runtime);
 }
 runtime::ScopeResult SemanticBridge::Request(const std::shared_ptr<SemanticEndpoint>& endpoint,
     std::string_view method, const runtime::copied::Envelope& value, runtime::TaskHandle& output,SemanticContextLease& context,
     const SemanticContextLease* expected,const SemanticEndpointBinding* binding) {
     using runtime::ScopeResult;
     output = {}; context = {};
+    // @summary Strong endpoint/value ownership is staged before B; the reserved empty slot receives moves only.
+    SemanticInvocation staged;staged.origin=endpoint;staged.value=value;
     const std::scoped_lock lock(mutex_);
     if (closed_ || !readyGeneration_) return ScopeResult::NotReady;
-    if (!endpoint || endpoint->bridge.get() != this || endpoint->closed || !endpoint->generation) return ScopeResult::Stale;
+    if (!endpoint || endpoint->bridge.get() != this || endpoint->closed) return ScopeResult::Stale;
+    if(endpoint->Participant().Key().Type()==SemanticParticipantKey::Kind::RetainedNativeModule)
+        return endpoint->Participant().NativeLocallyLive()?ScopeResult::NotReady:ScopeResult::Stale;
+    if(!endpoint->ScriptGeneration())return ScopeResult::Stale;
     std::size_t index{};
     while (index < methods_.size() && methods_[index].id != method) ++index;
     if (index == methods_.size()) return ScopeResult::NotReady;
@@ -59,7 +94,7 @@ runtime::ScopeResult SemanticBridge::Request(const std::shared_ptr<SemanticEndpo
         // @summary Preserve the original invocation's facts atomically with native admission, rather than silently rebinding newer observations.
         const auto current=ValidateContextLocked(*endpoint,*expected);
         if(current!=ScopeResult::Ok)return current;
-        if(captured.baseEpoch!=expected->baseEpoch||captured.vmGeneration!=expected->vmGeneration||
+        if(captured.baseEpoch!=expected->baseEpoch||captured.participant!=expected->participant||
             captured.scopeGeneration!=expected->scopeGeneration||captured.runtimeEpoch!=expected->runtimeEpoch||
             (captured.mask&expected->mask)!=expected->mask)return ScopeResult::Stale;
         for(std::size_t i=0;i<captured.facts.size();++i)
@@ -71,22 +106,31 @@ runtime::ScopeResult SemanticBridge::Request(const std::shared_ptr<SemanticEndpo
     captured.operation=nextOperation_++;
     const auto admitted = endpoint->tasks->Admit(endpoint->context, value, methods_[index].maxResultBytes, output);
     if (admitted != ScopeResult::Ok) return admitted;
-    queue_[(first_ + count_) % queue_.size()] = {endpoint, output, value, endpoint->generation, epoch_, index,captured};
+    staged.task=output;staged.participant=endpoint->Participant().Key();staged.epoch=epoch_;staged.method=index;staged.context=captured;
+    queue_[(first_ + count_) % queue_.size()] = std::move(staged);
     ++count_; bytes_ += size;
     context=captured;
     return ScopeResult::Ok;
 }
 runtime::ScopeResult SemanticBridge::CaptureBinding(const std::shared_ptr<SemanticEndpoint>& endpoint,SemanticEndpointBinding& output) const {
+    // @summary Retain before clearing caller output, including a source borrowed from that same output.
+    const auto original=endpoint;
     output={};
     SemanticEndpointBinding captured;
+    // @summary Immutable strong ownership is staged off B; only scalar identity/authority is copied under B.
+    if(!original || !original->scope || !original->tasks)return runtime::ScopeResult::Stale;
+    captured.endpoint=original;captured.scope=original->scope;captured.tasks=original->tasks;
+    if(!original->Participant().ObserveOffGuardLifetime())return runtime::ScopeResult::Stale;
     {
         const std::scoped_lock lock(mutex_);
         if(closed_)return runtime::ScopeResult::Stale;
         if(!readyGeneration_)return runtime::ScopeResult::NotReady;
-        if(!endpoint||endpoint->closed||endpoint->bridge.get()!=this||!endpoint->scope||!endpoint->tasks||!endpoint->generation||
-            !std::any_of(endpoints_.begin(),endpoints_.end(),[&](const auto& entry){return !entry.owner_before(endpoint)&&!endpoint.owner_before(entry);}))
+        if(original->closed||original->bridge.get()!=this||
+            original->Participant().Key().Type()==SemanticParticipantKey::Kind::Unbound||
+            !std::any_of(endpoints_.begin(),endpoints_.end(),[&](const auto& entry){return !entry.owner_before(original)&&!original.owner_before(entry);}))
             return runtime::ScopeResult::Stale;
-        captured={endpoint,endpoint->scope,endpoint->tasks,endpoint->context,endpoint->generation,endpoint->storageOwner,epoch_,readyGeneration_};
+        captured.authority=original->context;captured.participant=original->Participant().Key();
+        captured.storageOwner=original->storageOwner;captured.baseEpoch=epoch_;captured.baseGeneration=readyGeneration_;
     }
     output=std::move(captured);return runtime::ScopeResult::Ok;
 }
@@ -94,14 +138,15 @@ runtime::ScopeResult SemanticBridge::ValidateBindingLocked(const std::shared_ptr
     if(closed_||!endpoint||endpoint->closed)return runtime::ScopeResult::Stale;
     if(!readyGeneration_)return runtime::ScopeResult::NotReady;
     if(expected.endpoint!=endpoint||endpoint->bridge.get()!=this||expected.scope!=endpoint->scope||expected.tasks!=endpoint->tasks||
-        expected.authority!=endpoint->context||expected.generation!=endpoint->generation||expected.storageOwner!=endpoint->storageOwner||
+        expected.authority!=endpoint->context||expected.participant!=endpoint->Participant().Key()||expected.storageOwner!=endpoint->storageOwner||
         expected.baseEpoch!=epoch_||expected.baseGeneration!=readyGeneration_)return runtime::ScopeResult::Stale;
     return runtime::ScopeResult::Ok;
 }
 bool SemanticBridge::Take(SemanticInvocation& output) {
+    SemanticInvocation retired;
     const std::scoped_lock lock(mutex_);
     if (closed_ || !readyGeneration_ || !count_) return false;
-    output = std::move(queue_[first_]); queue_[first_] = {};
+    retired=std::move(output);output = std::move(queue_[first_]); queue_[first_] = {};
     first_ = (first_ + 1) % queue_.size(); --count_; bytes_ -= output.value.Encode().size();
     return true;
 }
@@ -113,8 +158,9 @@ runtime::ScopeResult SemanticBridge::Dispatch(const SemanticInvocation& invocati
         if (closed_ || !readyGeneration_ || invocation.epoch != epoch_) return ScopeResult::Stale;
     }
     const auto& origin = invocation.origin;
-    if (!origin || origin->closed || origin->bridge.get() != this || !origin->generation ||
-        invocation.generation != origin->generation || invocation.method >= methods_.size()) return ScopeResult::Stale;
+    if(origin && origin->Participant().Key().Type()==SemanticParticipantKey::Kind::RetainedNativeModule)return ScopeResult::NotReady;
+    if (!origin || origin->closed || origin->bridge.get() != this || !origin->ScriptGeneration() ||
+        invocation.participant != origin->Participant().Key() || invocation.method >= methods_.size()) return ScopeResult::Stale;
     const auto& descriptor = methods_[invocation.method];
     if (descriptor.registryPublication) {
         origin->tasks->FinishUncommitted(invocation.task, ScopeResult::Denied);
@@ -135,8 +181,9 @@ runtime::ScopeResult SemanticBridge::DispatchPrepared(const SemanticInvocation& 
     mods::PatchRegistry& registry, mods::OwnedPublication& plan) {
     using runtime::ScopeResult;
     const auto& origin = invocation.origin;
+    if(origin && origin->Participant().Key().Type()==SemanticParticipantKey::Kind::RetainedNativeModule)return ScopeResult::NotReady;
     if (!origin || origin->bridge.get() != this || !origin->scope || !origin->tasks ||
-        origin->closed || !origin->generation || invocation.generation != origin->generation)
+        origin->closed || !origin->ScriptGeneration() || invocation.participant != origin->Participant().Key())
         return ScopeResult::Stale;
     if (origin->tasks->scope_.get() != origin->scope.get()) {
         // @summary Consume the original issuer-bound task without touching the mismatched scope or disclosing its data.
@@ -236,6 +283,9 @@ runtime::ScopeResult SemanticBridge::NextPublication(std::uint64_t& cursor, Sema
     return runtime::ScopeResult::Ok;
 }
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+std::array<std::uint64_t,3> SemanticBridgeTestAccess::ObserveQueue(const SemanticBridge& bridge){
+    const std::scoped_lock lock(bridge.mutex_);return {bridge.count_,bridge.bytes_,bridge.nextOperation_};
+}
 runtime::ScopeResult SemanticBridgeTestAccess::CaptureBinding(const SemanticBridge& bridge,const std::shared_ptr<SemanticEndpoint>& endpoint,SemanticEndpointBinding& output){
     return bridge.CaptureBinding(endpoint,output);
 }
@@ -255,7 +305,7 @@ void SemanticBridgeTestAccess::Configure(SemanticBridge& bridge, std::vector<Sem
     bridge.methods_ = std::move(methods);
 }
 void SemanticBridgeTestAccess::Issue(SemanticEndpoint& endpoint, runtime::OperationContext context) {
-    if (endpoint.generation || endpoint.closed) throw std::runtime_error("Endpoint already bound");
+    if (endpoint.ScriptGeneration() || endpoint.closed) throw std::runtime_error("Endpoint already bound");
     endpoint.context = context;
 }
 /** @summary Refresh only an existing original owner's binding through the authentic tracked reservation evaluator.
@@ -276,7 +326,7 @@ runtime::ScopeResult SemanticBridge::RefreshFixtureReservation(
     const auto matches=[&] {
         return origin->Current() && origin->endpoint_==endpoint && origin->scope_==scope &&
             endpoint->bridge.get()==this && endpoint->scope==scope && !endpoint->closed.load() &&
-            endpoint->generation && endpoint->generation==origin->generation_ &&
+            endpoint->ScriptGeneration() && endpoint->ScriptGeneration()==origin->generation_ &&
             endpoint->storageOwner && endpoint->context.owner==endpoint->storageOwner &&
             !closed_ && readyGeneration_ &&
             std::any_of(endpoints_.begin(),endpoints_.end(),[&](const auto& entry) {
@@ -339,7 +389,9 @@ void SemanticBridgeTestAccess::ObserveContext(SemanticBridge& bridge,SemanticCon
 runtime::ScopeResult SemanticBridge::ResolveContext(const SemanticEndpoint& endpoint,const SemanticMethod& method,
     const runtime::copied::Envelope& value,SemanticContextLease& output) const {
     using runtime::ScopeResult;
-    output={}; output.baseEpoch=epoch_;output.vmGeneration=endpoint.generation;
+    output={}; output.baseEpoch=epoch_;output.participant=endpoint.Participant().Key();
+    if(output.participant.Type()==SemanticParticipantKey::Kind::RetainedNativeModule){output={};return ScopeResult::NotReady;}
+    if(!endpoint.ScriptGeneration()){output={};return ScopeResult::Stale;}
     const auto scope=endpoint.scope->Current();output.scopeGeneration=scope.generation;output.runtimeEpoch=scope.epoch;
     // @summary This unit has no qualified game observer; fixture facts cannot turn into a production mutation provider.
     if (!method.context.empty()&&!singlePlayerKnown_) return ScopeResult::NotReady;
@@ -366,13 +418,21 @@ runtime::ScopeResult SemanticBridge::ValidateContext(const SemanticEndpoint& end
     return ValidateContextLocked(endpoint, lease);
 }
 runtime::ScopeResult SemanticBridge::ValidateContextLocked(const SemanticEndpoint& endpoint,const SemanticContextLease& lease) const noexcept {
-    if(closed_||!readyGeneration_||endpoint.closed||lease.baseEpoch!=epoch_||lease.vmGeneration!=endpoint.generation||!lease.mask)return runtime::ScopeResult::Stale;
+    if(endpoint.Participant().Key().Type()==SemanticParticipantKey::Kind::RetainedNativeModule){
+        if(closed_||!readyGeneration_||endpoint.closed||lease.baseEpoch!=epoch_||lease.participant!=endpoint.Participant().Key())return runtime::ScopeResult::Stale;
+        return endpoint.Participant().NativeLocallyLive()?runtime::ScopeResult::NotReady:runtime::ScopeResult::Stale;
+    }
+    if(closed_||!readyGeneration_||endpoint.closed||lease.baseEpoch!=epoch_||lease.participant!=endpoint.Participant().Key()||!lease.mask)return runtime::ScopeResult::Stale;
     if(!singlePlayerKnown_)return runtime::ScopeResult::NotReady;
     for(std::size_t i=0;i<contexts_.size();++i)if((lease.mask&(1U<<i))&&!(lease.facts[i]==contexts_[i]))return runtime::ScopeResult::Stale;
     return runtime::ScopeResult::Ok;
 }
 runtime::ScopeResult SemanticBridge::ContextFence(const SemanticEndpoint& endpoint,const SemanticContextLease& lease) const noexcept {
-    if(retiredStamp_.load()||endpoint.closed||lease.baseEpoch!=epoch_||lease.vmGeneration!=endpoint.generation||!lease.mask)return runtime::ScopeResult::Stale;
+    if(endpoint.Participant().Key().Type()==SemanticParticipantKey::Kind::RetainedNativeModule){
+        if(retiredStamp_.load()||endpoint.closed||lease.baseEpoch!=epoch_||lease.participant!=endpoint.Participant().Key())return runtime::ScopeResult::Stale;
+        return endpoint.Participant().NativeLocallyLive()?runtime::ScopeResult::NotReady:runtime::ScopeResult::Stale;
+    }
+    if(retiredStamp_.load()||endpoint.closed||lease.baseEpoch!=epoch_||lease.participant!=endpoint.Participant().Key()||!lease.mask)return runtime::ScopeResult::Stale;
     if(!singlePlayerStamp_.load())return runtime::ScopeResult::NotReady;
     for(std::size_t i=0;i<contextStamps_.size();++i)if((lease.mask&(1U<<i))&&lease.facts[i].epoch!=contextStamps_[i].load())return runtime::ScopeResult::Stale;
     return runtime::ScopeResult::Ok;

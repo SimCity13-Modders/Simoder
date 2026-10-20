@@ -3,6 +3,11 @@
 #include "runtime/runtime_scope.hpp"
 #include <filesystem>
 
+namespace sc13::mods::native {
+/** @summary Private adapter that verifies the original Base-owned semantic bridge. */
+class NativeProvider;
+}
+
 namespace sc13::scripting {
 class SemanticBridge;
 /** @summary Host-owned reviewed package identity; never load this pin from the package itself. */
@@ -38,6 +43,8 @@ public:
     bool Ready() const noexcept;
 private:
     friend class mods::ManagerPreparation;
+    /** @summary Stage the actual Base bridge off guards; friendship grants no operation permission. */
+    friend class mods::native::NativeProvider;
     /** @summary Actual copied package verification input; identity only, never publisher authorization. */
     BasePackagePin pin_;
     std::unique_ptr<ScriptRuntime> runtime_;

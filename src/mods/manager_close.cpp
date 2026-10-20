@@ -232,7 +232,7 @@ runtime::ScopeResult ManagerClose::CapturePreparation(Token& token,ManagerPrepar
     std::unique_lock<std::mutex> gate,records;
     auto result=BeginAction(action,gate,records);if(result!=ScopeResult::Ok)return result;
     if(plan.state_!=state || !plan.vm_ || !plan.scope_ || !plan.endpoint_ || !ManagerPreparation::OriginalBase(plan) ||
-        plan.endpoint_->scope!=plan.scope_ || plan.endpoint_->generation!=plan.vmGeneration_)return ScopeResult::Denied;
+        plan.endpoint_->scope!=plan.scope_ || plan.endpoint_->ScriptGeneration()!=plan.vmGeneration_)return ScopeResult::Denied;
     result=scripting::ScriptScheduler::InspectCloseTarget(action.scheduler,plan.vm_,plan.vmGeneration_,true);if(result!=ScopeResult::Ok)return result;
     if(state->retirement.sequence==UINT64_MAX)return ScopeResult::Denied;
     const auto generation=++state->retirement.sequence;
@@ -247,7 +247,7 @@ runtime::ScopeResult ManagerClose::SelectPrepared(PreparedRetirement& holder,std
     if(auto* plan=std::get_if<ManagerPreparation::Plan>(&holder.storage_)){
         if(plan->state_!=action.state || plan->vm_.get()!=target.vm || plan->vmGeneration_!=target.generation ||
             !ManagerPreparation::OriginalBase(*plan) || !plan->endpoint_ || plan->endpoint_->scope!=plan->scope_ ||
-            plan->endpoint_->generation!=target.generation)return ScopeResult::Denied;
+            plan->endpoint_->ScriptGeneration()!=target.generation)return ScopeResult::Denied;
         action.vm=plan->vm_;action.scope=plan->scope_;
         return scripting::ScriptScheduler::InspectCloseTarget(action.scheduler,action.vm,target.generation,true);
     }

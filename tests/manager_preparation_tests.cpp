@@ -156,7 +156,7 @@ return {onEnable=function() simoder.log('enable-original') end,
     Check(declarations.size()==1 && declarations[0].properties.size()==1,"set clear reducer parity");
     Check(declarations[0].properties[0].propertyId==0x89ABCDEEU && declarations[0].properties[0].value==32,"exact staged result");
     auto vm=Access::Vm(plan);
-    const auto winningGeneration=Access::Endpoint(plan)->generation;
+    const auto winningGeneration=Access::Endpoint(plan)->ScriptGeneration();
     Check(!vm->Status().running,"prepared status never operational");
     Check(vm->DrainLogs().empty(),"public log drain keeps preparation private");
     const auto logs=Access::StagedLogs(plan);Check(logs.size()==2 && logs[0]=="entry-original" && logs[1]=="enable-original","captured bytes used");

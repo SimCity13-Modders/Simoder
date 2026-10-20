@@ -46,7 +46,7 @@ runtime::ScopeResult ManagerPreparation::Current(const Plan& plan) {
         !plan.baseGeneration_ || !plan.base_->Ready())return ScopeResult::Stale;
     {
         std::unique_lock vm(plan.vm_->mutex_,std::try_to_lock);if(!vm.owns_lock())return ScopeResult::Busy;
-        if(plan.vm_->vmGeneration_!=plan.vmGeneration_ || plan.endpoint_->generation!=plan.vmGeneration_ ||
+        if(plan.vm_->vmGeneration_!=plan.vmGeneration_ || plan.endpoint_->ScriptGeneration()!=plan.vmGeneration_ ||
             plan.vm_->host_.semantic!=plan.endpoint_ || !plan.vm_->preparation_ || plan.vm_->committed_ ||
             plan.vm_->sealed_ || !plan.vm_->running_ || plan.vm_->stopRequested_ || !plan.vm_->state_)return ScopeResult::Stale;
     }

@@ -145,7 +145,7 @@ void ExecutionLeases(const std::filesystem::path& package){
     Fixture f(package);const auto first=f.Invoke(AllFacts),second=f.Invoke(AllFacts);
     const auto firstInfo=f.Observe(first),secondInfo=f.Observe(second);auto a=f.Take(),b=f.Take();
     Check(a.context.operation&&b.context.operation&&a.context.operation!=b.context.operation&&a.context.mask==15&&b.context.mask==15&&
-        a.context.facts==b.context.facts&&a.context.vmGeneration==b.context.vmGeneration&&a.context.baseEpoch==b.context.baseEpoch&&
+        a.context.facts==b.context.facts&&a.context.participant==b.context.participant&&a.context.baseEpoch==b.context.baseEpoch&&
         a.context.scopeGeneration==b.context.scopeGeneration&&a.context.runtimeEpoch==b.context.runtimeEpoch&&!Same(firstInfo.context,secondInfo.context),
         "complete equal facts with distinct original operations receive distinct observation identities");
     Check(f.bridge->Dispatch(a,"fixture.echo",a.value)==ScopeResult::Ok&&f.bridge->Dispatch(b,"fixture.echo",b.value)==ScopeResult::Conflict&&
@@ -183,7 +183,7 @@ void Outcomes(const std::filesystem::path& package){
 /** @summary Test all four input-added facts, authorization loss and original full binding replacement before delivery. @param package Actual Base. */
 void Fences(const std::filesystem::path& package){
     for(unsigned kind=0;kind!=4;++kind){Fixture f(package);auto task=f.Invoke(AllFacts);auto queued=f.Take();
-        Check(queued.context.mask==15&&queued.context.operation&&queued.context.vmGeneration==f.endpoint->generation&&
+        Check(queued.context.mask==15&&queued.context.operation&&queued.context.participant.ScriptGeneration()==f.endpoint->ScriptGeneration()&&
             queued.context.baseEpoch==f.bridge->Epoch()&&queued.context.scopeGeneration==f.scope->Current().generation&&
             queued.context.runtimeEpoch==f.scope->Current().epoch,"full original request lease retains all identities");
         for(unsigned i=0;i!=4;++i)Check(queued.context.facts[i].slot==i+1&&queued.context.facts[i].generation==1&&queued.context.facts[i].epoch,"all original fact members retained");

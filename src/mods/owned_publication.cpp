@@ -66,7 +66,7 @@ PublicationOrigin::PublicationOrigin(std::shared_ptr<scripting::ScriptRuntime> r
     std::shared_ptr<scripting::SemanticEndpoint> endpoint, std::string fingerprint)
     : runtime_(std::move(runtime)), endpoint_(std::move(endpoint)), fingerprint_(std::move(fingerprint)) {
     if (!runtime_ || !endpoint_ || !endpoint_->scope || !endpoint_->tasks ||
-        runtime_->host_.semantic != endpoint_ || runtime_->vmGeneration_ != endpoint_->generation || fingerprint_.empty())
+        runtime_->host_.semantic != endpoint_ || runtime_->vmGeneration_ != endpoint_->ScriptGeneration() || fingerprint_.empty())
         throw std::invalid_argument("Publication origin does not match the loaded VM");
     scope_ = endpoint_->scope; definition_ = runtime_->loadedDefinition_;
     if (!definition_) throw std::invalid_argument("Publication origin has no loaded semantic snapshot");
@@ -76,7 +76,7 @@ PublicationOrigin::PublicationOrigin(std::shared_ptr<scripting::ScriptRuntime> r
 bool PublicationOrigin::Current() const noexcept {
     return runtime_ && endpoint_ && scope_ && definition_ && incarnation_ &&
         runtime_->vmGeneration_ == generation_ && runtime_->loadedDefinition_ == definition_ &&
-        runtime_->host_.semantic == endpoint_ && endpoint_->scope == scope_ && endpoint_->generation == generation_;
+        runtime_->host_.semantic == endpoint_ && endpoint_->scope == scope_ && endpoint_->ScriptGeneration() == generation_;
 }
 bool OwnedPublication::PreparePatches(const PublicationOrigin& origin,PatchRegistry& registry,
     const std::shared_ptr<const std::vector<ResourcePatchDefinition>>& baseline,
@@ -120,10 +120,10 @@ runtime::ScopeResult OwnedPublication::Validate(const scripting::SemanticInvocat
         return ScopeResult::Stale;
     const auto& captured = invocation_;
     if (invocation.origin != origin_->endpoint_ || invocation.origin != captured.origin ||
-        invocation.task != captured.task || invocation.generation != captured.generation ||
+        invocation.task != captured.task || invocation.participant != captured.participant ||
         invocation.epoch != captured.epoch || invocation.method != captured.method ||
         invocation.context.facts != captured.context.facts || invocation.context.mask != captured.context.mask ||
-        invocation.context.operation != captured.context.operation || invocation.context.vmGeneration != captured.context.vmGeneration ||
+        invocation.context.operation != captured.context.operation || invocation.context.participant != captured.context.participant ||
         invocation.context.baseEpoch != captured.context.baseEpoch || invocation.context.scopeGeneration != captured.context.scopeGeneration ||
         invocation.context.runtimeEpoch != captured.context.runtimeEpoch || !invocation.value ||
         invocation.value.Schema()!=captured.value.Schema() || invocation.value.Encode() != wire_)
@@ -219,7 +219,7 @@ runtime::ScopeResult OwnerLifecycle::ValidatePreparationLocked(const std::shared
         origin->phase_!=expected || origin->runtime_->preparation_!=(expected==PublicationOrigin::Phase::Candidate) ||
         !ManagerPreparation::OriginalBase(proof) || origin->definition_!=proof.loaded_ || origin->scope_!=proof.scope_ ||
         origin->endpoint_->scope!=proof.scope_ || &origin->scope_->stateDomain()!=proof.domain_.get() ||
-        origin->endpoint_->generation!=proof.vmGeneration_ ||
+        origin->endpoint_->ScriptGeneration()!=proof.vmGeneration_ ||
         origin->runtime_->preparationProof_!=proof.promotion_ ||
         origin->runtime_->vmGeneration_!=proof.vmGeneration_ || origin->endpoint_!=proof.endpoint_ ||
         bridge.closed_ || bridge.readyGeneration_!=proof.baseGeneration_ || bridge.epoch_!=proof.baseEpoch_ ||

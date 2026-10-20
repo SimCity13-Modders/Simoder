@@ -6,8 +6,20 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include <variant>
 
 namespace sc13::mods::native {
+/** @summary Typed outer owner; genuine script ownership never enters an endpoint or native State. */
+class ProviderParticipant final {
+public:
+    /** @summary Retain one genuine existing VM outside guards. @param runtime Original script runtime. */
+    ProviderParticipant(std::shared_ptr<scripting::ScriptRuntime> runtime):lifetime_(std::move(runtime)){}
+    /** @summary Retain an original loader-issued State outside guards. @param participant Original native participant. */
+    ProviderParticipant(const NativeParticipant& participant):lifetime_(participant){}
+private:
+    std::variant<std::shared_ptr<scripting::ScriptRuntime>,NativeParticipant> lifetime_;
+    friend class NativeProvider;
+};
 /** @summary Private captured route; only a qualified host producer may construct production inputs. */
 struct ProviderRoute final {
     std::uint32_t method{};
@@ -24,12 +36,15 @@ public:
      * @param owner Existing loader owner. @param base Actual verified Base instance.
      * @param endpoint Actual bound participant, never a fabricated native VM.
      * @param participant Original participant lifetime. @param lifecycle Original factual publisher.
-     * @param session Already verified private session mapping, zero only for ordinary native role.
+     * @param session Already verified private session mapping; zero never upgrades an unqualified native participant.
      * @param routes Host-reviewed method/target/context mapping; empty in ordinary unqualified construction. */
     NativeProvider(SdHandle owner, std::shared_ptr<scripting::BaseHost> base,
-        std::shared_ptr<scripting::SemanticEndpoint> endpoint, std::shared_ptr<void> participant,
+        std::shared_ptr<scripting::SemanticEndpoint> endpoint, ProviderParticipant participant,
         std::shared_ptr<runtime::RuntimeLifecycle> lifecycle, SdHandle session,
         std::vector<ProviderRoute> routes);
+    /** @summary Construct only a closed native adapter from exact State-owned lifetimes; no routes or grants.
+     * @param base Actual verified Base host. @param participant Original loader-issued participant. */
+    NativeProvider(std::shared_ptr<scripting::BaseHost> base,const NativeParticipant& participant);
     /** @summary Closes admission and preserves owner/task dependencies until original cleanup. */
     ~NativeProvider();
     NativeProvider(const NativeProvider&) = delete;
@@ -70,6 +85,13 @@ public:
     /** @summary Closes this adapter and stops original scope without invoking foreign code. */
     void Close() noexcept;
 private:
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct NativeProviderTestAccess;
+#endif
+    /** @summary Derive one endpoint from the actual Base and original State, off guards.
+     * @param base Verified original Base host. @param participant Actual retained State. @return Closed native endpoint. */
+    static std::shared_ptr<scripting::SemanticEndpoint> NativeEndpoint(const std::shared_ptr<scripting::BaseHost>& base,
+        const NativeParticipant& participant);
     struct State;
     std::unique_ptr<State> state_;
     /** @summary Reuses the sole original grant evaluator under try-only Q. @return Current admission. */
@@ -80,6 +102,9 @@ private:
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 /** @summary Fresh-process exhaustion witness, unavailable in production and incapable of restoring issued identities. */
 struct NativeProviderTestAccess final {
+    /** @summary Retain the actual already constructed endpoint off guards; never construct an identity or issue authority.
+     * @param provider Original adapter. @return Its exact immutable endpoint. */
+    static std::shared_ptr<scripting::SemanticEndpoint> Endpoint(const NativeProvider& provider);
     /** @summary Burn an entirely unused allocator to its first rejected width; no arbitrary seed or reset.
      * @return True only before any provider block has ever been issued in this process. */
     static bool ExhaustBlockRange() noexcept;

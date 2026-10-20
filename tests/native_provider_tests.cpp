@@ -66,7 +66,7 @@ void BindingRace(const std::filesystem::path& package){
         case 15:++std::get<runtime::AgentOrigin>(changed.authority.origin).actor;break;case 16:++std::get<runtime::AgentOrigin>(changed.authority.origin).channel;break;
         case 17:++std::get<runtime::AgentOrigin>(changed.authority.origin).consentSession;break;case 18:++std::get<runtime::AgentOrigin>(changed.authority.origin).entity;break;
         case 19:++std::get<runtime::AgentOrigin>(changed.authority.origin).extent;break;case 20:changed.scope.reset();break;case 21:changed.tasks.reset();break;
-        case 22:changed.endpoint.reset();break;case 23:++changed.generation;break;case 24:++changed.storageOwner;break;
+        case 22:changed.endpoint.reset();break;case 23:changed.participant={}; /* @summary Unbound tag cannot substitute for an actual VM. */;break;case 24:++changed.storageOwner;break;
         case 25:++changed.baseEpoch;break;case 26:++changed.baseGeneration;break;}
         rejects(changed);
     }
@@ -141,7 +141,7 @@ void ContextRace(const std::filesystem::path& package){
         scripting::SemanticInvocation queued;Check(!bridge->Take(queued),"rejection did not publish queue");
     };
     for(int field=0;field!=7;++field){auto altered=expected;
-        switch(field){case 0:++altered.baseEpoch;break;case 1:++altered.vmGeneration;break;case 2:++altered.scopeGeneration;break;
+        switch(field){case 0:++altered.baseEpoch;break;case 1:altered.participant={}; /* @summary Reject an unbound key substituted into an actual VM lease. */;break;case 2:++altered.scopeGeneration;break;
         case 3:++altered.runtimeEpoch;break;case 4:++altered.facts[0].slot;break;case 5:++altered.facts[0].generation;break;case 6:++altered.facts[0].epoch;break;}
         rejects(altered,null);
     }
@@ -196,7 +196,7 @@ void Exercise(const std::filesystem::path& package){
     scripting::ScriptDefinition definition;definition.entry="scripts/init.luau";definition.budgetMs=20;
     definition.bytecode=scripting::CompileLuauSource("return {}");
     auto participant=std::make_shared<scripting::ScriptRuntime>("fixture.native-provider-adapter",definition,std::move(host));participant->Commit();
-    Check(endpoint->generation==participant->Status().generation&&endpoint->generation!=0,"actual VM identity");
+    Check(endpoint->ScriptGeneration()==participant->Status().generation&&endpoint->ScriptGeneration()!=0,"actual VM identity");
     runtime::copied::Envelope reference;
     Check(bridge->Values()->Decode("{\"v\":1,\"schema\":\"test.echo@1\",\"value\":[\"ref\",\"runtime\",\"1\",\"1\"]}","test.echo@1",endpoint->storageOwner,reference)==runtime::copied::Status::Ok,"reference codec");
     scripting::SemanticContextLease lease;

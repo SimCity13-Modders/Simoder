@@ -824,7 +824,7 @@ void OwnedBaselineSequence(const std::filesystem::path& package) {
         bool rejected{};
         try {ScriptRuntime excessive("fixture.owner",oversized,binding);}
         catch(const std::runtime_error&) {rejected=true;}
-        Check(rejected && endpoint->generation==0 && bridge->Values()->Used(endpoint->storageOwner)==before,
+        Check(rejected && endpoint->ScriptGeneration()==0 && bridge->Values()->Used(endpoint->storageOwner)==before,
             "failed semantic snapshot leaked quota or bound a VM generation");
     }
     auto vm=std::make_shared<ScriptRuntime>("fixture.owner",definition,std::move(binding)); vm->Commit();

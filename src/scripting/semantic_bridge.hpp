@@ -1,5 +1,6 @@
 #pragma once
 #include "runtime/semantic_tasks.hpp"
+#include "scripting/semantic_participant.hpp"
 #include <array>
 #include <atomic>
 #include <functional>
@@ -25,7 +26,8 @@ struct SemanticContextFact final {
 /** @summary Private bound context lease; a decoded reference alone cannot construct one. */
 struct SemanticContextLease final {
     std::array<SemanticContextFact,4> facts{};
-    std::uint64_t vmGeneration{},baseEpoch{};
+    SemanticParticipantKey participant;
+    std::uint64_t baseEpoch{};
     std::uint64_t operation{};
     std::uint64_t scopeGeneration{},runtimeEpoch{};
     std::uint8_t mask{};
@@ -51,9 +53,16 @@ struct SemanticEndpoint final {
     std::shared_ptr<runtime::SemanticTasks> tasks;
     std::shared_ptr<runtime::RuntimeScope> scope;
     runtime::OperationContext context;
-    std::uint64_t generation{}, storageOwner{};
+    std::uint64_t storageOwner{};
     std::atomic_bool closed{};
     runtime::copied::Reservation accounting;
+    /** @summary Project a genuine script VM after original publication. @return Actual VM generation, otherwise zero. */
+    std::uint64_t ScriptGeneration() const noexcept { return participant_.ScriptGeneration(); }
+    /** @summary Borrow immutable identity; initial publication is serialized by original B. @return Sole participant. */
+    const SemanticParticipant& Participant() const noexcept { return participant_; }
+private:
+    SemanticParticipant participant_;
+    friend class SemanticBridge;
 };
 /** @summary Copied immutable host binding captured under original B; identities never issue authority. */
 struct SemanticEndpointBinding final {
@@ -61,7 +70,8 @@ struct SemanticEndpointBinding final {
     std::shared_ptr<runtime::RuntimeScope> scope;
     std::shared_ptr<runtime::SemanticTasks> tasks;
     runtime::OperationContext authority;
-    std::uint64_t generation{},storageOwner{},baseEpoch{},baseGeneration{};
+    SemanticParticipantKey participant;
+    std::uint64_t storageOwner{},baseEpoch{},baseGeneration{};
     bool operator==(const SemanticEndpointBinding&) const = default;
 };
 /** @summary Bounded copied request crosses VM boundaries without entering another interpreter inline. */
@@ -69,7 +79,8 @@ struct SemanticInvocation final {
     std::shared_ptr<SemanticEndpoint> origin;
     runtime::TaskHandle task;
     runtime::copied::Envelope value;
-    std::uint64_t generation{}, epoch{};
+    SemanticParticipantKey participant;
+    std::uint64_t epoch{};
     std::size_t method{};
     SemanticContextLease context;
 };
@@ -78,7 +89,8 @@ class SemanticBridge final : public std::enable_shared_from_this<SemanticBridge>
 public:
     /** @summary Creates an unavailable transport with one shared copied-storage pool. */
     SemanticBridge();
-    /** @summary Creates a native endpoint; no context or provider is issued. @param scope Original native scope. @return Closed-authority endpoint. */
+    /** @summary Creates an unbound endpoint for once-only genuine VM publication; a scope alone is never native identity.
+     * @param scope Original script scope. @return Unbound closed-authority endpoint. */
     std::shared_ptr<SemanticEndpoint> Bind(std::shared_ptr<runtime::RuntimeScope> scope);
     /** @summary Reserves the single originating task and copied invocation before enqueue. @param endpoint Calling VM's immutable binding. @param method Reviewed catalog name. @param value Copied input. @param output Receives opaque retained task. @param context Cleared captured facts on rejection. @param expected Optional original factual context. @param binding Optional complete original authority binding. Both expected captures are checked under original B and never retained. @return Admission status. */
     runtime::ScopeResult Request(const std::shared_ptr<SemanticEndpoint>& endpoint, std::string_view method,
@@ -120,12 +132,22 @@ public:
      * @return Ok, NotReady for no newer publication, or Conflict when the bounded history was overrun. */
     runtime::ScopeResult NextPublication(std::uint64_t& cursor, SemanticPublication& output) const noexcept;
 private:
+    friend class SemanticLua;
     friend class mods::native::NativeProvider;
     friend class mods::ManagerCommands;
     friend class ScriptRuntime;
     friend class mods::OwnerLifecycle;
+    /** @summary Publish a genuine scheduler-reserved VM key exactly once under B.
+     * @param endpoint Original unpublished endpoint. @param runtime Genuine constructing VM. @return Initial transition only. */
+    bool InitializeScript(const std::shared_ptr<SemanticEndpoint>& endpoint,const ScriptRuntime& runtime) noexcept;
+    /** @summary Build a closed endpoint from original State lifetimes outside guards.
+     * @param participant Actual loader-issued retained State. @return Closed-authority original endpoint. */
+    std::shared_ptr<SemanticEndpoint> BindNative(const mods::native::NativeParticipant& participant);
+    /** @summary Register one preallocated endpoint; weak-holder disposal occurs after unlock.
+     * @param endpoint Fully staged original endpoint. @return Same registered endpoint. */
+    std::shared_ptr<SemanticEndpoint> Register(std::shared_ptr<SemanticEndpoint> endpoint);
     /** @summary Copies a complete original binding under B, without granting rights or retaining caller output.
-     * @pre Once-only endpoint VM identity initialization happens-before capture; subsequent authority replacement uses original B.
+     * @pre Immutable ownership staging happens off guards; initial participant publication and authority replacement use original B.
      * @param endpoint Original registered endpoint. @param output Cleared copied ownership.
      * @return Explicit factual availability, never operation authority. */
     runtime::ScopeResult CaptureBinding(const std::shared_ptr<SemanticEndpoint>& endpoint,SemanticEndpointBinding& output) const;
@@ -170,6 +192,9 @@ private:
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
 /** @summary Fixture catalog and authority binding exist only in the separately compiled test host. */
 struct SemanticBridgeTestAccess final {
+    /** @summary Copy bounded original queue counters without altering admission.
+     * @param bridge Original bridge. @return Count, wire bytes and next operation serial under the same B. */
+    static std::array<std::uint64_t,3> ObserveQueue(const SemanticBridge& bridge);
     /** @summary Copies actual original binding only in isolated fixtures; no authority is issued.
      * @param bridge Original bridge. @param endpoint Actual registered VM. @param output Cleared tuple.
      * @return Factual capture result. */

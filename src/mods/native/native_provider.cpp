@@ -49,6 +49,9 @@ template<class T> SdResult Clear(T* output) noexcept {
 }
 /** @summary Fixed bounded public references retain original endpoints, task issuers and copied pool charges. */
 struct NativeProvider::State final {
+    /** @summary Retain the exact typed outer lifetime before any protected operation.
+     * @param participant Genuine original VM or State. */
+    explicit State(ProviderParticipant participant):participant(std::move(participant)){}
     /** @summary Retains a single immutable route, independent of caller-selected IDs. */
     struct Invocation final { std::size_t route{}; };
     /** @summary Retains the original task issuer/context and its original invocation through cleanup. */
@@ -64,7 +67,7 @@ struct NativeProvider::State final {
     SdHandle owner{},session{};
     std::shared_ptr<scripting::BaseHost> base;
     std::shared_ptr<scripting::SemanticEndpoint> endpoint;
-    std::shared_ptr<void> participant;
+    ProviderParticipant participant;
     std::shared_ptr<runtime::RuntimeLifecycle> lifecycle;
     scripting::SemanticEndpointBinding binding;
     std::vector<ProviderRoute> routes;
@@ -110,15 +113,33 @@ struct NativeProvider::State final {
 };
 
 NativeProvider::NativeProvider(SdHandle owner,std::shared_ptr<scripting::BaseHost> base,
-    std::shared_ptr<scripting::SemanticEndpoint> endpoint,std::shared_ptr<void> participant,
+    std::shared_ptr<scripting::SemanticEndpoint> endpoint,ProviderParticipant participant,
     std::shared_ptr<runtime::RuntimeLifecycle> lifecycle,SdHandle session,std::vector<ProviderRoute> routes)
-    :state_(std::make_unique<State>()) {
-    if(!Present(owner)||!base||!endpoint||!endpoint->bridge||!participant||!lifecycle||routes.size()>64)
+    :state_(std::make_unique<State>(std::move(participant))) {
+    if(!Present(owner)||!base||!endpoint||!endpoint->bridge||base->bridge_!=endpoint->bridge||routes.size()>64)
         throw std::invalid_argument("Invalid native provider capture");
     auto& s=*state_;s.owner=owner;s.session=session;s.base=std::move(base);s.endpoint=std::move(endpoint);
-    s.participant=std::move(participant);s.lifecycle=std::move(lifecycle);
+    if(const auto* script=std::get_if<std::shared_ptr<scripting::ScriptRuntime>>(&s.participant.lifetime_)) {
+        if(!*script || (*script)->host_.semantic!=s.endpoint || !(*script)->vmGeneration_ ||
+            (*script)->stopRequested_.load() || !lifecycle)throw std::invalid_argument("Invalid script participant");
+    } else {
+        const auto& native=std::get<NativeParticipant>(s.participant.lifetime_);
+        std::shared_ptr<runtime::RuntimeScope> originalScope;std::shared_ptr<runtime::RuntimeLifecycle> originalLifecycle;
+        const auto identity=native.ObserveLocalFence().identity;
+        if(!native.StageLifetime(originalScope,originalLifecycle) || originalScope!=s.endpoint->scope ||
+            !s.endpoint->Participant().Matches(native) || !Same(owner,identity.owner) ||
+            (lifecycle && lifecycle!=originalLifecycle) || Present(session) || session.slot || session.generation || !routes.empty())
+            throw std::invalid_argument("Invalid native participant");
+        lifecycle=std::move(originalLifecycle);
+    }
+    s.lifecycle=std::move(lifecycle);
     if(s.endpoint->bridge->CaptureBinding(s.endpoint,s.binding)!=runtime::ScopeResult::Ok)
         throw std::invalid_argument("Unavailable native provider binding");
+    if(const auto* script=std::get_if<std::shared_ptr<scripting::ScriptRuntime>>(&s.participant.lifetime_)) {
+        if(s.binding.participant.ScriptGeneration()!=(*script)->vmGeneration_)throw std::invalid_argument("Mismatched script identity");
+    } else if(s.binding.participant.Type()!=scripting::SemanticParticipantKey::Kind::RetainedNativeModule ||
+        !std::holds_alternative<runtime::UnqualifiedOrigin>(s.binding.authority.origin) || s.binding.authority.reservation)
+        throw std::invalid_argument("Native authority is unavailable");
     std::size_t bytes=sizeof(State)+Slots*(sizeof(State::Invocation)+sizeof(State::Task)+128)+routes.capacity()*sizeof(ProviderRoute);
     for(std::size_t i=0;i<routes.size();++i){
         const auto& route=routes[i];
@@ -133,6 +154,13 @@ NativeProvider::NativeProvider(SdHandle owner,std::shared_ptr<scripting::BaseHos
         throw std::runtime_error("Native provider storage exhausted");
     s.routes=std::move(routes);s.block=Block();
 }
+std::shared_ptr<scripting::SemanticEndpoint> NativeProvider::NativeEndpoint(const std::shared_ptr<scripting::BaseHost>& base,
+    const NativeParticipant& participant) {
+    if(!base || !base->bridge_)throw std::invalid_argument("Unavailable native Base");
+    return base->bridge_->BindNative(participant);
+}
+NativeProvider::NativeProvider(std::shared_ptr<scripting::BaseHost> base,const NativeParticipant& participant)
+    :NativeProvider(participant.ObserveLocalFence().identity.owner,base,NativeEndpoint(base,participant),participant,{}, {}, {}){}
 NativeProvider::~NativeProvider(){Close();}
 SdResult NativeProvider::Map(runtime::ScopeResult result) noexcept {
     using runtime::ScopeResult;
@@ -144,6 +172,7 @@ SdResult NativeProvider::Map(runtime::ScopeResult result) noexcept {
 }
 runtime::ScopeResult NativeProvider::CheckAuthority() const {
     const auto facts=CheckFacts();if(facts!=runtime::ScopeResult::Ok)return facts;
+    if(state_->binding.participant.Type()==scripting::SemanticParticipantKey::Kind::RetainedNativeModule)return runtime::ScopeResult::NotReady;
     runtime::RuntimeScope::LifecycleGuard guard(*state_->binding.scope);
     return guard.Check(state_->binding.authority,false);
 }
@@ -158,7 +187,9 @@ runtime::ScopeResult NativeProvider::CheckFacts() const {
 }
 SdResult NativeProvider::Bind(SdHandle owner,SdHandle session,std::uint32_t method,SdHandle target,std::uint64_t revision,SdHandle* output) noexcept try {
     if(output)*output={};if(!output)return SD_INVALID;auto& s=*state_;
-    if(!Same(owner,s.owner))return SD_DENIED;if(!s.Role(session))return SD_DENIED;
+    if(!Same(owner,s.owner))return SD_DENIED;
+    if(s.binding.participant.Type()==scripting::SemanticParticipantKey::Kind::RetainedNativeModule)return Map(CheckAuthority());
+    if(!s.Role(session))return SD_DENIED;
     if(target.slot>=s.block+2*Slots&&target.slot<s.block+BlockWidth)return SD_STALE;
     const auto auth=CheckAuthority();if(auth!=runtime::ScopeResult::Ok)return Map(auth);
     if(revision!=s.binding.authority.revision)return SD_CONFLICT;
@@ -171,7 +202,9 @@ SdResult NativeProvider::Bind(SdHandle owner,SdHandle session,std::uint32_t meth
 }catch(...){if(output)*output={};return SD_OPERATION_FAILED;}
 SdResult NativeProvider::Invoke(SdHandle owner,SdHandle invocation,std::uint32_t method,SdBytes input,SdHandle* output) noexcept try {
     if(output)*output={};if(!output||(!input.data&&input.size))return SD_INVALID;auto& s=*state_;
-    if(!Same(owner,s.owner))return SD_DENIED;auto origin=s.Find(s.invocations,invocation,0);if(!origin)return SD_STALE;
+    if(!Same(owner,s.owner))return SD_DENIED;
+    if(s.binding.participant.Type()==scripting::SemanticParticipantKey::Kind::RetainedNativeModule)return Map(CheckAuthority());
+    auto origin=s.Find(s.invocations,invocation,0);if(!origin)return SD_STALE;
     const auto auth=CheckAuthority();if(auth!=runtime::ScopeResult::Ok)return Map(auth);
     const auto& route=s.routes[origin->route];if(route.method!=method)return SD_DENIED;
     const auto facts=s.endpoint->bridge->ValidateContext(*s.endpoint,route.context);if(facts!=runtime::ScopeResult::Ok)return Map(facts);
@@ -263,6 +296,7 @@ SdResult NativeProvider::ReleaseInvocation(SdHandle owner,SdHandle invocation) n
 }catch(...){return SD_OPERATION_FAILED;}
 void NativeProvider::Close() noexcept {if(state_&&!state_->closed.exchange(true))state_->binding.scope->RequestStop();}
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+std::shared_ptr<scripting::SemanticEndpoint> NativeProviderTestAccess::Endpoint(const NativeProvider& provider){return provider.state_->endpoint;}
 bool NativeProviderTestAccess::ExhaustBlockRange() noexcept {
     std::uint32_t unused=1;
     return nextBlock.compare_exchange_strong(unused,UINT32_MAX-BlockWidth+1);

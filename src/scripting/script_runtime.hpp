@@ -20,6 +20,7 @@
 #include "mods/action_worker.hpp"
 
 struct lua_State;
+namespace sc13::mods::native { class NativeProvider; }
 namespace sc13::mods { class ModManager; class ManagerClose; struct ManagerCloseTestAccess; struct ManagerPreparationTestAccess; class ManagerPreparation; class ManagerPublication; class PublicationOrigin; class OwnedPublication; class OwnerLifecycle; struct OwnerLifecycleTestAccess; }
 namespace sc13::scripting {
 /** @summary Native scheduler close witnesses; not a VM retirement or resource release certificate. */
@@ -115,6 +116,9 @@ public:
     /** @summary Stops callbacks and records a host transaction failure while retaining the last committed overrides. */
     void Fail(std::string diagnostic);
 private:
+    friend class SemanticParticipant;
+    friend class SemanticBridge;
+    friend class mods::native::NativeProvider;
     friend class mods::ManagerCommands;
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
     friend struct mods::ManagerCommandsTestAccess;

@@ -98,6 +98,7 @@ src/mods/state_path_writer.cpp
     src/scripting/script_runtime.cpp
     src/scripting/base_host.cpp
     src/scripting/semantic_bridge.cpp
+    src/scripting/semantic_participant.cpp
     src/mods/owned_publication.cpp
     src/scripting/semantic_lua.cpp
     src/scripting/script_patch_reducer.cpp
@@ -259,6 +260,10 @@ if(SC13_BUILD_TESTS)
     add_executable(simoder-semantic-bridge-tests tests/semantic_bridge_tests.cpp)
     target_link_libraries(simoder-semantic-bridge-tests PRIVATE sc13-semantic-test-support)
     sc13_enable_warnings(simoder-semantic-bridge-tests)
+    # @summary Qualify genuine script participant identity without native image execution.
+    add_executable(simoder-semantic-participant-tests tests/semantic_participant_tests.cpp)
+    target_link_libraries(simoder-semantic-participant-tests PRIVATE sc13-semantic-test-support)
+    sc13_enable_warnings(simoder-semantic-participant-tests)
     if(SC13_BASE_SOURCE_DIR)
         # @summary Qualify the actual closed native adapter through the existing Base/scope fixture path.
         add_executable(simoder-native-provider-tests tests/native_provider_tests.cpp)
@@ -343,6 +348,8 @@ if(SC13_BUILD_TESTS)
         set_tests_properties(simoder-joint-publication-tests PROPERTIES TIMEOUT 60)
         add_test(NAME simoder-semantic-bridge-tests COMMAND simoder-semantic-bridge-tests "${SC13_BASE_SOURCE_DIR}")
         set_tests_properties(simoder-semantic-bridge-tests PROPERTIES TIMEOUT 60)
+        add_test(NAME simoder-semantic-participant-tests COMMAND simoder-semantic-participant-tests script "${SC13_BASE_SOURCE_DIR}")
+        set_tests_properties(simoder-semantic-participant-tests PROPERTIES TIMEOUT 90)
     endif()
     # @summary Exercise verified private base hosting without production service readiness.
     add_executable(simoder-base-host-tests tests/base_host_tests.cpp)

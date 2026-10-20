@@ -2,6 +2,7 @@
 
 #include "mods/native/native_module_loader.hpp"
 
+namespace sc13::scripting { class SemanticBridge; class SemanticParticipant; }
 namespace sc13::mods::native {
 /** @summary Immutable original identity scalars; never an authorization or VM generation. */
 struct NativeParticipantIdentity final {
@@ -36,10 +37,18 @@ public:
      * @param other Already retained original participant. @return True only for the same State. */
     bool SameIdentity(const NativeParticipant& other) const noexcept;
 private:
+    /** @summary Stage actual State-owned lifetimes off guards, never caller-selected replacement scopes.
+     * @param scope Empty original scope output. @param lifecycle Empty original lifecycle output.
+     * @return False for a known stopped or unsuccessful original participant. */
+    bool StageLifetime(std::shared_ptr<runtime::RuntimeScope>& scope,
+        std::shared_ptr<runtime::RuntimeLifecycle>& lifecycle) const;
     /** @summary Wraps only a successfully prepared original State outside guards.
      * @param state Exact process-retained loader generation. */
     explicit NativeParticipant(std::shared_ptr<NativeModule::State> state) noexcept;
     std::shared_ptr<NativeModule::State> state_;
     friend class NativeModule;
+    friend class NativeProvider;
+    friend class sc13::scripting::SemanticBridge;
+    friend class sc13::scripting::SemanticParticipant;
 };
 }

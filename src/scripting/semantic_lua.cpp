@@ -46,8 +46,8 @@ struct SemanticLua::Task final { std::shared_ptr<TaskLease> lease; std::uint64_t
 struct SemanticLua::Invocation final { SemanticInvocation value; bool consumed{}; };
 SemanticLua::SemanticLua(ScriptRuntime& runtime,runtime::copied::Reservation accounting)
     : owner_(runtime), endpoint_(runtime.host_.semantic), accounting_(std::move(accounting)) {
-    if (!endpoint_ || endpoint_->generation || endpoint_->closed) throw std::runtime_error("Semantic endpoint already bound");
-    endpoint_->generation = owner_.vmGeneration_;
+    if (!endpoint_ || !endpoint_->bridge || !endpoint_->bridge->InitializeScript(endpoint_,owner_))
+        throw std::runtime_error("Semantic endpoint already bound");
 }
 SemanticLua::~SemanticLua() { Stop(); }
 SemanticLua& SemanticLua::Self(lua_State* state) {
@@ -432,7 +432,7 @@ void SemanticLua::Record(SemanticPhase phase,runtime::ScopeResult reason,const S
         const auto length=std::min(std::strlen(build),record.buildIdentity.size()-1);std::memcpy(record.buildIdentity.data(),build,length);
         record.sequence=++diagnosticSequence_;record.monotonicNs=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
         record.vmGeneration=owner_.vmGeneration_;record.scopeGeneration=endpoint_->storageOwner;record.runtimeEpoch=scope.epoch;record.baseEpoch=endpoint_->bridge->Epoch();record.phase=phase;record.reason=reason;
-        if(context){record.operation=context->operation;record.vmGeneration=context->vmGeneration;record.scopeGeneration=context->scopeGeneration;record.runtimeEpoch=context->runtimeEpoch;for(std::size_t i=0;i<record.contextEpochs.size();++i)record.contextEpochs[i]=context->facts[i].epoch;}
+        if(context){record.operation=context->operation;record.vmGeneration=context->participant.ScriptGeneration();record.scopeGeneration=context->scopeGeneration;record.runtimeEpoch=context->runtimeEpoch;for(std::size_t i=0;i<record.contextEpochs.size();++i)record.contextEpochs[i]=context->facts[i].epoch;}
         if(diagnosticCount_==diagnostics_.size()){diagnosticFirst_=(diagnosticFirst_+1)%diagnostics_.size();--diagnosticCount_;if(diagnosticDropped_!=UINT64_MAX)++diagnosticDropped_;}
         record.dropped=diagnosticDropped_;diagnostics_[(diagnosticFirst_+diagnosticCount_)%diagnostics_.size()]=record;++diagnosticCount_;
     }catch(...){if(diagnosticDropped_!=UINT64_MAX)++diagnosticDropped_;}

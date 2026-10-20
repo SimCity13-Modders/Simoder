@@ -69,6 +69,10 @@ process restart before another image executes. Existing U1 quotas are unchanged.
 
 ## Repository and verification boundaries
 
+The private [semantic participant transport](semantic-participants.md) distinguishes
+genuine script VMs from original retained native State. This lifetime foundation
+does not enable the currently closed production semantic facet or issue authority.
+
 DevTools owns `tests/native-module`, a standalone synthetic-host project. Its DLLs
 include only ABI declarations and kernel32 imports; they do not link Core. The host
 compiles the actual Core boundary with explicitly isolated test macros. Product

@@ -96,7 +96,7 @@ struct ManagerCommands::Fence final {
                 if(!fact.slot || !fact.generation || !fact.epoch){result=ScopeResult::NotReady;return;}
             }
             const auto current=scope->Snapshot();
-            ticket.context={bridge.contexts_,origin.generation_,bridge.epoch_,0,current.generation,current.epoch,mask};
+            ticket.context={bridge.contexts_,origin.endpoint_->Participant().Key(),bridge.epoch_,0,current.generation,current.epoch,mask};
         }
         result=bridge.ValidateContextLocked(*origin.endpoint_,ticket.context);if(result!=ScopeResult::Ok)return;
         const auto current=scope->Snapshot();

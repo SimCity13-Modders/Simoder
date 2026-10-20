@@ -442,6 +442,16 @@ NativeParticipantFence NativeParticipant::ObserveLocalFence() const noexcept {
 bool NativeParticipant::SameIdentity(const NativeParticipant& other) const noexcept {
     return state_ == other.state_;
 }
+bool NativeParticipant::StageLifetime(std::shared_ptr<runtime::RuntimeScope>& scope,
+    std::shared_ptr<runtime::RuntimeLifecycle>& lifecycle) const {
+    scope.reset();lifecycle.reset();
+    if(!state_->prepared.load() || !ObserveLocalFence().LocallyLive())return false;
+    auto originalScope=state_->scope;auto originalLifecycle=state_->lifecycle;
+    const auto observed=originalScope->Current();
+    if(observed.stopping || observed.generation!=state_->scopeGeneration || originalLifecycle->Current().stopping ||
+        !ObserveLocalFence().LocallyLive())return false;
+    scope=std::move(originalScope);lifecycle=std::move(originalLifecycle);return true;
+}
 SdResult NativeModule::CaptureParticipant(std::optional<NativeParticipant>& output) const {
     output.reset();
     if (!state_->prepared.load()) return SD_NOT_READY;
