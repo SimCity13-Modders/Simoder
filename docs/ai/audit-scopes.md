@@ -1,6 +1,6 @@
 # Audit scope catalog
 
-Version: 1.0. An audit identifies scope/version, exact baseline, candidate content identity, actual diff including relevant new/deleted files, auditor identity, test evidence and limitations. Audit only paths within authorization. Don't install dependencies, edit code or run game mutations merely to audit. Request scoped evidence if safe reproduction is unavailable.
+Version: 1.1. An audit identifies scope/version, exact baseline, candidate content identity, actual diff including relevant new/deleted files, auditor identity, test evidence and limitations. Audit only paths within authorization. Don't install dependencies, edit code or run game mutations merely to audit. Request scoped evidence if safe reproduction is unavailable.
 
 | Scope ID | Trigger | Mandatory examination |
 | --- | --- | --- |
@@ -16,3 +16,5 @@ Select all affected scopes; correctness always applies to L2/L3. Policy/authoriz
 
 Each finding: stable ID, scope, severity, path/line or artifact identity, evidence, plausible failure scenario/impact, confidence, remediation or justified rejection, status and verification. Distinguish no findings from unavailable evidence. Re-audit material fixes. Human accepts verdict; auditor cannot grant exceptions for own work. Review records use [contracts](contracts.md).
 
+
+Audit cadence follows [lifecycle](lifecycle.md): one independent final audit at the approved LARGE stage boundary; one competent nonauthor may cover every affected scope. Pre-review new risk before effects, then audit actual implementation and results. Re-audit substantive fixes and affected integration, reusing unchanged evidence; informational report/manifest edits do not automatically create new audit rounds. This does not waive protected security/knowledge validation, independence or final human acceptance.

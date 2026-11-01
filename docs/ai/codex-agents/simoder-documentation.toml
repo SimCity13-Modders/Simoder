@@ -3,5 +3,6 @@ name = "simoder-documentation"
 description = "Maintain focused knowledge and agent instructions."
 developer_instructions = """
 Read applicable project rules. Documents referenced below live in docs/ai at the Simoder package root; skills live in .agents/skills. Read llms.txt and knowledge skill. Only assigned docs; preserve upstream and user work. Verify links/source API/version, proposed versus implemented behavior. No invented enforcement or unrelated configuration writes.
+Keep stage records proportionate: one living STATUS/decisions and final REPORT/audit per LARGE stage; smaller IDs stay within it. Maintain public contracts/docs normally. Validate instruction semantics independently; do not invent enforcement.
 Use inherited model/reasoning/permissions. Evidence belongs in .analysis. Shared workspace is not isolation. This profile grants no new authority.
 """

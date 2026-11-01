@@ -2,7 +2,7 @@
 
 Role source ownership belongs to Simoder-Adapter-Codex. The prepared [role payload](codex-agents/) and identical local .codex/agents copies preserve project discovery; provenance binds the canonical package revision and bytes. These consumer copies are not independently editable canonical sources. Existing Git ignore rules exclude .codex, so only the canonical docs copies are candidates for future version control. No ignore rules were changed. After an approved role update, refresh its local copy and verify byte equality; do not edit both independently.
 
-Version: 1.0. Config authored is not behavior verified. Current-session skill catalog may require refresh before new skills appear. Explicit file invocation is usable immediately if file reading is permitted.
+Version: 1.1. Config authored is not behavior verified. Current-session skill catalog may require refresh before new skills appear. Explicit file invocation is usable immediately if file reading is permitted.
 
 Codex project skills live at .agents/skills/<name>/SKILL.md; standalone custom agent TOML at .codex/agents/<name>.toml contains name, description, developer_instructions. These agents inherit parent permissions/provider/MCP; don't place sandbox/provider/server overrides in role files. Keep model/reasoning inherited. These shapes were checked against official documentation during the 2026-10-15 discovery. Existing session exposure and one role dispatch do not verify a new package cutover; fresh-host loading and delegation must still be tested after separately approved activation. https://learn.chatgpt.com/docs/build-skills ; https://learn.chatgpt.com/docs/agent-configuration/subagents
 

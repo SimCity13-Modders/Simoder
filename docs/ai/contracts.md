@@ -1,30 +1,29 @@
-# Task, handoff, audit and report contracts
+# Stage, handoff, audit and report contracts
 
-Version: 1.0. These Markdown structures are normative authoring contracts, not machine-enforced schemas. Store populated private records under .analysis/<task-id>/. No secrets or full conversation dumps. Use explicit none/not-applicable with reason rather than empty required fields.
+Version: 1.1. Procedural Markdown contracts, not machine-enforced schemas. Scale records to actual risk; populated private evidence belongs under .analysis/<stage>/. No secrets or full transcript dumps.
 
-## Task record
+## Living STATUS and decisions
 
-Required fields: format_version; task_id; goal; repositories and allowed paths; baseline HEAD plus relevant tracked/untracked content identity; existing-work disposition; risk and rationale; requirement IDs; acceptance units/criteria; authorized operations and applicable approval evidence; assumptions with status; dependencies/approved tool versions; ownership/resource reservations; budgets; current phase; completed/remaining work; check outcomes and evidence; audit status; human acceptance status; blockers; next safe action; timestamps.
+One STATUS/decisions record per approved LARGE stage (for example U4/U5): goal, scope/allowed paths, baseline and relevant dirty-work disposition, risk/criteria, authorization references, current phase, ownership, completed/remaining work, check results/evidence, blockers and next action. Include toolchain/profile/dependency identity and resource/budget limits where relevant. Use small labels as task/test IDs in this record; do not create mandatory microplans or acceptance dossiers per function/fix/commit.
 
-Decision record: stable ID; statement; selected outcome; rationale; status proposed/accepted/superseded/unresolved; related requirements/decisions; architecture/security consequences; verification/migration; source and exact consent reference. Recommendation never becomes accepted by agent assertion.
+Decisions retain stable IDs, statement/rationale, proposed/accepted/superseded/unresolved status, material consequences and actual approval reference. Requirements trace to implementation, executed evidence, findings and stage acceptance. Agent recommendations are not human decisions.
 
 ## Handoff
 
-Required: task_id; sender/recipient role and actual invocation identity; goal; bounded scope/write paths; acceptance criteria; policies; current HEAD/content and existing changes; work done; actual evidence/check outcomes; permitted effects/grants with scope/expiry; unavailable tools; dependencies; reserved resources; time/cost limits; risks; stop conditions; expected return artifacts; next safe step. Receiver must validate state/permissions. A message is not transfer of credentials or automatic expansion of permission.
+An ordinary delegate handoff is a message with goal, ownership/allowed paths, current evidence and next action. Add baseline, existing work, criteria, permitted effects, resources/budget, unavailable tools and stop conditions only as relevant to safe execution. No mandatory new file. Receiver verifies current state/permissions; a message transfers neither credentials nor authority. Durable resumption state stays in the stage STATUS.
 
-## Audit record
+## Final audit and finding registry
 
-Required: audit_id; auditor identity and independence; scopes; baseline/candidate revision and content identity; requirements checked; files/artifacts inspected; check results; findings with required fields from audit-scopes.md; unverified areas; verdict PASS/FAIL/BLOCKED; limitations; timestamp. PASS means reviewed scope passed, not human acceptance or complete product acceptance.
+One independent final audit per LARGE stage records auditor identity/independence, applicable scopes, exact baseline/candidate content, actual source/diff/tests reviewed, findings, verdict PASS/FAIL/BLOCKED, limitations and unverified checks. One nonauthor may cover all competent scopes; additional specialists only when needed. Protected instruction changes require independent AUD-SECURITY and AUD-KNOWLEDGE validation. Re-audit substantive fix diffs, results and affected integration, retaining unchanged evidence; no numbered dossier per routine revision.
 
-## Acceptance record
+Keep one current finding registry with stable IDs, scope/severity/location, evidence, failure scenario/impact, confidence, remediation/disposition, status and verification. Preserve historical raw failures/logs and disposition history. A required case failure keeps the overall batch FAIL; unavailable/unexecuted checks remain NOT_RUN/BLOCKED. Compact machine evidence may store exact inputs/source/image identities, commands, outcomes and links to raw logs; no parallel canonical JSON final report.
 
-Required: acceptance_id; human identity; exact consent reference; unit/requirements; audit_id; audited content identity; accepted/rejected decision and conditions; time; verifier type and actual verification state; post-rebase mapping if applicable. Until a protected identity mechanism exists, transcript-referenced human consent is procedural evidence only. Do not fabricate signatures or claim CI verification. Squashed content must equal accepted content before rebinding; otherwise re-audit.
+## Human acceptance and exceptions
 
-Exception record: ID, rule, rationale/evidence, exact scope, owner and authorized approver, creation/expiry, verification, approval reference and revoked/closed status. No exception bypasses higher restrictions; agent cannot approve its own independent-authorization exception.
+L2/L3 final human acceptance binds stage/criteria, independent audit, exact reviewed content, actual human consent reference, decision/conditions and date. Record in the stage STATUS or REPORT; no separate mandatory dossier. Transcript consent is procedural evidence until a protected verifier exists; do not fabricate hashes as human signatures or claim CI verification. A user action request authorizes its specific semantic change, not unrelated effects or self-issued final acceptance.
 
-Debt record: ID, description/evidence, impact/priority/uncertainty, owner, dependencies, resolution conditions, status/history; do not expand task to unrelated debt. Requirement trace: requirement -> decision -> implementation area -> verification -> executed evidence -> findings -> acceptance.
+Exceptions record affected rule, rationale/evidence, exact scope, owner/authorized approver, expiry when relevant and approval reference. No exception bypasses higher restrictions or permits author self-approval. Relevant debt keeps identity, impact, owner, resolution conditions and status; do not expand work to unrelated debt.
 
-## Canonical final Markdown report
+## Final REPORT
 
-Use these sections in order, scaled to L1/L2/L3: report format version; task/repository identity; primary outcome; summary; approved scope/acceptance criteria; changes; baseline/final diff; actual quality gates; audit findings/disposition; blockers/risks; assumptions/unverified capabilities; dependencies/environment; evidence references; follow-ups; NOT_RUN tests and unavailable verification. Implementation completeness, test completeness, human acceptance and release authorization remain separate fields. No parallel canonical JSON final report.
-
+One current final REPORT per LARGE stage: identity/outcome; approved scope/criteria; changes and baseline/final content; actual checks/coverage; findings/disposition; blockers/risks; assumptions/dependencies/environment; evidence links; remaining work and NOT_RUN. Keep implementation completeness, verification, human acceptance and release authorization distinct. Do not duplicate verbose histories per minor step; preserve original raw evidence and prior records rather than deleting them to fit this format. Routine smaller work uses proportionate existing records and normal documentation updates.

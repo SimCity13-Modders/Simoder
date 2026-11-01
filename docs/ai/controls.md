@@ -1,6 +1,6 @@
 # Control and enforcement register
 
-Version: 1.0. Snapshot for documentation package; no protected acceptance verifier/CI implementation supplied.
+Version: 1.1. Snapshot for documentation package; no protected acceptance verifier/CI implementation supplied.
 
 | ID | Control | Current mechanism | Enforcement/verification |
 | --- | --- | --- | --- |
@@ -15,3 +15,5 @@ Version: 1.0. Snapshot for documentation package; no protected acceptance verifi
 
 Required unresolved deterministic controls must block claims of verified enforcement; do not disable the test or relabel missing control PASS. Reporting these gaps is compatible with using the procedural standard now.
 
+
+Stage-scale records and runner reuse are procedures under [lifecycle](lifecycle.md), not new enforcement or authority. Exact executed content and actual failures/NOT_RUN remain visible. Protected instruction updates require independent security and knowledge validation before final human acceptance.

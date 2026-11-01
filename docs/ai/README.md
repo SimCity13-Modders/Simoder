@@ -1,8 +1,8 @@
 # AI engineering operating standard
 
-Version: 1.0. Scope: Simoder ecosystem. This documentation package is authorized independently of the proposed product architecture. Explicit human acceptance records govern the approved architecture and task scope. A proposal alone does not authorize implementation or activation of changed instructions. English is canonical; communicate with this user in Polish.
+Version: 1.1. Scope: Simoder ecosystem. This documentation package is authorized independently of the proposed product architecture. Explicit human acceptance records govern the approved architecture and task scope. A proposal alone does not authorize implementation or activation of changed instructions. English is canonical; communicate with this user in Polish.
 
-Start with [policy](policy.md), then load only the relevant skill. Skills are in [the project skill directory](../../.agents/skills/). Custom Codex roles are in [the project agent directory](../../.codex/agents/). These files do not grant OS permissions, register external services or implement the future CI acceptance verifier.
+Start with [policy](policy.md), then load only the relevant skill. Skills are in [the project skill directory](../../.agents/skills/). Canonical Codex roles are in [the role payload](codex-agents/); consumer .codex/agents copies are projections. These files do not grant OS permissions, register external services or implement the future CI acceptance verifier.
 
 | Task | Skill | Role |
 | --- | --- | --- |
@@ -21,3 +21,5 @@ Typical invocation: `Use $simoder-engineering for this task; delegate native ABI
 
 Project-scoped discovery does not automatically install these files into sibling repositories. From a sibling, explicitly supply this directory and its own applicable policies. Future workspace composition can install compatible copies through SAFE_ADD after approval. Do not overwrite sibling instructions.
 
+
+Version 1.1 uses approved LARGE stage boundaries (for example U4/U5): one living STATUS/decisions, one final REPORT and independent final audit. Smaller labels remain task/test IDs. See lifecycle/contracts for early approved local validation, runner reuse, changed-effect pre-review and final human acceptance. Public API/architecture/user documentation updates at every size.
