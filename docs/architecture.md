@@ -1,5 +1,9 @@
 # Architecture
 
+The [release hygiene contract](architecture/release-hygiene.md) defines continuous
+cleanup, Strictly NO Legacy, independent full engineering audit and Beta Release
+Candidate entry criteria. Current migration baselines below are not Beta exemptions.
+
 See [repository ownership](architecture/repository-ownership.md) for the accepted
 separation of responsibilities and actual extraction status. Internal source
 libraries, future public SDKs and optional example packages are distinct boundaries.

@@ -18,6 +18,11 @@ See the [complete contract and migration stages](../mcp-devtool.md) for lifecycl
 
 ## Alternatives and consequences
 
+Subsequent scope update, 2026-10-25: [Beta script extensions](../beta-script-extensions.md)
+make named script-function interception a Beta requirement, including approved
+cross-mod proxies. The historical alternatives below still explain why method
+hooks alone do not replace native service ownership and lifecycle cleanup.
+
 | Alternative | Assessment |
 | --- | --- |
 | Arbitrary method hooks alone | Useful later for verified method extensions; insufficient for crash cleanup, late enable and ownership |

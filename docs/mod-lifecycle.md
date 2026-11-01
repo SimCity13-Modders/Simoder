@@ -60,6 +60,25 @@ never overwritten, and future deserialization uses the same registry generation.
 copied a PROP value into another game-owned object may still require its panel or object to be
 recreated; Simoder does not guess unverified consumer layouts.
 
+## UI HotReload boundary
+
+HotReload is complete only when a committed source change can update the affected
+game UI, not merely the loader registry. The UI refresh transaction must refetch
+the data consumed by the affected view and invalidate or reconstruct the view when
+its copied state is no longer authoritative. A file save is the trigger expected
+by the FileWatcher path; the resulting UI change must be observable in the running
+game without restarting it, and without a region reload when the verified engine
+contract permits that boundary.
+
+The same contract covers visual inputs. Changed styles, layouts, materials and
+other visual resources must be invalidated and reloaded, and a newly added image
+or texture must be loadable and usable through its declared reference. A resource
+or view that cannot be refreshed safely is rejected or reconstructed transactionally;
+it must not leave a stale snapshot presented as current, a half-applied view, or
+the active mod generation damaged. This boundary is analogous to save-triggered
+Vite/React refresh behavior, but it does not assume that arbitrary game-owned
+objects expose a safe in-place update operation.
+
 ## Override scope
 
 The runtime supports finite scalar `float` operations `set`, `add`, `subtract`, `multiply`, and `divide`.

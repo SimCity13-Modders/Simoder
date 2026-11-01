@@ -8,7 +8,7 @@ rename does not establish an independent repository or compatible package.
 | --- | --- |
 | Simoder | Existing single x86 runtime DLL, native game adapters and enforced low-level primitives. Internal implementation headers are not a stable native-mod ABI. |
 | Simoder-OpenSCP | Separate upstream-compliant application/ModStudio fork; owns conversion and resource inspection. Its current branch/PR is excluded from this cleanup; ownership does not claim complete replacement feature parity. |
-| Simoder-Base | Entirely Luau, project-authored public lifecycle/UI/API abstractions; not yet extracted as an implemented standalone package. |
+| Simoder-Base | Entirely Luau, project-authored public lifecycle/UI/API abstractions; [accepted manager and mod API design](base.md). Not yet extracted as an implemented standalone package. |
 | Simoder-DevTools-MCP | Separate source owner of the existing coherent C# MCP/DevBridge/Core stack and tests. DevTools consumes an explicit clean pinned checkout. Native MCP mod migration remains unimplemented; physical extraction does not establish the target lifecycle/transport/plugin architecture. |
 | Simoder-DevTools-Authoring | Separate existing authoring compiler, TypeScript-to-Luau adapter, authoring tests and declarative snippets. DevTools consumes a clean pinned checkout; internal Core and prepared external compiler dependencies remain explicit. |
 | Simoder-DevTools-Diagnostics | Diagnostic mod target; current MCP/REA paths provide existing diagnostic operations. Standalone PE/memory probe products are retired; no claim of complete MCP PE feature parity. |

@@ -12,7 +12,16 @@ The production Simoder core remains one integrated x86 `d3d9.dll`. MCP is an opt
 
 Simoder supplies generic low-level lifecycle, resource ownership, grants and validated game-operation primitives. `base` remains entirely Luau and supplies public, project-authored facades, lifecycle events and service management. Facades such as `GameManager` describe our abstraction, not published EA source or an assertion that such a Lua class exists in SimCity. No EA code or assets are required in this public API.
 
-The accepted lifecycle design combines typed events with a managed service scope. Arbitrary `PreHook`/`PostHook` interception can later be a convenience API for verified methods; a quit callback alone cannot own cleanup. Event names, declarations, ABI and version numbers are still proposed, not callable APIs. Existing script `onEnable`/`onTick`/`onDisable` callbacks do not establish this future service contract.
+The accepted lifecycle design combines typed events with a managed service scope.
+The 2026-10-25 [Beta script extensions](beta-script-extensions.md) additionally
+require PreHook/PostHook, OverrideFunction and named cross-mod script interception
+with explicit user approval and controlled proxies. This supersedes the earlier
+description of those script hooks as merely a possible later convenience API.
+It does not replace managed service ownership: a quit callback alone cannot own
+cleanup, and arbitrary native-address hooks are outside that extension.
+Event names, declarations, ABI and version numbers remain proposed until qualified,
+not callable APIs. Existing script onEnable/onTick/onDisable callbacks do not
+establish this future service contract.
 
 ## Lifetime and singleton
 

@@ -1,5 +1,10 @@
 # Private base runtime
 
+The accepted [Beta script extensions](beta-script-extensions.md) require a future,
+independently reviewed synchronous hook/proxy path. The asynchronous copied-value
+machinery documented below does not already implement that path; its current
+no-synchronous-cross-VM-entry boundary remains unchanged by this requirements update.
+
 U3e implements private Core machinery and the separately authored Luau services in
 Simoder-Base. It does not promote SDK facets, enable a production authority provider,
 register game operations, install packages, or migrate MCP. The production native
