@@ -393,7 +393,8 @@ BaseDependency::~BaseDependency(){
     body_.reset();
 }
 bool BaseDependency::Begin(const BaseDependencySelection& selected,const std::filesystem::path& stagingParent) noexcept {
-    if(GetCurrentThreadId()!=thread_){lastError_=BaseDependencyError::Busy;return false;}
+    // @summary An invalid foreign entry must not write the original owner's nonatomic diagnostic state.
+    if(GetCurrentThreadId()!=thread_)return false;
     if(body_){RequestCancel();lastError_=BaseDependencyError::Busy;return false;}
     if(generation_==std::numeric_limits<std::uint64_t>::max()){lastError_=BaseDependencyError::InvalidSelection;return false;}
     const auto epoch=cancellationEpoch_.load(std::memory_order_acquire);
@@ -439,8 +440,8 @@ BaseDependency::CaptureReader::~CaptureReader(){if(body_)body_->readers.fetch_su
 BaseDependency::CaptureReader::CaptureReader(CaptureReader&& other) noexcept:body_(other.body_){other.body_=nullptr;}
 BaseDependency::CaptureReader& BaseDependency::CaptureReader::operator=(CaptureReader&& other) noexcept {if(this!=&other){if(body_)body_->readers.fetch_sub(1,std::memory_order_release);body_=other.body_;other.body_=nullptr;}return *this;}
 const Snapshot* BaseDependency::CaptureReader::Get() const noexcept{return body_?body_->capture.get():nullptr;}
-std::uint64_t BaseDependency::Generation() const noexcept{return generation_;}
-BaseDependencyError BaseDependency::Error() const noexcept{return lastError_;}
+std::uint64_t BaseDependency::Generation() const noexcept{return GetCurrentThreadId()==thread_?generation_:0;}
+BaseDependencyError BaseDependency::Error() const noexcept{return GetCurrentThreadId()==thread_?lastError_:BaseDependencyError::Busy;}
 }
 
 namespace sc13::bootstrap {

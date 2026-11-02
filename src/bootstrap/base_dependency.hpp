@@ -77,7 +77,8 @@ public:
      * @param selected Independently accepted immutable native selection; the archive never supplies this trust.
      * @param stagingParent Existing absolute ordinary fixed-drive disposable directory owned by this native bootstrap;
      * at most4096 UTF16 units; foreign ownership is not acquired by passing a name. Parents are retained without delete sharing.
-     * @return False for occupied/invalid input. An occupied attempt requests cancellation and retains no retry record. */
+     * @return False for occupied/invalid input. An occupied owner-thread attempt requests cancellation and retains no retry record.
+     * A foreign-thread call returns false without inspecting/mutating mutable original owner state. */
     [[nodiscard]] bool Begin(const BaseDependencySelection& selected,const std::filesystem::path& stagingParent) noexcept;
     /** @summary Retire the original selection/configuration/session from any thread, without allocating or clearing its slot. */
     void RequestCancel() noexcept;
@@ -90,9 +91,9 @@ public:
     /** @summary Explicitly release a terminal attempt only after all returned capture readers have ended.
      * @return True only after actual offguard disposal. This never queues a retry or begins another attempt. */
     [[nodiscard]] bool Release() noexcept;
-    /** @summary Observe the original nonwrapping generation. @return Zero before any admitted attempt. */
+    /** @summary Observe the original nonwrapping generation on its owning thread. @return Zero before any admitted attempt or on foreign-thread refusal. */
     [[nodiscard]] std::uint64_t Generation() const noexcept;
-    /** @summary Observe the bounded original refusal. @return No path/content is included. */
+    /** @summary Observe the bounded original refusal on its owning thread. @return Foreign-thread Busy is call refusal only, never a mutation of original state; no path/content is included. */
     [[nodiscard]] BaseDependencyError Error() const noexcept;
 private:
     std::unique_ptr<Body> body_;
