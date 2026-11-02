@@ -106,6 +106,7 @@ src/mods/state_path_writer.cpp
     src/runtime/semantic_tasks.cpp
     src/scripting/script_runtime.cpp
     src/scripting/base_host.cpp
+    src/scripting/base_package_compile.cpp
     src/scripting/semantic_bridge.cpp
     src/scripting/semantic_participant.cpp
     src/mods/owned_publication.cpp
