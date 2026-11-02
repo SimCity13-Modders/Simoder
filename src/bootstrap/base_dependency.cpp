@@ -133,18 +133,17 @@ struct BaseDependency::Body final {
     ~Body(){for(auto h:parents)if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);if(input!=INVALID_HANDLE_VALUE)CloseHandle(input);if(output!=INVALID_HANDLE_VALUE)CloseHandle(output);if(unloadEvent)CloseHandle(unloadEvent);}
     /** @summary Snapshot exact externally selected content and review before console/network effects. */
     bool Select(const BaseDependencySelection& s,std::uint64_t id) noexcept {
-        if(!s.artifact.size||s.artifact.size>8388608||s.artifact.size%512||s.artifact.files.size()<3||s.artifact.files.size()>65||
+        if(!platform::base_artifact::ValidateTrustedArtifact(s.artifact)||
            !Text(s.version,128)||!Text(s.channel,32)||!Text(s.target,512)||!Text(s.reason,256)||s.urls.size()>4)return false;
-        trusted.size=s.artifact.size;trusted.digest=s.artifact.digest;count=s.artifact.files.size();std::size_t notices=0,executables=0;std::uint64_t payload=0;
+        trusted.size=s.artifact.size;trusted.digest=s.artifact.digest;count=s.artifact.files.size();
         for(std::size_t n=0;n<count;++n){const auto& source=s.artifact.files[n];
-            if(source.path.empty()||source.path.size()>240||source.path.find('\0')!=source.path.npos)return false;
-            if(source.notice){if(source.path!="LICENSE"||source.size>65536||++notices!=1)return false;}else if(++executables>64)return false;
-            payload+=source.size;if(payload>4259840)return false;
-            std::copy(source.path.begin(),source.path.end(),pins[n].path.begin());pins[n].value=source;pins[n].value.path={pins[n].path.data(),source.path.size()};map[n]=pins[n].value;
+            // @summary Validator established fixed capacities; copy the SAME borrowed immutable native descriptor into owned backing.
+            std::copy(source.path.begin(),source.path.end(),pins[n].path.begin());pins[n].value=source;
+            pins[n].value.path={pins[n].path.data(),source.path.size()};map[n]=pins[n].value;
         }
-        if(notices!=1||executables<2)return false;
-        std::uint64_t executableBytes=0;for(std::size_t n=0;n<count;++n)if(!map[n].notice)executableBytes+=map[n].size;if(executableBytes>4194304)return false;
-        trusted.files={map.data(),count};urlCount=s.urls.size();
+        trusted.files={map.data(),count};
+        if(!platform::base_artifact::ValidateTrustedArtifact(trusted))return false;
+        urlCount=s.urls.size();
         for(std::size_t n=0;n<urlCount;++n){std::array<wchar_t,254> host{};INTERNET_PORT port{};std::wstring_view path;if(!Url(s.urls[n].exact,host,port,path))return false;
             for(std::size_t j=0;j<n;++j)if(s.urls[n].exact==std::wstring_view(urls[j].data()))return false;
             std::copy(s.urls[n].exact.begin(),s.urls[n].exact.end(),urls[n].begin());

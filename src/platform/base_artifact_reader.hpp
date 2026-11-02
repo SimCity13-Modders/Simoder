@@ -30,6 +30,13 @@ struct TrustedArtifact final {
     core::Sha256Digest digest{};
     std::span<const FilePin> files;
 };
+/** @summary Validate only finite native descriptor DATA shape before acquisition/capture effects.
+ * @param artifact Independently selected immutable map borrowed throughout return.
+ * @return Whether canonical names, unique file membership and existing Base size/count limits hold.
+ * @remarks This performs no allocation, filesystem, UI, network, digest verification or permission decision.
+ * True does NOT authenticate bytes, supply a release/native issuer, or permit installation/activation.
+ * Snapshot::Capture still verifies the complete independently pinned actual archive and member hashes. */
+[[nodiscard]] bool ValidateTrustedArtifact(const TrustedArtifact& artifact) noexcept;
 /** @summary Refusal categories contain neither private paths nor imported content. */
 enum class Error : std::uint8_t { None, InvalidPin, InvalidPath, Open, OrdinaryFile,
     Capture, Changed, Allocation, Hash, ArtifactDigest, Header, Membership, Content };

@@ -45,15 +45,19 @@ bool NameValid(std::string_view path) noexcept {
     }
     return true;
 }
-namespace {
 /** @summary Validate native trust-map shape without reading an archive or adopting its manifest.
  * @param pin Native caller-selected complete map. @return Whether names and all finite caps hold. */
-bool PinsValid(const TrustedArtifact& pin) noexcept {
+bool ValidateTrustedArtifact(const TrustedArtifact& pin) noexcept {
     if(pin.size<1024||pin.size>MaximumArtifact||pin.size%512||pin.files.size()<3||pin.files.size()>MaximumEntries)return false;
     std::size_t executable=0,notices=0,total=0;bool manifest=false,entry=false;
     for(std::size_t i=0;i<pin.files.size();++i){const auto& f=pin.files[i];
         if(!NameValid(f.path))return false;
-        for(std::size_t j=0;j<i;++j)if(EqualFold(f.path,pin.files[j].path))return false;
+        for(std::size_t j=0;j<i;++j){const auto other=pin.files[j].path;
+            if(EqualFold(f.path,other))return false;
+            // @summary A file cannot also be a slash-boundary parent; compare BOTH orderings under actual ASCII fold.
+            if((f.path.size()>other.size()&&f.path[other.size()]=='/'&&EqualFold(f.path.substr(0,other.size()),other))||
+               (other.size()>f.path.size()&&other[f.path.size()]=='/'&&EqualFold(other.substr(0,f.path.size()),f.path)))return false;
+        }
         if(f.notice){if(f.path!="LICENSE"||f.size>MaximumNotice)return false;++notices;}
         else {
             if(f.path!="mod.toml"&&(!f.path.starts_with("scripts/")||!f.path.ends_with(".luau")))return false;
@@ -64,6 +68,7 @@ bool PinsValid(const TrustedArtifact& pin) noexcept {
     }
     return notices==1&&executable>=2&&executable<=64&&manifest&&entry;
 }
+namespace {
 /** @summary Decode Python USTAR octal field grammar only, with checked 32-bit accumulation.
  * @param field Octal digits followed by NUL or space terminator(s). @param value Decoded output.
  * @return False for sign/base256/empty/overflow/interior whitespace/nonzero trailing bytes. */
@@ -98,7 +103,7 @@ bool Same(const BY_HANDLE_FILE_INFORMATION& a,const BY_HANDLE_FILE_INFORMATION& 
 } // namespace
 
 std::shared_ptr<const Snapshot> Snapshot::Capture(const std::filesystem::path& path,const TrustedArtifact& trusted,Error& error) noexcept {
-    error=Error::InvalidPin;if(!PinsValid(trusted))return {};
+    error=Error::InvalidPin;if(!ValidateTrustedArtifact(trusted))return {};
     try {
         const auto& native=path.native();error=Error::InvalidPath;
         if(native.size()<4||native.size()>32760||native[1]!=L':'||native[2]!=L'\\'||
