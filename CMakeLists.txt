@@ -49,6 +49,7 @@ endfunction()
 add_library(sc13_core STATIC
     # @summary Share original bootstrap composition with the isolated acceptance host.
     src/bootstrap/runtime_context.cpp
+    src/bootstrap/base_dependency.cpp
     src/config/loader_config.cpp
     src/core/resource_filter.cpp
     src/core/runtime_property_table.cpp
@@ -75,6 +76,7 @@ add_library(sc13_core STATIC
     src/formats/toon/toon_document.cpp
     src/formats/toml/value_conversion.cpp
     src/logging/log_event.cpp
+    src/logging/async_logger.cpp
     src/memory/signature.cpp
     src/platform/windows_arguments.cpp
     src/platform/runtime_owner.cpp
@@ -183,7 +185,6 @@ if(SC13_BUILD_RUNTIME)
         src/hooks/runtime_hooks.cpp
         src/hooks/game_log_capture.cpp
         src/hooks/resource_trace.cpp
-        src/logging/async_logger.cpp
         src/logging/mod_logger.cpp
         src/reverse/game_build.cpp
         src/reverse/resource_symbols.cpp
