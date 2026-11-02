@@ -1,4 +1,5 @@
 #include "bootstrap/base_dependency.hpp"
+#include "bootstrap/base_response_policy.hpp"
 #include <winhttp.h>
 #include <algorithm>
 #include <atomic>
@@ -70,12 +71,7 @@ bool Url(std::wstring_view value,std::array<wchar_t,254>& host,INTERNET_PORT& po
     }}
     std::copy(authority.begin(),authority.end(),host.begin());host[authority.size()]=0;return true;
 }
-/** @summary Trim HTTP optional whitespace without allocating or normalizing a security field's value. */
-std::wstring_view Trim(std::wstring_view v) noexcept {while(!v.empty()&&(v.front()==L' '||v.front()==L'\t'))v.remove_prefix(1);while(!v.empty()&&(v.back()==L' '||v.back()==L'\t'))v.remove_suffix(1);return v;}
-/** @summary ASCII field comparison, independent of locale. */
-bool Field(std::wstring_view a,std::wstring_view b) noexcept {if(a.size()!=b.size())return false;for(std::size_t i=0;i<a.size();++i){auto c=a[i];if(c>=L'A'&&c<=L'Z')c+=32;if(c!=b[i])return false;}return true;}
-/** @summary Bounded exact decimal Content-Length, with overflow refusal. */
-bool Length(std::wstring_view value,std::uint32_t& result) noexcept {if(value.empty()||value.size()>10)return false;std::uint64_t n=0;for(auto c:value){if(c<L'0'||c>L'9')return false;n=n*10+unsigned(c-L'0');if(n>8388608)return false;}result=std::uint32_t(n);return true;}
+
 }
 
 /** @summary Sole original body; all callbacks and readers address this stable allocation until real session unload. */
@@ -301,24 +297,10 @@ struct BaseDependency::Body final {
         const auto units=bytes/sizeof(wchar_t);if(units>=headers.size()||headers[units]!=0)return false;
         std::wstring_view raw(headers.data(),units);if(raw.find(L'\0')!=raw.npos)return false;
         DWORD statusSize=sizeof(status);if(!WinHttpQueryHeaders(h,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&statusSize,WINHTTP_NO_HEADER_INDEX))return false;
-        const auto first=raw.find(L"\r\n");if(first==raw.npos)return false;std::size_t start=first+2,fields=0;bool hasLength=false,hasLocation=false,hasEncoding=false,hasTransfer=false;std::uint32_t contentLength{};
-        redirect=4;
-        while(start<raw.size()){
-            const auto end=raw.find(L"\r\n",start);if(end==raw.npos)return false;if(end==start){if(end+2!=raw.size())return false;break;}
-            auto row=raw.substr(start,end-start);if(row.size()>8192||++fields>128||row.front()==L' '||row.front()==L'\t')return false;
-            const auto colon=row.find(L':');if(colon==row.npos||!colon)return false;auto key=row.substr(0,colon);auto value=Trim(row.substr(colon+1));
-            for(auto c:key)if(!((c>=L'a'&&c<=L'z')||(c>=L'A'&&c<=L'Z')||(c>=L'0'&&c<=L'9')||c==L'-'))return false;
-            for(auto c:value)if((c<32&&c!=L'\t')||c>126)return false;
-            if(Field(key,L"content-length")){if(hasLength||!Length(value,contentLength))return false;hasLength=true;}
-            else if(Field(key,L"location")){if(hasLocation||!Text(value,UrlLimit))return false;hasLocation=true;for(std::size_t n=0;n<urlCount;++n)if(value==std::wstring_view(urls[n].data()))redirect=n;}
-            else if(Field(key,L"content-encoding")){if(hasEncoding||!Field(value,L"identity"))return false;hasEncoding=true;}
-            else if(Field(key,L"transfer-encoding")){if(hasTransfer||!Field(value,L"chunked"))return false;hasTransfer=true;}
-            start=end+2;
-        }
-        if(hasTransfer&&hasLength)return false;
-        if(status==200)return (!hasLength||contentLength==trusted.size)&&!hasLocation;
-        if(status==301||status==302||status==303||status==307||status==308)return hasLocation&&redirect<urlCount&&!(visitedUrls&(1U<<redirect))&&requestIndex<3;
-        return false;
+        std::array<std::wstring_view,4> destinations{};
+        for(std::size_t n=0;n<urlCount;++n)destinations[n]=std::wstring_view(urls[n].data());
+        const auto policy=detail::InspectBaseResponse(raw,status,trusted.size,{destinations.data(),urlCount},visitedUrls,requestIndex);
+        redirect=policy.redirect;return policy.accepted;
     }
     /** @summary Process exactly one observed completion; request transitions remain on the original owning thread. */
     void Network() noexcept {
