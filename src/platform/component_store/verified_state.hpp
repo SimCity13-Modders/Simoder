@@ -11,6 +11,7 @@ enum class SelectionReadStatus {Accepted,Absent,Refused,Busy,Interrupted,Unknown
 /** @summary Private native one-attempt snapshot cut; data alone cannot create the session's admitted incarnation. */
 class SelectionSnapshotAdmission {
     friend class InstalledSelectionSession;
+    friend class SelectionDataCapture;
     friend class SelectionReadTurn;
     /** @summary Only the original native session can construct the synchronous admission endpoint. */
     SelectionSnapshotAdmission()noexcept=default;
@@ -25,6 +26,7 @@ public:
 /** @summary Retain original read/coordination custody and reuse the coordinator's complete-history verifier exactly once. */
 class SelectionReadTurn final {
     friend class InstalledSelectionSession;
+    friend class SelectionDataCapture;
     struct Body;
     /** @summary Bind original native roots/admission; this is not public portable-data authority. */
     SelectionReadTurn(StoreIO&,Parent&,const Observation&,const NativeAdmission&,metadata::Identifier&);

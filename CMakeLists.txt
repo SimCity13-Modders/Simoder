@@ -59,6 +59,7 @@ add_library(sc13_core STATIC
     src/platform/component_store/streaming_digest.cpp
     src/platform/base_artifact_reader.cpp
     src/platform/component_store/coordinator.cpp
+    src/platform/component_store/selection_data.cpp
     src/core/tgi.cpp
     src/dev/mod_validation.cpp
     src/dev/authoring_tools.cpp
