@@ -53,6 +53,10 @@ add_library(sc13_core STATIC
     src/core/resource_filter.cpp
     src/core/runtime_property_table.cpp
     src/core/sha256.cpp
+    src/platform/component_store/metadata.cpp
+    src/platform/component_store/windows_store.cpp
+    src/platform/component_store/windows_store_io.cpp
+    src/platform/component_store/streaming_digest.cpp
     src/core/tgi.cpp
     src/dev/mod_validation.cpp
     src/dev/authoring_tools.cpp
