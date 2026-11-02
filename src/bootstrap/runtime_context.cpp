@@ -1,6 +1,7 @@
 #include "bootstrap/runtime_context.hpp"
 #include "bootstrap/selection_data_session.hpp"
 #include "scripting/script_runtime.hpp"
+#include "scripting/base_host.hpp"
 #include "mods/mod_manager.hpp"
 
 #include <chrono>
@@ -37,6 +38,23 @@ platform::component_store::SelectionReadStatus RuntimeContext::CaptureSelectionD
         selectionData_.reset(new SelectionDataSession(owner_,domain_,scope_,std::move(admission),originalThread_));
         return selectionData_->Capture(root,installation,trusted,pins,version,compatibility,output);
     }catch(...){return Status::Refused;}
+}
+
+runtime::ScopeResult RuntimeContext::ConstructPausedCapturedBase(const scripting::BasePackagePin& pin)noexcept{
+    if(GetCurrentThreadId()!=originalThread_||runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||
+        scripting::ScriptRuntime::OnScriptLane()||domain_->IsStopping()||pausedBaseAttempted_||!selectionData_)return runtime::ScopeResult::Denied;
+    pausedBaseAttempted_=true;
+    try{pausedBase_.reset(new scripting::BaseHost(selectionData_,pin));
+        return domain_->IsStopping()?runtime::ScopeResult::Cancelled:runtime::ScopeResult::Ok;}
+    catch(...){return runtime::ScopeResult::Invalid;}
+}
+runtime::ScopeResult RuntimeContext::DisposePausedCapturedBase()noexcept{
+    if(GetCurrentThreadId()!=originalThread_||runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||
+        scripting::ScriptRuntime::OnScriptLane())return runtime::ScopeResult::Denied;
+    if(!pausedBase_)return pausedBaseAttempted_?runtime::ScopeResult::Ok:runtime::ScopeResult::NotReady;
+    const auto result=pausedBase_->DisposePaused();
+    if(result==runtime::ScopeResult::Ok)pausedBase_.reset();
+    return result;
 }
 
 bool RuntimeContext::PreparedFacts(std::uint32_t requiredReadiness) const {

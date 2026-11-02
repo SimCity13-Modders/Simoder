@@ -7,9 +7,13 @@
 #include <atomic>
 namespace sc13::bootstrap {
 class RuntimeContext;
+}
+namespace sc13::scripting {class BaseHost;struct BasePackagePin;struct ScriptDefinition;}
+namespace sc13::bootstrap {
 /** @summary Native session retains same IO/root/admission/owner through every uncertain turn; no Context backedge. */
 class SelectionDataSession final:private platform::component_store::NativeAdmission {
     friend class RuntimeContext;
+    friend class scripting::BaseHost;
     using Data=platform::component_store::CapturedSelectionData;
     using Status=platform::component_store::SelectionReadStatus;
     std::shared_ptr<platform::RuntimeOwner> owner_;
@@ -23,6 +27,9 @@ class SelectionDataSession final:private platform::component_store::NativeAdmiss
     std::uint32_t thread_{};std::uint64_t generation_{},epoch_{};
     bool attempted_{};
     std::unique_ptr<platform::component_store::SelectionDataCapture> turn_;
+    std::shared_ptr<const Data> captured_;
+    /** @summary Compile only original privately retained complete captured bytes using independently supplied native executable pins. */
+    scripting::ScriptDefinition Compile(const scripting::BasePackagePin&)const;
     /** @summary Bind only original acquired Context identities and independently retained native admission. */
     SelectionDataSession(std::shared_ptr<platform::RuntimeOwner>,std::shared_ptr<runtime::RuntimeCommitDomain>,
         std::shared_ptr<runtime::RuntimeScope>,std::shared_ptr<const platform::component_store::NativeAdmission>,std::uint32_t);

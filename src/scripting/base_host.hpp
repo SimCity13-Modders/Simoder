@@ -3,6 +3,7 @@
 #include "runtime/runtime_scope.hpp"
 #include <filesystem>
 
+namespace sc13::bootstrap {class RuntimeContext;class SelectionDataSession;struct ContextPausedBaseTestAccess;}
 namespace sc13::mods::native {
 /** @summary Private adapter that verifies the original Base-owned semantic bridge. */
 class NativeProvider;
@@ -42,6 +43,16 @@ public:
     /** @summary Reports native proof of the captured actual critical graph; grants no authority. @return True after this exact VM commits. */
     bool Ready() const noexcept;
 private:
+    friend class bootstrap::RuntimeContext;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct bootstrap::ContextPausedBaseTestAccess;
+#endif
+    /** @summary Consume SAME original Context session privately; initialized VM remains uncommitted/unscheduled and is never exposed. */
+    BaseHost(std::shared_ptr<bootstrap::SelectionDataSession>,BasePackagePin);
+    /** @summary Close this same uncommitted VM through original exact lane acknowledgement; refusal retains original custody. */
+    runtime::ScopeResult DisposePaused()noexcept;
+    /** @summary Same native session outlives VM; ownership only, never serialized consent or runtime authority. */
+    std::shared_ptr<bootstrap::SelectionDataSession> capturedSession_;
     friend class mods::ManagerPreparation;
     /** @summary Stage the actual Base bridge off guards; friendship grants no operation permission. */
     friend class mods::native::NativeProvider;

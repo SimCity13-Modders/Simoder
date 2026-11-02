@@ -15,6 +15,7 @@
 #include <array>
 #include <exception>
 #include <type_traits>
+#include <thread>
 #include <algorithm>
 #include <cstring>
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY) && defined(_WIN32)
@@ -197,7 +198,7 @@ struct ScriptSchedulerHost final {
 class ScriptLane final {
 public:
     /** @summary A caller-owned command uses the VM's permanently reserved control record. */
-    struct Work final { void (*run)(void*); void* context; std::exception_ptr error; bool done{}; };
+    using Work=ScriptRuntime::NativeControlWork;
     /** @summary Starts the sole serial interpreter lane. */
     ScriptLane() : worker_([this] { Run(); }) {}
     /** @summary Joins after runtime-owned references have drained and closed every Lua VM. */
@@ -224,12 +225,52 @@ public:
     /** @summary Releases only the acknowledged original slot, never another generation.
      * @param index Original slot. @param vm Original runtime. @param generation Original identity. @return Exact native result. */
     runtime::ScopeResult ReleaseExact(std::size_t index,const ScriptRuntime* vm,std::uint64_t generation) noexcept {
-        const std::scoped_lock lock(mutex_);
+        const std::scoped_lock lock(mutex_);return ReleaseExactLocked(index,vm,generation);
+    }
+private:
+    /** @summary Share the exact original native identity/work release predicate; caller owns SAME lane mutex. */
+    runtime::ScopeResult ReleaseExactLocked(std::size_t index,const ScriptRuntime* vm,std::uint64_t generation)noexcept{
         if(index>=slots_.size())return runtime::ScopeResult::Stale;
         auto& slot=slots_[index];
         if(slot.runtime!=vm || slot.generation!=generation)return runtime::ScopeResult::Stale;
         if(slot.work || slot.executing)return runtime::ScopeResult::Indeterminate;
         if(slot.host)slot.host->Changed();slot={};return runtime::ScopeResult::Ok;
+    }
+public:
+    /** @summary Submit at most one embedded original paused-close control; subsequent calls only observe that same work and release its exact slot.
+     * @remarks Caller retains VM/controlMutex. Busy/NotReady never prove cleanup. No callback executes while L is held.
+     * A missing original identity before acknowledgement is retained unresolved; only closed-ack identity loss is terminal. */
+    runtime::ScopeResult ContinuePausedClose(ScriptRuntime& vm)noexcept{
+        using runtime::ScopeResult;using Phase=ScriptRuntime::PausedClosePhase;
+        try{std::unique_lock guard(mutex_,std::try_to_lock);if(!guard.owns_lock())return ScopeResult::Busy;
+            if(vm.pausedClosePhase_==Phase::Released)return ScopeResult::Ok;
+            if(vm.pausedClosePhase_==Phase::IrreversibleClosedFault)return ScopeResult::Indeterminate;
+            if(vm.pausedClosePhase_==Phase::Never){
+                if(vm.laneSlot_>=slots_.size())return ScopeResult::Stale;auto& slot=slots_[vm.laneSlot_];
+                if(slot.runtime!=&vm||slot.generation!=vm.vmGeneration_)return ScopeResult::Stale;
+                if(stopping_||slot.work||slot.executing)return ScopeResult::Busy;
+                if(slot.host||!slot.published.expired())return ScopeResult::Denied;
+                vm.pausedCloseWork_.run=[](void* value){auto& original=*static_cast<ScriptRuntime*>(value);
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+                    original.pausedCloseRunsForTest_.fetch_add(1);
+#endif
+                    original.Close();};
+                vm.pausedCloseWork_.context=&vm;
+                slot.work=&vm.pausedCloseWork_;vm.pausedClosePhase_=Phase::Submitted;wake_.notify_all();
+            }
+            if(vm.pausedClosePhase_==Phase::Submitted){
+                if(!vm.pausedCloseWork_.done)return ScopeResult::NotReady;
+                // @summary Actual worker sets done only after original Close returned and its executing pointer cleared under SAME L.
+                if(vm.pausedCloseWork_.error)return ScopeResult::Indeterminate;
+                vm.pausedClosePhase_=Phase::Acknowledged;
+            }
+            if(vm.laneSlot_>=slots_.size()||slots_[vm.laneSlot_].runtime!=&vm||slots_[vm.laneSlot_].generation!=vm.vmGeneration_){
+                vm.pausedClosePhase_=Phase::IrreversibleClosedFault;return ScopeResult::Indeterminate;
+            }
+            const auto released=ReleaseExactLocked(vm.laneSlot_,&vm,vm.vmGeneration_);
+            if(released==ScopeResult::Ok){vm.laneReleased_=true;vm.pausedClosePhase_=Phase::Released;}
+            return released;
+        }catch(...){return ScopeResult::Indeterminate;}
     }
     /** @summary Copies current original-host activity with a try-only L acquisition.
      * @param host Original host. @return Coherent exact-host counters without slot ownership. */
@@ -803,7 +844,23 @@ void ScriptRuntime::Initialize(const ScriptDefinition& definition) {
 ScriptRuntime::~ScriptRuntime() {
     scheduled_.store(false);
     const std::scoped_lock control(controlMutex_);
-    if(CloseAndReleaseLocked(false)!=runtime::ScopeResult::Ok)std::terminate();
+    if(pausedCloseManaged_){
+        while(true){const auto result=ContinuePausedCloseLocked();if(result==runtime::ScopeResult::Ok)break;
+            // @summary Preserve existing fatal cleanup scope ONLY after genuine Close acknowledgement and lost original slot identity.
+            if(pausedClosePhase_==PausedClosePhase::IrreversibleClosedFault)std::terminate();
+            // @summary Retain the SAME VM/embedded work on Busy/NotReady/unconfirmed uncertainty; no timeout, replacement or second Close.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }else if(CloseAndReleaseLocked(false)!=runtime::ScopeResult::Ok)std::terminate();
+}
+runtime::ScopeResult ScriptRuntime::ContinuePausedCloseLocked()noexcept{
+    if(!pausedCloseManaged_||OnScriptLane())return runtime::ScopeResult::Denied;
+    if(pausedClosePhase_==PausedClosePhase::Never){
+        try{std::unique_lock guard(mutex_,std::try_to_lock);if(!guard.owns_lock())return runtime::ScopeResult::Busy;
+            if(!bootstrap_||committed_||scheduled_.load()||schedulerHost_)return runtime::ScopeResult::Denied;
+        }catch(...){return runtime::ScopeResult::Indeterminate;}
+    }
+    return lane_->ContinuePausedClose(*this);
 }
 runtime::ScopeResult ScriptRuntime::CloseAndReleaseLocked(bool requireInactive) {
     if(laneReleased_)return runtime::ScopeResult::Ok;

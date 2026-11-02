@@ -1,6 +1,8 @@
 /** @file @summary Real Context-owned native selection DATA session, independent of SDK/VM/manager readiness. */
 #include "bootstrap/selection_data_session.hpp"
 #include "scripting/script_runtime.hpp"
+#include "scripting/base_host.hpp"
+#include "scripting/base_package_compile.hpp"
 #include <stdexcept>
 #include <Windows.h>
 namespace sc13::bootstrap {
@@ -31,6 +33,19 @@ SelectionDataSession::Status SelectionDataSession::Capture(std::string_view path
     if(opened.status!=io::Status::Ok)return opened.status==io::Status::Busy?Status::Busy:opened.status==io::Status::Unknown?Status::Unknown:Status::Refused;
     if(!Current(root_,observed_,installation_,nullptr,nullptr))return Status::Refused;
     turn_=std::make_unique<io::SelectionDataCapture>(io_,root_,observed_,static_cast<const io::NativeAdmission&>(*this),installation_);
-    return turn_->Capture(trusted,pins,version,compatibility,output);
+    const auto result=turn_->Capture(trusted,pins,version,compatibility,output);
+    if(result==Status::Accepted)captured_=output;return result;
 }catch(...){return Status::Refused;}}
+}
+
+namespace sc13::bootstrap {
+scripting::ScriptDefinition SelectionDataSession::Compile(const scripting::BasePackagePin& pin)const{
+    if(!captured_||!Current(root_,observed_,installation_,nullptr,nullptr)||pin.version!=captured_->component.version)
+        throw std::runtime_error("Original captured Base construction refused");
+    std::map<std::string,std::string> executable;
+    for(const auto& [name,bytes]:captured_->members)if(name!="LICENSE")executable.emplace(name,bytes);
+    auto result=scripting::CompileCapturedBasePackage(executable,pin);
+    if(!Current(root_,observed_,installation_,nullptr,nullptr))throw std::runtime_error("Original captured Base retired during compilation");
+    return result;
+}
 }

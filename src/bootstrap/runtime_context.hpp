@@ -8,6 +8,7 @@
 #include <Windows.h>
 #include <memory>
 
+namespace sc13::scripting {class BaseHost;struct BasePackagePin;}
 namespace sc13::mods { class ModManager; }
 namespace sc13::bootstrap {
 class SelectionDataSession;
@@ -33,6 +34,13 @@ public:
         const platform::base_artifact::TrustedArtifact& trusted,const std::map<std::string,std::string>& executablePins,
         std::string_view version,const platform::component_store::metadata::Compatibility& compatibility,
         std::shared_ptr<const platform::component_store::CapturedSelectionData>& output)noexcept;
+    /** @summary Construct one private uncommitted/unscheduled Base VM from SAME retained successful capture and independent pin.
+     * @remarks No host getter, readiness, publication, manager pairing or operation authority is supplied. */
+    runtime::ScopeResult ConstructPausedCapturedBase(const scripting::BasePackagePin&)noexcept;
+    /** @summary Same-thread offguard exact close; Busy/NotReady/uncertainty retain the same original VM/work; later calls only continue it, never resubmit Close.
+     * @remarks RequestStopIntent never calls this or any VM callback. Context destruction remains existing offguard
+     * VM destructor contract; CloseUnknown is not qualified by this unit. */
+    runtime::ScopeResult DisposePausedCapturedBase()noexcept;
     RuntimeContext(const RuntimeContext&) = delete;
     RuntimeContext& operator=(const RuntimeContext&) = delete;
     /** @summary Return original retained ownership without creating a second store.
@@ -81,7 +89,12 @@ private:
     std::shared_ptr<runtime::RuntimeLifecycle> lifecycle_;
     DWORD originalThread_{GetCurrentThreadId()};
     bool selectionAttempted_{};
-    std::unique_ptr<SelectionDataSession> selectionData_;
+    std::shared_ptr<SelectionDataSession> selectionData_;
+    bool pausedBaseAttempted_{};
+    std::unique_ptr<scripting::BaseHost> pausedBase_;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct ContextPausedBaseTestAccess;
+#endif
     Attempt attempt_{Attempt::NeverAttempted};
     DWORD failure_{ERROR_BUSY};
 };

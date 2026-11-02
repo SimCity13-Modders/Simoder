@@ -1,4 +1,5 @@
 #pragma once
+#include <exception>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -21,6 +22,7 @@
 
 struct lua_State;
 namespace sc13::mods::native { class NativeProvider; }
+namespace sc13::bootstrap {struct ContextPausedBaseTestAccess;}
 namespace sc13::mods { class ModManager; class ManagerClose; struct ManagerCloseTestAccess; struct ManagerPreparationTestAccess; class ManagerPreparation; class ManagerPublication; class PublicationOrigin; class OwnedPublication; class OwnerLifecycle; struct OwnerLifecycleTestAccess; }
 namespace sc13::scripting {
 /** @summary Native scheduler close witnesses; not a VM retirement or resource release certificate. */
@@ -151,6 +153,19 @@ private:
     std::unique_ptr<SemanticLua> semantics_;
     bool semanticQualified_{};
     friend class BaseHost;
+    /** @summary Fixed original control storage shared with ScriptLane; address survives every paused close continuation. */
+    struct NativeControlWork final {void (*run)(void*);void* context;std::exception_ptr error;bool done{};};
+    enum class PausedClosePhase {Never,Submitted,Acknowledged,Released,IrreversibleClosedFault};
+    bool pausedCloseManaged_{};
+    PausedClosePhase pausedClosePhase_{PausedClosePhase::Never};
+    NativeControlWork pausedCloseWork_{nullptr,nullptr,{},false};
+    /** @summary Continue one original close under actual control ownership; never submit a second Close. */
+    runtime::ScopeResult ContinuePausedCloseLocked()noexcept;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    friend struct sc13::bootstrap::ContextPausedBaseTestAccess;
+    inline static std::atomic<std::uint64_t> pausedCloseRunsForTest_{};
+#endif
+
     /** @summary Native-only verified bootstrap role, inaccessible to ordinary callers. */
     struct BaseBootstrap final {};
     /** @summary Construct verified base using the shared lane and allocator. */

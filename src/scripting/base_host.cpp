@@ -1,4 +1,5 @@
 #include "scripting/base_host.hpp"
+#include "bootstrap/selection_data_session.hpp"
 #include "scripting/base_package_compile.hpp"
 #include "mods/fixture_observation.hpp"
 #include "scripting/semantic_bridge.hpp"
@@ -67,6 +68,24 @@ BaseHost::BaseHost(const std::filesystem::path& directory, BasePackagePin pin,
         runtime_.reset(new ScriptRuntime(ScriptRuntime::BaseBootstrap{}, definition, std::move(host)));
         runtime_->Commit();
     } catch (...) { occupied.store(false); ownsSlot_ = false; throw; }
+}
+BaseHost::BaseHost(std::shared_ptr<bootstrap::SelectionDataSession> session,BasePackagePin pin)
+    :capturedSession_(std::move(session)),pin_(std::move(pin)){
+    bool expected{};if(!occupied.compare_exchange_strong(expected,true))throw std::runtime_error("Base host already exists");ownsSlot_=true;
+    try{
+        if(!capturedSession_)throw std::runtime_error("Original captured Base session missing");
+        const auto definition=capturedSession_->Compile(pin_);
+        bridge_=std::make_shared<SemanticBridge>();ScriptHost host;host.semantic=bridge_->Bind({});
+        runtime_.reset(new ScriptRuntime(ScriptRuntime::BaseBootstrap{},definition,std::move(host)));
+        runtime_->pausedCloseManaged_=true;
+        // @summary Deliberately NO Commit, scheduler registration, manager publication or public host access.
+    }catch(...){occupied.store(false);ownsSlot_=false;throw;}
+}
+runtime::ScopeResult BaseHost::DisposePaused()noexcept{
+    if(!capturedSession_||!runtime_)return runtime::ScopeResult::Invalid;
+    try{std::unique_lock control(runtime_->controlMutex_,std::try_to_lock);
+        if(!control.owns_lock())return runtime::ScopeResult::Busy;return runtime_->ContinuePausedCloseLocked();}
+    catch(...){return runtime::ScopeResult::Indeterminate;}
 }
 BaseHost::~BaseHost() {
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
