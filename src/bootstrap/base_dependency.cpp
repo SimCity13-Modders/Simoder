@@ -1,4 +1,5 @@
 #include "bootstrap/base_dependency.hpp"
+#include "runtime/runtime_scope.hpp"
 #include "bootstrap/base_response_policy.hpp"
 #include <winhttp.h>
 #include <algorithm>
@@ -99,6 +100,8 @@ struct BaseDependency::Body final {
     std::mutex callbackMutex;
     std::atomic<bool> cancelled{};
     std::atomic<std::uint32_t> readers{};
+    /** @summary Borrow SAME controller-retained domain; this atomic read never acquires a guard or calls foreign code. */
+    const runtime::RuntimeCommitDomain* originalDomain{};
     const std::atomic<std::uint64_t>* ownerEpoch{};
     std::uint64_t admissionEpoch{};
     HANDLE input{INVALID_HANDLE_VALUE},output{INVALID_HANDLE_VALUE},stage{INVALID_HANDLE_VALUE},unloadEvent{};
@@ -124,7 +127,7 @@ struct BaseDependency::Body final {
     /** @summary No effect construction; parents start invalid so partial staging has deterministic ownership. */
     Body():line(PathLimit+1,L'\0') {parents.fill(INVALID_HANDLE_VALUE);parentContext.body=this;for(std::size_t n=0;n<requestContexts.size();++n){requestContexts[n].body=this;requestContexts[n].ordinal=n;}}
     /** @summary Observe same-original parent stop directly even while this pump is processing one transition. */
-    bool Stopped() const noexcept {return cancelled.load()||(ownerEpoch&&(ownerEpoch->load(std::memory_order_acquire)!=admissionEpoch||admissionEpoch==std::numeric_limits<std::uint64_t>::max()));}
+    bool Stopped() const noexcept {return (originalDomain&&originalDomain->IsStopping())||cancelled.load()||(ownerEpoch&&(ownerEpoch->load(std::memory_order_acquire)!=admissionEpoch||admissionEpoch==std::numeric_limits<std::uint64_t>::max()));}
     /** @summary Destruction is legal only after Owner settled OS callbacks/staging/readers; parent stops retain this original. */
     ~Body(){for(auto h:parents)if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);if(input!=INVALID_HANDLE_VALUE)CloseHandle(input);if(output!=INVALID_HANDLE_VALUE)CloseHandle(output);if(unloadEvent)CloseHandle(unloadEvent);}
     /** @summary Snapshot exact externally selected content and review before console/network effects. */
@@ -366,8 +369,41 @@ struct BaseDependency::Body final {
     static_assert(sizeof(Pin)*65+sizeof(map)+sizeof(urls)+sizeof(headers)+4*(StagingPathLimit+80)*sizeof(wchar_t)<262144,"Network controls plus conservative staging path temporaries fit262144; transfer is separately bounded");
 };
 
+#if defined(SIMODER_BASE_DEPENDENCY_TEST) || defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+/** @summary Fixed test-only registration, never embedded in production/controller/Context instance layout. */
+struct BaseDependency::BeginCutState final {
+    BaseDependency* owner{};
+    void(*callback)(BaseDependency&,BeginCut)noexcept{};
+    bool inside{};
+};
+thread_local BaseDependency::BeginCutState BaseDependency::beginCutState_{};
+bool BaseDependency::ArmBeginCutForTest(BaseDependency& owner,void(*callback)(BaseDependency&,BeginCut)noexcept)noexcept{
+    auto& slot=beginCutState_;
+    if(GetCurrentThreadId()!=owner.thread_||!callback||slot.owner||slot.inside)return false;
+    slot.owner=&owner;slot.callback=callback;return true;
+}
+bool BaseDependency::DisarmBeginCutForTest(BaseDependency& owner)noexcept{
+    auto& slot=beginCutState_;
+    if(GetCurrentThreadId()!=owner.thread_||slot.inside||(slot.owner&&slot.owner!=&owner))return false;
+    slot={};return true;
+}
+void BaseDependency::ObserveBeginCutForTest(BeginCut cut)noexcept{
+    auto& slot=beginCutState_;
+    if(GetCurrentThreadId()!=thread_||slot.owner!=this||!slot.callback||slot.inside)return;
+    slot.inside=true;slot.callback(*this,cut);slot.inside=false;
+}
+void BaseDependency::RetireBeginCutForTest()noexcept{
+    auto& slot=beginCutState_;if(slot.owner==this)slot={};
+}
+#endif
 BaseDependency::BaseDependency(logging::AsyncLogger& logger) noexcept:logger_(logger),thread_(GetCurrentThreadId()){}
+BaseDependency::BaseDependency(logging::AsyncLogger& logger,std::shared_ptr<runtime::RuntimeCommitDomain> domain)noexcept
+    :originalDomain_(std::move(domain)),logger_(logger),thread_(GetCurrentThreadId()){}
 BaseDependency::~BaseDependency(){
+#if defined(SIMODER_BASE_DEPENDENCY_TEST) || defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    // @summary Same-thread owner destruction is quiescent by the existing synchronous Begin/destructor contract.
+    RetireBeginCutForTest();
+#endif
     RequestCancel();
     // @summary Original RuntimeContext must invoke/destruct on this ordinary owner thread offguards; no forced timeout disposal.
     while(body_&&!body_->terminal){(void)Pump();}
@@ -377,19 +413,20 @@ BaseDependency::~BaseDependency(){
 bool BaseDependency::Begin(const BaseDependencySelection& selected,const std::filesystem::path& stagingParent) noexcept {
     // @summary An invalid foreign entry must not write the original owner's nonatomic diagnostic state.
     if(GetCurrentThreadId()!=thread_)return false;
+    if(originalDomain_&&originalDomain_->IsStopping()){lastError_=BaseDependencyError::Cancelled;return false;}
     if(body_){RequestCancel();lastError_=BaseDependencyError::Busy;return false;}
     if(generation_==std::numeric_limits<std::uint64_t>::max()){lastError_=BaseDependencyError::InvalidSelection;return false;}
     const auto epoch=cancellationEpoch_.load(std::memory_order_acquire);
     if(epoch==std::numeric_limits<std::uint64_t>::max()){lastError_=BaseDependencyError::Cancelled;return false;}
-    try{auto original=std::make_unique<Body>();original->ownerEpoch=&cancellationEpoch_;original->admissionEpoch=epoch;if(!original->Select(selected,generation_+1)){lastError_=BaseDependencyError::InvalidSelection;return false;}
-#if defined(SIMODER_BASE_DEPENDENCY_TEST)
-        if(beginCut_)beginCut_(*this,BeginCut::Selected);
+    try{auto original=std::make_unique<Body>();original->originalDomain=originalDomain_.get();original->ownerEpoch=&cancellationEpoch_;original->admissionEpoch=epoch;if(!original->Select(selected,generation_+1)){lastError_=BaseDependencyError::InvalidSelection;return false;}
+#if defined(SIMODER_BASE_DEPENDENCY_TEST) || defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        ObserveBeginCutForTest(BeginCut::Selected);
 #endif
         if(original->Stopped()){lastError_=BaseDependencyError::Cancelled;return false;}
         // @summary Parents are retained before input; even a manual attempt belongs to the same bounded original slot.
         if(!original->Parents(stagingParent)){lastError_=BaseDependencyError::Stage;return false;}
-#if defined(SIMODER_BASE_DEPENDENCY_TEST)
-        if(beginCut_)beginCut_(*this,BeginCut::ParentsRetained);
+#if defined(SIMODER_BASE_DEPENDENCY_TEST) || defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+        ObserveBeginCutForTest(BeginCut::ParentsRetained);
 #endif
         if(original->Stopped()){lastError_=BaseDependencyError::Cancelled;return false;}
         ++generation_;body_=std::move(original);lastError_=BaseDependencyError::None;

@@ -12,9 +12,8 @@ struct BaseDependencyTestAccess final {
     inline static Observation* observed{};
     inline static const BaseDependencySelection* selection{};
     /** @summary Keep actual native caller data alive synchronously and stop before every Parents/Console/network effect. */
-    static void Arm(BaseDependency& controller,const BaseDependencySelection& selected,Observation& output)noexcept{
-        observed=&output;selection=&selected;output.owner=GetCurrentThreadId();
-        controller.beginCut_=[](BaseDependency& original,BaseDependency::BeginCut cut)noexcept{
+    static bool Arm(BaseDependency& controller,const BaseDependencySelection& selected,Observation& output)noexcept{
+        const bool installed=BaseDependency::ArmBeginCutForTest(controller,[](BaseDependency& original,BaseDependency::BeginCut cut)noexcept{
             if(cut!=BaseDependency::BeginCut::Selected)return;
             auto& value=*observed;
             // Even if a future regression accepts a foreign Begin, cancel there without recursive thread creation or OS effects.
@@ -31,10 +30,12 @@ struct BaseDependencyTestAccess final {
                 });foreign.join();value.ownerUnchanged=original.Error()==before;
                 std::jthread cancellation([&]{original.RequestCancel();});cancellation.join();
             }catch(...){value.failure=std::current_exception();original.RequestCancel();}
-        };
+        });
+        if(installed){observed=&output;selection=&selected;output.owner=GetCurrentThreadId();}
+        return installed;
     }
     /** @summary Clear borrowed diagnostic pointers only after synchronous Begin/joins ended. */
-    static void Disarm(BaseDependency& original)noexcept{original.beginCut_=nullptr;observed=nullptr;selection=nullptr;}
+    static bool Disarm(BaseDependency& original)noexcept{const bool closed=BaseDependency::DisarmBeginCutForTest(original);if(closed){observed=nullptr;selection=nullptr;}return closed;}
 };
 }
 /** @summary Assert actual state/isolation behavior, never injected statuses. */
@@ -47,8 +48,8 @@ int main(){try{using namespace sc13::bootstrap;namespace artifact=sc13::platform
     for(int iteration=0;iteration<16;++iteration){
         BaseDependency original(logger);BaseDependencySelection invalid{};
         Check(!original.Begin(invalid,{})&&original.Error()==BaseDependencyError::InvalidSelection,"prime actual owner diagnostic");
-        BaseDependencyTestAccess::Observation observed;BaseDependencyTestAccess::Arm(original,selected,observed);
-        const bool admitted=original.Begin(selected,{});BaseDependencyTestAccess::Disarm(original);
+        BaseDependencyTestAccess::Observation observed;Check(BaseDependencyTestAccess::Arm(original,selected,observed),"actual quiescent owner registration");
+        const bool admitted=original.Begin(selected,{});Check(BaseDependencyTestAccess::Disarm(original),"same original registration positively removed");
         if(observed.failure)std::rethrow_exception(observed.failure);
         Check(!admitted&&observed.cuts==1&&!observed.foreignReachedCut,"only real original Selected cut, foreign Begin never progresses");
         Check(observed.foreignRefused&&observed.foreignBusy&&observed.foreignGenerationZero&&observed.foreignPumpRefused&&observed.foreignReleaseRefused&&observed.foreignCaptureEmpty,"all foreign calls refuse without original owner access");

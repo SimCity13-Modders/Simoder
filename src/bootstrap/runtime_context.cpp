@@ -22,9 +22,37 @@ std::shared_ptr<platform::RuntimeOwner> RequireAcquiredOwner(std::shared_ptr<pla
 RuntimeContext::RuntimeContext(std::shared_ptr<platform::RuntimeOwner> owner)
     :owner_(RequireAcquiredOwner(std::move(owner))),domain_(std::make_shared<runtime::RuntimeCommitDomain>()),
      scope_(std::make_shared<runtime::RuntimeScope>(owner_,domain_)),
-     lifecycle_(std::make_shared<runtime::RuntimeLifecycle>(domain_)) {}
+     lifecycle_(std::make_shared<runtime::RuntimeLifecycle>(domain_)),
+     baseAcquisition_(logging::AsyncLogger::Instance(),domain_) {}
 
 RuntimeContext::~RuntimeContext()=default;
+/** @summary Guard before all mutable controller access; no scope getter or external admission callback is invoked here. */
+bool RuntimeContext::BeginBaseAcquisition(const BaseDependencySelection& selected,const std::filesystem::path& parent)noexcept{
+    if(GetCurrentThreadId()!=originalThread_||runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||
+        scripting::ScriptRuntime::OnScriptLane()||domain_->IsStopping()||!owner_->IsAcquired())return false;
+#if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
+    baseAcquisition_.ObserveBeginCutForTest(BaseDependency::BeginCut::ContextChecked);
+#endif
+    return baseAcquisition_.Begin(selected,parent);
+}
+BaseDependencyState RuntimeContext::PumpBaseAcquisition()noexcept{
+    if(GetCurrentThreadId()!=originalThread_||runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||scripting::ScriptRuntime::OnScriptLane())return BaseDependencyState::Unresolved;
+    return baseAcquisition_.Pump();
+}
+BaseDependency::CaptureReader RuntimeContext::CaptureBaseAcquisition()const noexcept{
+    if(GetCurrentThreadId()!=originalThread_||runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||
+        scripting::ScriptRuntime::OnScriptLane()||domain_->IsStopping()||!owner_->IsAcquired())return {};
+    return baseAcquisition_.Capture();
+}
+bool RuntimeContext::ReleaseBaseAcquisition()noexcept{
+    if(GetCurrentThreadId()!=originalThread_||runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||scripting::ScriptRuntime::OnScriptLane())return false;
+    return baseAcquisition_.Release();
+}
+BaseDependencyError RuntimeContext::BaseAcquisitionError()const noexcept{
+    if(GetCurrentThreadId()!=originalThread_||runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||scripting::ScriptRuntime::OnScriptLane())return BaseDependencyError::Busy;
+    return baseAcquisition_.Error();
+}
+
 platform::component_store::SelectionReadStatus RuntimeContext::CaptureSelectionData(std::string_view root,
     const platform::component_store::metadata::Identifier& installation,
     std::shared_ptr<const platform::component_store::NativeAdmission> admission,
@@ -88,7 +116,8 @@ DWORD RuntimeContext::Prepare() noexcept {
     }catch(...){return Fail(15);}
 }
 void RuntimeContext::RequestStopIntent(runtime::StopReason reason) noexcept {
-    domain_->RequestStop();scope_->RequestStop(reason);
+    // @summary Fixed member remains valid only while the concurrent caller retains this original Context.
+    domain_->RequestStop();baseAcquisition_.RequestCancel();scope_->RequestStop(reason);
 }
 DWORD RuntimeContext::CloseRetained(CloseObservation& output) noexcept {
     if(domain_->WriterActiveOnCurrentThread())return ERROR_BUSY;

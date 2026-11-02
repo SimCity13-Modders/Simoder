@@ -9,7 +9,7 @@ namespace sc13::bootstrap {
 struct BaseDependencyTestAccess final {
     inline static unsigned selected{};
     /** @summary Install only existing passive Selected observation/cancellation; it never approves input or fabricates a result. */
-    static void Arm(BaseDependency& controller)noexcept{controller.beginCut_=[](BaseDependency& original,BaseDependency::BeginCut cut)noexcept{if(cut==BaseDependency::BeginCut::Selected){++selected;original.RequestCancel();}};}
+    static bool Arm(BaseDependency& controller)noexcept{return BaseDependency::ArmBeginCutForTest(controller,[](BaseDependency& original,BaseDependency::BeginCut cut)noexcept{if(cut==BaseDependency::BeginCut::Selected){++selected;original.RequestCancel();}});}
 };
 }
 /** @summary Require actual original selection status and diagnostic count, no synthesized success. */
@@ -19,7 +19,7 @@ int main(){try{namespace artifact=sc13::platform::base_artifact;using namespace 
     std::array<artifact::FilePin,3> files{{{"mod.toml",1,{},false},{"scripts/init.luau",1,{},false},{"LICENSE",1,{},true}}};
     BaseDependencySelection selection{{2048,{},files},L"0.1.0",L"isolated",L"owned-fixture",L"strict descriptor shape",{}};
     auto& logger=sc13::logging::AsyncLogger::Instance();
-    const auto attempt=[&](bool valid){BaseDependency original(logger);BaseDependencyTestAccess::Arm(original);const auto before=BaseDependencyTestAccess::selected;
+    const auto attempt=[&](bool valid){BaseDependency original(logger);Check(BaseDependencyTestAccess::Arm(original),"actual quiescent owner registration");const auto before=BaseDependencyTestAccess::selected;
         Check(!original.Begin(selection,{}),"fixture never progresses to effects");
         Check(original.Error()==(valid?BaseDependencyError::Cancelled:BaseDependencyError::InvalidSelection),"actual strict selection disposition");
         Check(BaseDependencyTestAccess::selected==before+(valid?1U:0U)&&original.Generation()==0&&original.Pump()==BaseDependencyState::Vacant&&!original.Capture().Get()&&original.Release(),"actual preeffect boundary and empty original custody");};

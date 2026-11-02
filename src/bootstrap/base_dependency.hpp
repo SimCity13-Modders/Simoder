@@ -10,8 +10,10 @@
 #include <span>
 #include <string_view>
 
+namespace sc13::runtime {class RuntimeCommitDomain;}
 namespace sc13::bootstrap {
 class BaseBootstrap;
+class RuntimeContext;
 /** @summary Independently selected exact anonymous release destination; never parsed from a downloaded manifest.
  * @remarks An accepted descriptor lists complete URLs, not suffix/prefix wildcard authorization. */
 struct BaseReleaseUrl final { std::wstring_view exact; };
@@ -96,6 +98,11 @@ public:
     /** @summary Observe the bounded original refusal on its owning thread. @return Foreign-thread Busy is call refusal only, never a mutation of original state; no path/content is included. */
     [[nodiscard]] BaseDependencyError Error() const noexcept;
 private:
+    friend class RuntimeContext;
+    /** @summary Bind only the original Context monotonic stop domain; no caller-selected callback or authority. */
+    BaseDependency(logging::AsyncLogger&,std::shared_ptr<runtime::RuntimeCommitDomain>)noexcept;
+    /** @summary Declared before Body so original domain survives all callback/body/reader cleanup. */
+    std::shared_ptr<runtime::RuntimeCommitDomain> originalDomain_;
     std::unique_ptr<Body> body_;
     logging::AsyncLogger& logger_;
     DWORD thread_{};
@@ -103,13 +110,23 @@ private:
     BaseDependencyError lastError_{};
     /** @summary Saturating original admission epoch; a concurrent invalidation is never cleared by Begin. */
     std::atomic<std::uint64_t> cancellationEpoch_{};
-#if defined(SIMODER_BASE_DEPENDENCY_TEST)
+#if defined(SIMODER_BASE_DEPENDENCY_TEST) || defined(SIMODER_RUNTIME_TEST_AUTHORITY)
     friend struct BaseDependencyTestAccess;
     /** @summary The isolated installed-Base fixture can deny unexpected acquisition at the existing preeffect cut only. */
     friend class BaseBootstrap;
     /** @summary Deterministic actual Begin cut; absent from production and never an approval source. */
-    enum class BeginCut : std::uint8_t { Selected, ParentsRetained };
-    void (*beginCut_)(BaseDependency&,BeginCut) noexcept{};
+    enum class BeginCut : std::uint8_t { ContextChecked, Selected, ParentsRetained };
+    /** @summary Test-only thread-local storage is defined outside every controller/Context object in the original cpp. */
+    struct BeginCutState;
+    static thread_local BeginCutState beginCutState_;
+    /** @summary Register one actual constructing-thread owner only while the TLS fixture slot is quiescent. */
+    static bool ArmBeginCutForTest(BaseDependency&,void(*)(BaseDependency&,BeginCut)noexcept)noexcept;
+    /** @summary Remove only the same quiescent original registration; foreign/active/other-owner calls refuse. */
+    static bool DisarmBeginCutForTest(BaseDependency&)noexcept;
+    /** @summary Invoke synchronously only for the actual same owner/thread; no delayed callback or queue exists. */
+    void ObserveBeginCutForTest(BeginCut)noexcept;
+    /** @summary Original owner destruction clears its TLS registration without callbacks or new close behavior. */
+    void RetireBeginCutForTest()noexcept;
 #endif
 };
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "platform/runtime_owner.hpp"
+#include "bootstrap/base_dependency.hpp"
 #include "runtime/runtime_lifecycle.hpp"
 #include "runtime/runtime_scope.hpp"
 #include "platform/component_store/selection_data.hpp"
@@ -41,6 +42,20 @@ public:
      * @remarks RequestStopIntent never calls this or any VM callback. Context destruction remains existing offguard
      * VM destructor contract; CloseUnknown is not qualified by this unit. */
     runtime::ScopeResult DisposePausedCapturedBase()noexcept;
+    /** @summary Begin explicit acquisition on the original constructing thread, offguards; never auto-starts from loader.
+     * @remarks Same independent trust/console consent as BaseDependency. No runtime witness, installation or readiness.
+     * @pre No Q/B/L/native borrow guards. Concurrent stop callers retain this Context throughout their call. */
+    [[nodiscard]] bool BeginBaseAcquisition(const BaseDependencySelection&,const std::filesystem::path&)noexcept;
+    /** @summary Service genuine original cleanup even after domain stop; foreign/D/lane calls return Unresolved. */
+    [[nodiscard]] BaseDependencyState PumpBaseAcquisition()noexcept;
+    /** @summary Borrow authenticated immutable DATA/history only; stop after the last check may race this return.
+     * @remarks Reader must end before Context destruction. Caller retains Context; no current-authority promise.
+     * @pre Same original thread/offguards, with Q/B/L/native borrow exclusions as caller obligations. */
+    [[nodiscard]] BaseDependency::CaptureReader CaptureBaseAcquisition()const noexcept;
+    /** @summary Release only the original terminal slot after real readers/OS cleanup, including after domain stop. */
+    [[nodiscard]] bool ReleaseBaseAcquisition()noexcept;
+    /** @summary Observe original bounded acquisition error; foreign/D/lane calls return Busy without owner state access. */
+    [[nodiscard]] BaseDependencyError BaseAcquisitionError()const noexcept;
     RuntimeContext(const RuntimeContext&) = delete;
     RuntimeContext& operator=(const RuntimeContext&) = delete;
     /** @summary Return original retained ownership without creating a second store.
@@ -87,6 +102,8 @@ private:
     std::shared_ptr<runtime::RuntimeCommitDomain> domain_;
     std::shared_ptr<runtime::RuntimeScope> scope_;
     std::shared_ptr<runtime::RuntimeLifecycle> lifecycle_;
+    /** @summary Fixed original controller destroys before domain/scope/lifecycle; no optional pointer publication race or Context backedge. */
+    BaseDependency baseAcquisition_;
     DWORD originalThread_{GetCurrentThreadId()};
     bool selectionAttempted_{};
     std::shared_ptr<SelectionDataSession> selectionData_;
@@ -94,6 +111,8 @@ private:
     std::unique_ptr<scripting::BaseHost> pausedBase_;
 #if defined(SIMODER_RUNTIME_TEST_AUTHORITY)
     friend struct ContextPausedBaseTestAccess;
+    friend struct ContextBaseAcquisitionTestAccess;
+
 #endif
     Attempt attempt_{Attempt::NeverAttempted};
     DWORD failure_{ERROR_BUSY};
