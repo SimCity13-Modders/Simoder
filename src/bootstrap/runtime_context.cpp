@@ -1,4 +1,6 @@
 #include "bootstrap/runtime_context.hpp"
+#include "bootstrap/selection_data_session.hpp"
+#include "scripting/script_runtime.hpp"
 #include "mods/mod_manager.hpp"
 
 #include <chrono>
@@ -20,6 +22,22 @@ RuntimeContext::RuntimeContext(std::shared_ptr<platform::RuntimeOwner> owner)
     :owner_(RequireAcquiredOwner(std::move(owner))),domain_(std::make_shared<runtime::RuntimeCommitDomain>()),
      scope_(std::make_shared<runtime::RuntimeScope>(owner_,domain_)),
      lifecycle_(std::make_shared<runtime::RuntimeLifecycle>(domain_)) {}
+
+RuntimeContext::~RuntimeContext()=default;
+platform::component_store::SelectionReadStatus RuntimeContext::CaptureSelectionData(std::string_view root,
+    const platform::component_store::metadata::Identifier& installation,
+    std::shared_ptr<const platform::component_store::NativeAdmission> admission,
+    const platform::base_artifact::TrustedArtifact& trusted,const std::map<std::string,std::string>& pins,
+    std::string_view version,const platform::component_store::metadata::Compatibility& compatibility,
+    std::shared_ptr<const platform::component_store::CapturedSelectionData>& output)noexcept{
+    using Status=platform::component_store::SelectionReadStatus;
+    if(GetCurrentThreadId()!=originalThread_||selectionAttempted_||output||!admission||domain_->IsStopping()||
+        runtime::RuntimeCommitDomain::AnyWriterActiveOnCurrentThread()||scripting::ScriptRuntime::OnScriptLane())return Status::Refused;
+    selectionAttempted_=true;try{
+        selectionData_.reset(new SelectionDataSession(owner_,domain_,scope_,std::move(admission),originalThread_));
+        return selectionData_->Capture(root,installation,trusted,pins,version,compatibility,output);
+    }catch(...){return Status::Refused;}
+}
 
 bool RuntimeContext::PreparedFacts(std::uint32_t requiredReadiness) const {
     runtime::LifecycleSnapshot current;

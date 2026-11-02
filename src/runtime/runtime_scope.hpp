@@ -16,6 +16,7 @@
 #include "mods/patch_registry.hpp"
 
 namespace sc13::platform { class RuntimeOwner; }
+namespace sc13::bootstrap {class RuntimeContext;class SelectionDataSession;}
 namespace sc13::scripting { class SemanticBridge; }
 namespace sc13::mods { class OwnerLifecycle; class ManagerCommands; class ManagerClose; class LifecycleDecisionLease; struct LifecycleDecisionTestAccess; struct ManagerCommandTicket; struct ManagerCommandsTestAccess; struct OwnerLifecycleTestAccess; }
 namespace sc13::mods::native { class NativeProvider; }
@@ -123,6 +124,11 @@ public:
     RuntimeCommitDomain(const RuntimeCommitDomain&) = delete;
     RuntimeCommitDomain& operator=(const RuntimeCommitDomain&) = delete;
 private:
+    friend class sc13::bootstrap::RuntimeContext;
+    friend class sc13::bootstrap::SelectionDataSession;
+    /** @summary Reject any actual acquired current-thread writer before Context DATA IO; no lock, grant or new tracking state.
+     * @remarks This does not observe Q/B/L/borrow guards, which remain caller offguard preconditions. */
+    static bool AnyWriterActiveOnCurrentThread()noexcept{return activeWriter_!=nullptr;}
     static thread_local Writer* activeWriter_;
     std::mutex lane_;
     std::atomic<std::uint64_t> revision_{};

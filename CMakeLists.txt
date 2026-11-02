@@ -49,6 +49,7 @@ endfunction()
 add_library(sc13_core STATIC
     # @summary Share original bootstrap composition with the isolated acceptance host.
     src/bootstrap/runtime_context.cpp
+    src/bootstrap/selection_data_session.cpp
     src/bootstrap/base_dependency.cpp
     src/config/loader_config.cpp
     src/core/resource_filter.cpp

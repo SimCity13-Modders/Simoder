@@ -3,12 +3,14 @@
 #include "platform/runtime_owner.hpp"
 #include "runtime/runtime_lifecycle.hpp"
 #include "runtime/runtime_scope.hpp"
+#include "platform/component_store/selection_data.hpp"
 
 #include <Windows.h>
 #include <memory>
 
 namespace sc13::mods { class ModManager; }
 namespace sc13::bootstrap {
+class SelectionDataSession;
 /** @summary Original bootstrap ownership and once-only prepared publication, never native authority.
  * @pre Ownership mutation is serialized by the bootstrap operation guard. All callers hold no Q/State/L
  * or compound publication guard. Same-domain D rejection occurs before ownership staging. */
@@ -18,6 +20,19 @@ public:
      * @param owner Already acquired process owner; construction occurs after real build verification.
      * @throws std::invalid_argument Null or unacquired ownership is rejected before domain construction. */
     explicit RuntimeContext(std::shared_ptr<platform::RuntimeOwner> owner);
+    /** @summary Dispose original session only offguards after synchronous operations have returned; no file deletion. */
+    ~RuntimeContext();
+    /** @summary Capture immutable installed DATA exactly once against retained native admission/independent pins.
+     * @remarks Output grants no runtime/native authority or readiness. Same original constructing thread/offguard only.
+     * Context retains session/roots/admission through Unknown and stop; no automatic recovery or recapture.
+     * Any acquired current-thread D and script lane are rejected. Caller must exclude all Q/B/L/borrow
+     * cuts; this current source has no universal dynamic detector for those preconditions. */
+    platform::component_store::SelectionReadStatus CaptureSelectionData(std::string_view root,
+        const platform::component_store::metadata::Identifier& installation,
+        std::shared_ptr<const platform::component_store::NativeAdmission> admission,
+        const platform::base_artifact::TrustedArtifact& trusted,const std::map<std::string,std::string>& executablePins,
+        std::string_view version,const platform::component_store::metadata::Compatibility& compatibility,
+        std::shared_ptr<const platform::component_store::CapturedSelectionData>& output)noexcept;
     RuntimeContext(const RuntimeContext&) = delete;
     RuntimeContext& operator=(const RuntimeContext&) = delete;
     /** @summary Return original retained ownership without creating a second store.
@@ -64,6 +79,9 @@ private:
     std::shared_ptr<runtime::RuntimeCommitDomain> domain_;
     std::shared_ptr<runtime::RuntimeScope> scope_;
     std::shared_ptr<runtime::RuntimeLifecycle> lifecycle_;
+    DWORD originalThread_{GetCurrentThreadId()};
+    bool selectionAttempted_{};
+    std::unique_ptr<SelectionDataSession> selectionData_;
     Attempt attempt_{Attempt::NeverAttempted};
     DWORD failure_{ERROR_BUSY};
 };
