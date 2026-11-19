@@ -8,5 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+goblin.workspace = true
 simoder-core = { path = "../simoder-core" }
 simoder-formats = { path = "../simoder-formats" }
+thiserror.workspace = true
