@@ -6,7 +6,7 @@
 - Implement complete behavior; do not add TODO placeholders or retired runtime paths.
 - Follow [release hygiene](docs/architecture/release-hygiene.md): remove replaced code within its owning migration stage; Beta Release Candidate entry requires Strictly NO Legacy and an independent full engineering audit. Disabled legacy paths do not satisfy this gate.
 - The production distribution is one integrated x86 `d3d9.dll` placed beside `SimCity.exe`. Developer programs and example mods belong to Simoder-DevTools.
-- Preserve local work. Do not push or publish a release unless the user explicitly requests it.
+- **Git & Gitea Workflow**: Preserve local work during active development. Closing a task in Gitea strictly requires explicit user approval. Upon approval: commit referencing the task (e.g. `Refs #<id>` / `Closes #<id>`), push to remote, and close the Gitea issue with a comment referencing the commit (bidirectional traceability).
 - Prefix shell commands with `rtk`; follow `C:/Users/dawid/.codex/RTK.md`.
 
 ## Delivery workflow

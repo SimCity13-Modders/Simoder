@@ -1,0 +1,12 @@
+[package]
+name = "simoder-d3d9"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+simoder-core = { path = "../simoder-core" }
+simoder-formats = { path = "../simoder-formats" }

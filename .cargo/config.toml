@@ -1,0 +1,5 @@
+[patch."https://github.com/FluffyChi-Xing/fluffy-open-scp"]
+dbpf = { path = "../Simoder-OpenSCP/crates/dbpf" }
+sc-properties = { path = "../Simoder-OpenSCP/crates/sc-properties" }
+sc-format = { path = "../Simoder-OpenSCP/crates/sc-format" }
+rw4 = { path = "../Simoder-OpenSCP/crates/rw4" }

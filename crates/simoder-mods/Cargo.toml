@@ -1,0 +1,9 @@
+[package]
+name = "simoder-mods"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simoder-core = { path = "../simoder-core" }
+thiserror.workspace = true
