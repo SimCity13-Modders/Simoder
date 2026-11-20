@@ -11,4 +11,8 @@ crate-type = ["cdylib", "rlib"]
 goblin.workspace = true
 simoder-core = { path = "../simoder-core" }
 simoder-formats = { path = "../simoder-formats" }
+strum.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

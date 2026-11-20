@@ -1,8 +1,7 @@
 //! Integration tests for `simoder-d3d9` host validation, D3D9 exports, PE32 parsing, COM vftable/shader checks, and bootstrap coordination.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use simoder_d3d9::{
     BootstrapCoordinator, BootstrapOutcome, COFF_MACHINE_X86, D3D9_EXPORT_COUNT, D3d9Error,
@@ -11,28 +10,6 @@ use simoder_d3d9::{
     inspect_shader_blob, is_simcity_executable, lookup_export_by_name, lookup_export_by_ordinal,
     render_module_def, runtime_abi_version, validate_com_vftable,
 };
-
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(prefix: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}_{}_{nanos}", std::process::id()));
-        fs::create_dir_all(&path).unwrap();
-        Self { path }
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
 
 fn build_synthetic_pe32() -> Vec<u8> {
     let mut img = vec![0_u8; 0x220];
@@ -215,9 +192,9 @@ fn shader_blob_inspector_identifies_ps_and_vs_version_tokens() {
 
 #[test]
 fn bootstrap_coordinator_enforces_single_owner_marker_and_config_seeding() {
-    let dir = TempDirGuard::new("simoder_d3d9_boot");
-    let game_dir = dir.path.join("SimCity");
-    let sys_dir = dir.path.join("System32");
+    let dir = tempfile::tempdir().unwrap();
+    let game_dir = dir.path().join("SimCity");
+    let sys_dir = dir.path().join("System32");
     fs::create_dir_all(&game_dir).unwrap();
     fs::create_dir_all(&sys_dir).unwrap();
 
@@ -236,7 +213,7 @@ fn bootstrap_coordinator_enforces_single_owner_marker_and_config_seeding() {
         BootstrapOutcome::DisabledNonSimCityProcess { executable_name } if executable_name == "EADesktop.exe"
     ));
     assert!(!non_game.is_module_pinned());
-    assert!(!dir.path.join("simoder").join("config.toon").exists());
+    assert!(!dir.path().join("simoder").join("config.toon").exists());
 
     // Valid SimCity.exe initializes once, pins module, seeds config.toon, assesses PE32, then rejects re-entry
     let coordinator = BootstrapCoordinator::new();
@@ -249,8 +226,8 @@ fn bootstrap_coordinator_enforces_single_owner_marker_and_config_seeding() {
             config,
             build,
         } => {
-            assert_eq!(paths.game_root, dir.path);
-            assert_eq!(paths.data_root, dir.path.join("simoder"));
+            assert_eq!(paths.game_root, dir.path());
+            assert_eq!(paths.data_root, dir.path().join("simoder"));
             assert_eq!(paths.system_d3d9_path, sys_dir.join("d3d9.dll"));
             assert!(!config.developer_console.enabled);
             assert!(paths.data_root.join("config.toon").is_file());
@@ -269,7 +246,7 @@ fn bootstrap_coordinator_enforces_single_owner_marker_and_config_seeding() {
     );
 
     // proxy.disabled marker suppresses initialization cleanly
-    fs::write(dir.path.join("simoder").join(PROXY_DISABLED_MARKER_FILE), b"").unwrap();
+    fs::write(dir.path().join("simoder").join(PROXY_DISABLED_MARKER_FILE), b"").unwrap();
     let disabled_coord = BootstrapCoordinator::new();
     let disabled_outcome = disabled_coord
         .try_begin_bootstrap(&proxy_dll, &simcity_exe, &sys_dir)

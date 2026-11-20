@@ -1,4 +1,4 @@
-//! Static configuration, retail build fingerprint, ordinal, and D3D9 shader constants for `simoder-d3d9`.
+//! Static configuration, retail build fingerprint, and D3D9 shader constants for `simoder-d3d9`.
 
 /// Current Rust runtime ABI surface version exposed by `simoder-d3d9`.
 pub const SIMODER_RUST_ABI_VERSION: u32 = 1;
@@ -15,15 +15,6 @@ pub const SIMODER_DATA_DIR_NAME: &str = "simoder";
 /// Optional sentinel filename inside [`SIMODER_DATA_DIR_NAME`] that disables runtime initialization
 /// while keeping transparent D3D9 graphics forwarding active.
 pub const PROXY_DISABLED_MARKER_FILE: &str = "proxy.disabled";
-
-/// First exported ordinal of the Windows `d3d9.dll` proxy table (`16..=38`).
-pub const D3D9_ORDINAL_BASE: u16 = 16;
-
-/// Final exported ordinal of the Windows `d3d9.dll` proxy table (`Direct3DCreate9Ex`).
-pub const D3D9_ORDINAL_LAST: u16 = 38;
-
-/// Total number of forwarded exports spanning ordinals [`D3D9_ORDINAL_BASE`]..=[`D3D9_ORDINAL_LAST`].
-pub const D3D9_EXPORT_COUNT: usize = 23;
 
 /// Expected retail `SimCity.exe` PE file version matching verified hook addresses and schemas.
 pub const SUPPORTED_GAME_VERSION: &str = "10.3.6.0";

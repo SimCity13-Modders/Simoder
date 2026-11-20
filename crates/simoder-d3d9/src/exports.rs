@@ -1,17 +1,17 @@
 //! Windows `d3d9.dll` 23-ordinal ABI contract (`16..=38`) and module-definition (`.def`) renderer.
 
-use std::fmt::Write as _;
+use std::str::FromStr;
 
-use crate::config::{D3D9_EXPORT_COUNT, D3D9_ORDINAL_BASE, D3D9_ORDINAL_LAST};
+use strum::{EnumString, FromRepr, IntoStaticStr, VariantArray};
 
 /// Windows system `d3d9.dll` export slot (`Ordinal Base = 16`, ordinals `16..=38`).
 ///
-/// System `d3d9.dll` begins its PE Export Directory at ordinal `16` and exports six internal
-/// slots (`16..=19` and `22..=23`) strictly by ordinal (`NONAME` without ASCII symbol strings
-/// in the PE export name table), while `20..=21` and `24..=38` expose named Windows APIs.
+/// Each variant is the single source of truth for its ordinal (`= N`), forwarding slot
+/// (`ordinal - 16`), and PE export symbol name (derived via `strum`; internal `Ordinal*`
+/// variants represent `NONAME` ordinal-only Windows exports).
 #[repr(u16)]
 #[allow(non_camel_case_types)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, FromRepr, IntoStaticStr, VariantArray)]
 pub enum D3d9Export {
     /// Internal Windows `d3d9.dll` `NONAME` export at ordinal 16.
     Ordinal16 = 16,
@@ -61,41 +61,19 @@ pub enum D3d9Export {
     Direct3DCreate9Ex = 38,
 }
 
-impl D3d9Export {
-    /// Complete ordered list of all 23 Windows `d3d9.dll` export slots (`16..=38`).
-    pub const ALL: [Self; D3D9_EXPORT_COUNT] = [
-        Self::Ordinal16,
-        Self::Ordinal17,
-        Self::Ordinal18,
-        Self::Ordinal19,
-        Self::Direct3DCreate9On12,
-        Self::Direct3DCreate9On12Ex,
-        Self::Ordinal22,
-        Self::Ordinal23,
-        Self::Direct3DShaderValidatorCreate9,
-        Self::PSGPError,
-        Self::PSGPSampleTexture,
-        Self::D3DPERF_BeginEvent,
-        Self::D3DPERF_EndEvent,
-        Self::D3DPERF_GetStatus,
-        Self::D3DPERF_QueryRepeatFrame,
-        Self::D3DPERF_SetMarker,
-        Self::D3DPERF_SetOptions,
-        Self::D3DPERF_SetRegion,
-        Self::DebugSetLevel,
-        Self::DebugSetMute,
-        Self::Direct3D9EnableMaximizedWindowedModeShim,
-        Self::Direct3DCreate9,
-        Self::Direct3DCreate9Ex,
-    ];
+/// Total number of forwarded Windows `d3d9.dll` exports defined on [`D3d9Export`].
+pub const D3D9_EXPORT_COUNT: usize = D3d9Export::VARIANTS.len();
 
+/// First exported ordinal of the Windows `d3d9.dll` proxy table, derived from [`D3d9Export`].
+pub const D3D9_ORDINAL_BASE: u16 = D3d9Export::VARIANTS[0].ordinal();
+
+/// Final exported ordinal of the Windows `d3d9.dll` proxy table, derived from [`D3d9Export`].
+pub const D3D9_ORDINAL_LAST: u16 = D3d9Export::VARIANTS[D3D9_EXPORT_COUNT - 1].ordinal();
+
+impl D3d9Export {
     /// Resolve a [`D3d9Export`] variant from its numeric PE ordinal (`16..=38`).
     pub const fn from_ordinal(ordinal: u16) -> Option<Self> {
-        if ordinal >= D3D9_ORDINAL_BASE && ordinal <= D3D9_ORDINAL_LAST {
-            Some(Self::ALL[(ordinal - D3D9_ORDINAL_BASE) as usize])
-        } else {
-            None
-        }
+        Self::from_repr(ordinal)
     }
 
     /// Return the numeric PE export ordinal (`16..=38`).
@@ -103,7 +81,7 @@ impl D3d9Export {
         self as u16
     }
 
-    /// Return the zero-based forwarding table index (`ordinal - 16`, in `0..23`).
+    /// Return the zero-based forwarding table index (`ordinal - D3D9_ORDINAL_BASE`, in `0..23`).
     pub const fn index(self) -> usize {
         (self.ordinal() - D3D9_ORDINAL_BASE) as usize
     }
@@ -114,80 +92,49 @@ impl D3d9Export {
         matches!(self, Self::Direct3DCreate9 | Self::Direct3DCreate9Ex)
     }
 
-    /// Return the Windows PE export symbol name, or `None` for `NONAME` ordinal-only exports (`16..=19`, `22..=23`).
-    pub const fn symbol_name(self) -> Option<&'static str> {
-        match self {
-            Self::Ordinal16
-            | Self::Ordinal17
-            | Self::Ordinal18
-            | Self::Ordinal19
-            | Self::Ordinal22
-            | Self::Ordinal23 => None,
-            Self::Direct3DCreate9On12 => Some("Direct3DCreate9On12"),
-            Self::Direct3DCreate9On12Ex => Some("Direct3DCreate9On12Ex"),
-            Self::Direct3DShaderValidatorCreate9 => Some("Direct3DShaderValidatorCreate9"),
-            Self::PSGPError => Some("PSGPError"),
-            Self::PSGPSampleTexture => Some("PSGPSampleTexture"),
-            Self::D3DPERF_BeginEvent => Some("D3DPERF_BeginEvent"),
-            Self::D3DPERF_EndEvent => Some("D3DPERF_EndEvent"),
-            Self::D3DPERF_GetStatus => Some("D3DPERF_GetStatus"),
-            Self::D3DPERF_QueryRepeatFrame => Some("D3DPERF_QueryRepeatFrame"),
-            Self::D3DPERF_SetMarker => Some("D3DPERF_SetMarker"),
-            Self::D3DPERF_SetOptions => Some("D3DPERF_SetOptions"),
-            Self::D3DPERF_SetRegion => Some("D3DPERF_SetRegion"),
-            Self::DebugSetLevel => Some("DebugSetLevel"),
-            Self::DebugSetMute => Some("DebugSetMute"),
-            Self::Direct3D9EnableMaximizedWindowedModeShim => {
-                Some("Direct3D9EnableMaximizedWindowedModeShim")
-            }
-            Self::Direct3DCreate9 => Some("Direct3DCreate9"),
-            Self::Direct3DCreate9Ex => Some("Direct3DCreate9Ex"),
-        }
+    /// Return the Windows PE export symbol name, or `None` for `NONAME` ordinal-only exports (`Ordinal*`).
+    pub fn symbol_name(self) -> Option<&'static str> {
+        let name: &'static str = self.into();
+        (!name.starts_with("Ordinal")).then_some(name)
     }
 }
 
-/// Return all 23 Windows `d3d9.dll` exports ordered by ordinal (`16..=38`).
-pub const fn all_d3d9_exports() -> [D3d9Export; D3D9_EXPORT_COUNT] {
-    D3d9Export::ALL
+/// Return all Windows `d3d9.dll` exports ordered by declaration via [`VariantArray::VARIANTS`].
+pub const fn all_d3d9_exports() -> &'static [D3d9Export] {
+    D3d9Export::VARIANTS
 }
 
 /// Look up an export variant by its numeric PE ordinal (`16..=38`).
 pub const fn lookup_export_by_ordinal(ordinal: u16) -> Option<D3d9Export> {
-    D3d9Export::from_ordinal(ordinal)
+    D3d9Export::from_repr(ordinal)
 }
 
-/// Look up an export variant by its exact public Windows `d3d9.dll` symbol name.
+/// Look up an export variant by its exact public Windows `d3d9.dll` symbol name via [`EnumString`].
 pub fn lookup_export_by_name(name: &str) -> Option<D3d9Export> {
-    D3d9Export::ALL
-        .into_iter()
-        .find(|export| export.symbol_name() == Some(name))
+    D3d9Export::from_str(name)
+        .ok()
+        .filter(|export| export.symbol_name().is_some())
 }
 
 /// Render a linker module-definition file (`.def`) preserving all 23 Windows `d3d9.dll` ordinals
 /// and `stdcall` factory decorations (`@4` / `@8`).
 pub fn render_module_def() -> String {
     let mut out = String::from("LIBRARY d3d9\nEXPORTS\n");
-    for export in D3d9Export::ALL {
+    for &export in D3d9Export::VARIANTS {
         let ordinal = export.ordinal();
-        match export {
-            D3d9Export::Direct3DCreate9 => {
-                let _ = writeln!(out, "    Direct3DCreate9=_SimoderDirect3DCreate9@4 @{ordinal}");
+        let line = match (export, export.symbol_name()) {
+            (D3d9Export::Direct3DCreate9, _) => {
+                format!("    Direct3DCreate9=_SimoderDirect3DCreate9@4 @{ordinal}\n")
             }
-            D3d9Export::Direct3DCreate9Ex => {
-                let _ = writeln!(out, "    Direct3DCreate9Ex=_SimoderDirect3DCreate9Ex@8 @{ordinal}");
+            (D3d9Export::Direct3DCreate9Ex, _) => {
+                format!("    Direct3DCreate9Ex=_SimoderDirect3DCreate9Ex@8 @{ordinal}\n")
             }
-            _ => match export.symbol_name() {
-                Some(name) => {
-                    let _ = writeln!(out, "    {name}=SimoderProxyOrdinal{ordinal} @{ordinal}");
-                }
-                None => {
-                    let _ = writeln!(
-                        out,
-                        "    SimoderOrdinal{ordinal}=SimoderProxyOrdinal{ordinal} @{ordinal} NONAME"
-                    );
-                }
-            },
-        }
+            (_, Some(name)) => format!("    {name}=SimoderProxyOrdinal{ordinal} @{ordinal}\n"),
+            (_, None) => format!(
+                "    SimoderOrdinal{ordinal}=SimoderProxyOrdinal{ordinal} @{ordinal} NONAME\n"
+            ),
+        };
+        out.push_str(&line);
     }
     out
 }

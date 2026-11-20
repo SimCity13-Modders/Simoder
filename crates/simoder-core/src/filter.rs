@@ -33,16 +33,9 @@ impl ResourceFilter {
     }
 
     /// Report whether every configured field matches the supplied [`Tgi`] identifier.
-    pub const fn matches(&self, tgi: Tgi) -> bool {
-        (match self.type_id {
-            Some(expected) => expected == tgi.type_id,
-            None => true,
-        }) && (match self.group {
-            Some(expected) => expected == tgi.group,
-            None => true,
-        }) && (match self.instance {
-            Some(expected) => expected == tgi.instance,
-            None => true,
-        })
+    pub fn matches(&self, tgi: Tgi) -> bool {
+        self.type_id.is_none_or(|expected| expected == tgi.type_id)
+            && self.group.is_none_or(|expected| expected == tgi.group)
+            && self.instance.is_none_or(|expected| expected == tgi.instance)
     }
 }

@@ -12,5 +12,6 @@ sc-properties.workspace = true
 serde.workspace = true
 serde_toon.workspace = true
 simoder-core = { path = "../simoder-core" }
+tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true

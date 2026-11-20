@@ -63,10 +63,8 @@ pub fn validate_runtime_property_table(
     if properties.len() != expected_count {
         return RuntimeTableStatus::WrongCount;
     }
-    for pair in properties.windows(2) {
-        if pair[0].id >= pair[1].id {
-            return RuntimeTableStatus::NotStrictlySorted;
-        }
+    if !properties.is_sorted_by(|a, b| a.id < b.id) {
+        return RuntimeTableStatus::NotStrictlySorted;
     }
     RuntimeTableStatus::Valid
 }

@@ -1,13 +1,15 @@
 //! Typed loader and developer-console configuration codecs for `config.toon` and TOML.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use simoder_core::LogLevel;
+use tempfile::NamedTempFile;
 
 use crate::FormatError;
-use crate::toon::{load_toon_file_typed, parse_toon_typed};
+use crate::toon::{load_toon_file_typed, parse_toon_typed, toon_to_string};
 
 /// Canonical bootstrap configuration filename created inside the `simoder/` directory.
 pub const CONFIG_TOON_FILE_NAME: &str = "config.toon";
@@ -34,7 +36,7 @@ pub struct DeveloperConsoleConfig {
     #[serde(alias = "capture_mod_logs")]
     pub capture_mod_logs: bool,
     /// Minimum log severity threshold (`"trace"`, `"debug"`, `"info"`, `"warn"`, or `"error"`).
-    pub level: String,
+    pub level: LogLevel,
 }
 
 impl Default for DeveloperConsoleConfig {
@@ -44,7 +46,7 @@ impl Default for DeveloperConsoleConfig {
             capture_game_logs: true,
             capture_loader_logs: true,
             capture_mod_logs: true,
-            level: "info".to_string(),
+            level: LogLevel::Info,
         }
     }
 }
@@ -79,28 +81,26 @@ impl Default for LoaderConfig {
 }
 
 /// Strict TOON wrapper matching the required `developerConsole` root key of `config.toon`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToonBootstrapConfig {
     #[serde(rename = "developerConsole")]
     developer_console: DeveloperConsoleConfig,
 }
 
-/// Return the canonical default `config.toon` content seeded when no configuration file exists yet.
-pub const fn default_config_text() -> &'static str {
-    "developerConsole:\n\
-     \x20 enabled: false\n\
-     \x20 captureGameLogs: true\n\
-     \x20 captureLoaderLogs: true\n\
-     \x20 captureModLogs: true\n\
-     \x20 level: info\n"
+/// Generate the canonical default `config.toon` text from [`DeveloperConsoleConfig::default`] via [`serde_toon`].
+pub fn default_config_text() -> String {
+    let mut text = toon_to_string(&ToonBootstrapConfig::default())
+        .expect("default ToonBootstrapConfig serializes cleanly");
+    text.push('\n');
+    text
 }
 
 impl LoaderConfig {
     /// Parse and validate loader configuration from a UTF-8 TOML document.
     pub fn from_toml(source: &str) -> Result<Self, FormatError> {
         let cfg: Self = toml::from_str(source)?;
-        validate_console_level(&cfg.developer_console.level)?;
+        Self::validate_threshold(cfg.developer_console.level)?;
         Ok(cfg)
     }
 
@@ -113,11 +113,21 @@ impl LoaderConfig {
     }
 
     fn from_toon_bootstrap(root: ToonBootstrapConfig) -> Result<Self, FormatError> {
-        validate_console_level(&root.developer_console.level)?;
+        Self::validate_threshold(root.developer_console.level)?;
         Ok(Self {
             developer_console: root.developer_console,
             ..Self::default()
         })
+    }
+
+    fn validate_threshold(level: LogLevel) -> Result<(), FormatError> {
+        if level.is_threshold_level() {
+            Ok(())
+        } else {
+            Err(FormatError::ConfigValidation(
+                "developerConsole.level must be trace, debug, info, warn, or error".to_string(),
+            ))
+        }
     }
 }
 
@@ -133,24 +143,10 @@ pub fn load_or_create_config(simoder_directory: &Path) -> Result<LoaderConfig, F
     LoaderConfig::from_toon_bootstrap(root)
 }
 
-fn validate_console_level(level: &str) -> Result<(), FormatError> {
-    if matches!(level, "trace" | "debug" | "info" | "warn" | "error")
-        && LogLevel::parse(level).is_some()
-    {
-        return Ok(());
-    }
-    Err(FormatError::ConfigValidation(
-        "developerConsole.level must be trace, debug, info, warn, or error".to_string(),
-    ))
-}
-
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FormatError> {
-    let temp_name = format!("{CONFIG_TOON_FILE_NAME}.tmp");
-    let temp_path = path.with_file_name(temp_name);
-    fs::write(&temp_path, bytes)?;
-    if let Err(err) = fs::rename(&temp_path, path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(err.into());
-    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temp = NamedTempFile::new_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.persist(path).map_err(|err| err.error)?;
     Ok(())
 }

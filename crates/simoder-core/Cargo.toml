@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anstyle.workspace = true
 dbpf.workspace = true
 hex.workspace = true
+serde.workspace = true
 sha2.workspace = true
+strum.workspace = true
 thiserror.workspace = true

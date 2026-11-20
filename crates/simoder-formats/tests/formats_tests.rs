@@ -1,37 +1,13 @@
 //! Integration tests for `simoder-formats`: DBPF/RefPack, PROP, ERZ, `serde_toon` and config codecs.
 
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use simoder_core::Tgi;
+use simoder_core::{LogLevel, Tgi};
 use simoder_formats::{
     Format, FormatError, Kind, LoaderConfig, PropType, PropertyFile, Value, build_resource_overlay,
-    erz_parse_summary, load_or_create_config, mod_locale_table_id, parse_toon, probe,
-    refpack_decompress,
+    default_config_text, erz_parse_summary, load_or_create_config, mod_locale_table_id, parse_toon,
+    probe, refpack_decompress,
 };
-
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(prefix: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}_{}_{nanos}", std::process::id()));
-        fs::create_dir_all(&path).unwrap();
-        Self { path }
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
 
 #[test]
 fn builds_valid_dbpf_overlay_and_probes_signature() {
@@ -182,40 +158,52 @@ fn derives_deterministic_mod_locale_table_id() {
 
 #[test]
 fn creates_loads_and_validates_config_toon_and_toml() {
-    let dir = TempDirGuard::new("simoder_cfg_test");
-    let cfg = load_or_create_config(&dir.path).unwrap();
+    assert!(LoaderConfig::from_toon(&default_config_text()).is_ok());
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = load_or_create_config(dir.path()).unwrap();
     assert!(!cfg.developer_console.enabled);
     assert!(cfg.developer_console.capture_game_logs);
-    assert_eq!(cfg.developer_console.level, "info");
-    assert!(dir.path.join("config.toon").is_file());
+    assert_eq!(cfg.developer_console.level, LogLevel::Info);
+    assert!(dir.path().join("config.toon").is_file());
 
     fs::write(
-        dir.path.join("config.toon"),
+        dir.path().join("config.toon"),
         "developerConsole:\n  enabled: true\n  captureGameLogs: false\n  captureLoaderLogs: true\n  captureModLogs: true\n  level: debug\n",
     )
     .unwrap();
-    let updated = load_or_create_config(&dir.path).unwrap();
+    let updated = load_or_create_config(dir.path()).unwrap();
     assert!(updated.developer_console.enabled);
     assert!(!updated.developer_console.capture_game_logs);
-    assert_eq!(updated.developer_console.level, "debug");
+    assert_eq!(updated.developer_console.level, LogLevel::Debug);
 
     fs::write(
-        dir.path.join("config.toon"),
+        dir.path().join("config.toon"),
         "developerConsole:\n  enabled: yes\n",
     )
     .unwrap();
     assert!(matches!(
-        load_or_create_config(&dir.path),
+        load_or_create_config(dir.path()),
         Err(FormatError::Toon(_))
     ));
 
     fs::write(
-        dir.path.join("config.toon"),
+        dir.path().join("config.toon"),
         "developerConsole:\n  level: verbose\n",
     )
     .unwrap();
     assert!(matches!(
-        load_or_create_config(&dir.path),
+        load_or_create_config(dir.path()),
+        Err(FormatError::Toon(_))
+    ));
+
+    fs::write(
+        dir.path().join("config.toon"),
+        "developerConsole:\n  level: patch\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        load_or_create_config(dir.path()),
         Err(FormatError::ConfigValidation(_))
     ));
 

@@ -94,10 +94,7 @@ impl Pe32Image {
                 "PE image is missing optional header".to_string(),
             ));
         };
-        if machine != COFF_MACHINE_X86
-            || pe.is_64
-            || opt.standard_fields.magic != MAGIC_32
-        {
+        if machine != COFF_MACHINE_X86 || pe.is_64 || opt.standard_fields.magic != MAGIC_32 {
             return Err(D3d9Error::InvalidPe(
                 "image is not a supported 32-bit x86 PE32 binary".to_string(),
             ));
@@ -221,81 +218,76 @@ impl Pe32Image {
     /// Scan all executable sections for a little-endian 32-bit `value` and return matching RVAs.
     pub fn find_value_in_executable_sections(&self, value: u32, max_hits: usize) -> Vec<u32> {
         let pattern = value.to_le_bytes();
-        let mut hits = Vec::new();
-        for section in self.sections.iter().filter(|s| s.is_executable()) {
-            let Some(raw) = self.section_raw_bytes(section) else {
-                continue;
-            };
-            for (offset, window) in raw.windows(4).enumerate() {
-                if hits.len() >= max_hits {
-                    return hits;
-                }
-                if window == pattern {
-                    hits.push(section.virtual_address + offset as u32);
-                }
-            }
-        }
-        hits
+        self.executable_windows(4)
+            .filter_map(|(rva, window)| (window == pattern).then_some(rva))
+            .take(max_hits)
+            .collect()
     }
 
     /// Scan executable sections for x86 `E8 rel32` calls whose decoded target equals `target_va`, returning call RVAs.
     pub fn find_relative_call_references(&self, target_va: u32, max_hits: usize) -> Vec<u32> {
         const CALL_INSN_LEN: usize = 5;
-        let mut hits = Vec::new();
-        for section in self.sections.iter().filter(|s| s.is_executable()) {
-            let Some(raw) = self.section_raw_bytes(section) else {
-                continue;
-            };
-            for (offset, window) in raw.windows(CALL_INSN_LEN).enumerate() {
-                if hits.len() >= max_hits {
-                    return hits;
-                }
+        self.executable_windows(CALL_INSN_LEN)
+            .filter_map(|(call_rva, window)| {
                 if window[0] != 0xE8 {
-                    continue;
+                    return None;
                 }
-                let Ok(disp_bytes) = <[u8; 4]>::try_from(&window[1..5]) else {
-                    continue;
-                };
+                let disp_bytes = <[u8; 4]>::try_from(&window[1..5]).ok()?;
                 let displacement = i32::from_le_bytes(disp_bytes);
-                let call_rva = section.virtual_address + offset as u32;
                 let next_va =
                     i64::from(self.image_base) + i64::from(call_rva) + CALL_INSN_LEN as i64;
-                if next_va + i64::from(displacement) == i64::from(target_va) {
-                    hits.push(call_rva);
-                }
-            }
+                (next_va + i64::from(displacement) == i64::from(target_va)).then_some(call_rva)
+            })
+            .take(max_hits)
+            .collect()
+    }
+
+    /// Compute SHA-256 build identity and retail compatibility flags from this already-parsed PE32 image.
+    pub fn assess(&self) -> BuildAssessment {
+        let file_sha256 = hex::encode(Sha256::digest(self.as_bytes()));
+        let text_sha256 = self
+            .find_section(".text")
+            .and_then(|sec| self.section_raw_bytes(sec))
+            .map(|raw| hex::encode(Sha256::digest(raw)));
+
+        let verified_retail_file = file_sha256.eq_ignore_ascii_case(SUPPORTED_GAME_FILE_SHA256);
+        let verified_retail_text = text_sha256
+            .as_deref()
+            .is_some_and(|digest| digest.eq_ignore_ascii_case(SUPPORTED_GAME_TEXT_SHA256));
+
+        BuildAssessment {
+            file_sha256,
+            text_sha256,
+            machine: self.machine,
+            image_base: self.image_base,
+            image_size: self.image_size,
+            verified_retail_file,
+            verified_retail_text,
         }
-        hits
+    }
+
+    fn executable_windows(&self, width: usize) -> impl Iterator<Item = (u32, &[u8])> + '_ {
+        self.sections
+            .iter()
+            .filter(|sec| sec.is_executable())
+            .filter_map(|sec| {
+                let raw = self.section_raw_bytes(sec)?;
+                Some((sec.virtual_address, raw))
+            })
+            .flat_map(move |(base_rva, raw)| {
+                raw.windows(width)
+                    .enumerate()
+                    .map(move |(offset, window)| (base_rva + offset as u32, window))
+            })
     }
 }
 
 /// Assess build identity and SHA-256 verification flags from an in-memory PE32 image slice.
 pub fn assess_pe32_bytes(bytes: &[u8]) -> Result<BuildAssessment, D3d9Error> {
-    let image = Pe32Image::parse(bytes)?;
-    let file_sha256 = hex::encode(Sha256::digest(image.as_bytes()));
-    let text_sha256 = image
-        .find_section(".text")
-        .and_then(|sec| image.section_raw_bytes(sec))
-        .map(|raw| hex::encode(Sha256::digest(raw)));
-
-    let verified_retail_file = file_sha256.eq_ignore_ascii_case(SUPPORTED_GAME_FILE_SHA256);
-    let verified_retail_text = text_sha256
-        .as_deref()
-        .is_some_and(|digest| digest.eq_ignore_ascii_case(SUPPORTED_GAME_TEXT_SHA256));
-
-    Ok(BuildAssessment {
-        file_sha256,
-        text_sha256,
-        machine: image.machine(),
-        image_base: image.image_base(),
-        image_size: image.image_size(),
-        verified_retail_file,
-        verified_retail_text,
-    })
+    Ok(Pe32Image::parse(bytes)?.assess())
 }
 
-/// Read an executable file from disk and return its [`BuildAssessment`].
+/// Read an executable file from disk and return its [`BuildAssessment`] without re-parsing headers twice.
 pub fn assess_game_executable(path: &Path) -> Result<BuildAssessment, D3d9Error> {
-    let image = Pe32Image::open(path)?;
-    assess_pe32_bytes(image.as_bytes())
+    Ok(Pe32Image::open(path)?.assess())
 }

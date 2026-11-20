@@ -164,17 +164,37 @@ fn signature_scanner_handles_wildcards_ambiguity_and_unique_matches() {
 }
 
 #[test]
-fn logging_labels_and_thresholds_match_contract() {
+fn logging_labels_colors_and_thresholds_match_contract() {
     assert_eq!(LogSourceType::Game.as_str(), "GAME");
     assert_eq!(LogSourceType::Loader.as_str(), "LOADER");
     assert_eq!(LogSourceType::Mod.as_str(), "MOD");
 
     assert_eq!(LogLevel::parse("debug"), Some(LogLevel::Debug));
+    assert_eq!(LogLevel::parse("Debug"), Some(LogLevel::Debug));
     assert_eq!(LogLevel::parse("warn"), Some(LogLevel::Warning));
+    assert_eq!(LogLevel::parse("WARN"), Some(LogLevel::Warning));
+    assert_eq!(LogLevel::parse("Warning"), Some(LogLevel::Warning));
+    assert_eq!(LogLevel::parse("patch"), None);
     assert_eq!(LogLevel::parse("verbose"), None);
     assert!(LogLevel::Warning.passes_minimum(LogLevel::Info));
     assert!(LogLevel::Patch.passes_minimum(LogLevel::Info));
     assert!(!LogLevel::Trace.passes_minimum(LogLevel::Info));
+
+    assert_eq!(LogLevel::Error.colored_label(), "\x1b[1m\x1b[31mERROR\x1b[0m");
+    assert_eq!(LogLevel::Warning.colored_label(), "\x1b[1m\x1b[33mWARN\x1b[0m");
+    assert_eq!(LogLevel::Info.colored_label(), "\x1b[32mINFO\x1b[0m");
+    assert_eq!(LogLevel::Debug.colored_label(), "\x1b[36mDEBUG\x1b[0m");
+    assert_eq!(LogLevel::Patch.colored_label(), "\x1b[35mPATCH\x1b[0m");
+    assert_eq!(LogLevel::Trace.colored_label(), "\x1b[37mTRACE\x1b[0m");
+
+    assert_eq!(
+        LogLevel::Error.format_event(LogSourceType::Loader, "boom", false),
+        "[LOADER][ERROR] boom"
+    );
+    assert_eq!(
+        LogLevel::Error.format_event(LogSourceType::Loader, "boom", true),
+        "[LOADER][\x1b[1m\x1b[31mERROR\x1b[0m] boom"
+    );
 }
 
 #[test]
