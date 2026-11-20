@@ -2,8 +2,14 @@
 
 use crate::CoreError;
 
-/// One byte constraint inside a signature pattern: concrete `Some(byte)` or wildcard `None`.
-pub type SignatureByte = Option<u8>;
+/// One byte constraint inside an IDA-style signature pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignatureByte {
+    /// Concrete byte value required at this offset.
+    Exact(u8),
+    /// Wildcard byte (`?` / `??`) matching any value at this offset.
+    Wildcard,
+}
 
 /// Parsed IDA-style hexadecimal byte signature supporting `?` and `??` wildcards.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +47,7 @@ impl Signature {
         let mut bytes = Vec::new();
         for token in text.split_ascii_whitespace() {
             if token == "?" || token == "??" {
-                bytes.push(None);
+                bytes.push(SignatureByte::Wildcard);
                 continue;
             }
             if token.len() != 2 || !token.is_ascii() {
@@ -52,7 +58,7 @@ impl Signature {
             let value = u8::from_str_radix(token, 16).map_err(|_| {
                 CoreError::InvalidSignature(format!("invalid hexadecimal byte '{token}'"))
             })?;
-            bytes.push(Some(value));
+            bytes.push(SignatureByte::Exact(value));
         }
         if bytes.is_empty() {
             return Err(CoreError::InvalidSignature(
@@ -107,8 +113,8 @@ impl Signature {
             .iter()
             .zip(window.iter())
             .all(|(expected, &actual)| match expected {
-                Some(byte) => *byte == actual,
-                None => true,
+                SignatureByte::Exact(byte) => *byte == actual,
+                SignatureByte::Wildcard => true,
             })
     }
 }

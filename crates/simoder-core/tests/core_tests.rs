@@ -3,7 +3,7 @@
 use simoder_core::{
     CoreError, Digest, LogLevel, LogSourceType, ResourceFilter, ResourceId,
     RuntimeFloatPatchStatus, RuntimePropertyRecord, RuntimeTableStatus, SCALAR_FLOAT_METADATA,
-    Sha256, Signature, Tgi, UniqueSignatureStatus, fnv1_name_hash, hex, parse_tgi,
+    Sha256, Signature, SignatureByte, Tgi, UniqueSignatureStatus, fnv1_name_hash, hex, parse_tgi,
     patch_runtime_float, read_runtime_float, tgi_key, validate_runtime_property_table,
 };
 
@@ -135,6 +135,14 @@ fn runtime_property_table_validates_and_patches_floats() {
 #[test]
 fn signature_scanner_handles_wildcards_ambiguity_and_unique_matches() {
     let sig = Signature::parse("8B ?? 89").unwrap();
+    assert_eq!(
+        sig.bytes(),
+        &[
+            SignatureByte::Exact(0x8B),
+            SignatureByte::Wildcard,
+            SignatureByte::Exact(0x89),
+        ]
+    );
     let bytes = [0x8B_u8, 0x01, 0x89, 0x90, 0x8B, 0xFF, 0x89];
 
     assert_eq!(sig.find_all(&bytes), vec![0, 4]);
