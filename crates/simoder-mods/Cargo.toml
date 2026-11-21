@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 simoder-core = { path = "../simoder-core" }
 simoder-formats = { path = "../simoder-formats" }
+sc-properties.workspace = true
 gltf.workspace = true
 parking_lot.workspace = true
 png.workspace = true

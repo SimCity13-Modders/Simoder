@@ -1,5 +1,5 @@
-//! Native GlassBox engine and simulation telemetry decoders ported from `Simoder-OpenSCP`:
-//! - Retail `SLDelta` v4 outer envelope parser (`src/pages/runtime-observer/deltaEnvelope.ts`),
+//! Native GlassBox engine and simulation telemetry decoders:
+//! - Retail `SLDelta` v4 outer envelope parser,
 //! - `cEcoGame::LogAction` (`0x5CC130` / `0x5CC1D0`) header decoder & contextual [`RuleStreamContext`]
 //!   (`docs/re/retail-rule-logging-entrypoints-20261017.md`),
 //! - Verified retail `EA::Trace` pipeline entrypoints (`docs/re/mod-diagnostics-logging-20261017.md`).
@@ -15,7 +15,7 @@ use crate::config::{
 };
 use crate::types::CrashError;
 
-/// One outer record decoded from a retail `SLDelta` v4 container (`Simoder-OpenSCP` `deltaEnvelope.ts`).
+/// One outer record decoded from a retail `SLDelta` v4 container.
 ///
 /// Note that the inner payload of an `SLDelta` v4 envelope is NOT a raw `EncodeActionHeader` stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ pub struct SlDeltaEnvelopeRecord {
     pub payload_bytes: u32,
 }
 
-/// Parse a retail `SLDelta` v4 binary stream into validated outer envelope records (`Simoder-OpenSCP` `deltaEnvelope.ts`).
+/// Parse a retail `SLDelta` v4 binary stream into validated outer envelope records.
 pub fn parse_sldelta_v4_envelopes(
     data: &[u8],
     file_name: &str,
