@@ -1,22 +1,21 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
-//! Thin 32-bit x86 `d3d9.dll` proxy foundation for Simoder (`i686-pc-windows-msvc`):
+//! Thin 32-bit x86 `d3d9.dll` proxy and integrated runtime foundation for Simoder (`i686-pc-windows-msvc`):
 //! export forwarding contract, PE32 retail build verification, COM vftable/shader validation,
-//! and single-owner pinned bootstrap coordination.
+//! single-owner pinned bootstrap coordination, and unified runtime orchestration (`simoder-core`,
+//! `simoder-formats`, `simoder-mods`, `simoder-scripting`, `simoder-crash`).
 
 pub mod bootstrap;
 pub mod config;
 pub mod exports;
 pub mod pe;
+pub mod proxy_ffi;
+pub mod runtime;
 pub mod vftable;
 
 use std::path::Path;
 
-pub use bootstrap::*;
-pub use config::*;
-pub use exports::*;
-pub use pe::*;
-pub use vftable::*;
+pub use {bootstrap::*, config::*, exports::*, pe::*, proxy_ffi::*, runtime::*, vftable::*};
 
 /// Errors returned by `simoder-d3d9` installation path checks, PE32 parsing, and bootstrap orchestration.
 #[derive(Debug, thiserror::Error)]

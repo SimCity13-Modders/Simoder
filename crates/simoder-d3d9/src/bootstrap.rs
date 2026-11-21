@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Single-owner pinned bootstrap coordinator and trusted Windows path layout for `simoder-d3d9`.
 
 use std::fs;

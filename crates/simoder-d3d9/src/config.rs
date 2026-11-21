@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Static configuration, retail build fingerprint, and D3D9 shader constants for `simoder-d3d9`.
 
 /// Current Rust runtime ABI surface version exposed by `simoder-d3d9`.

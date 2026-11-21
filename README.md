@@ -1,93 +1,51 @@
 # Simoder
 
-Simoder is an experimental in-game mod manager for SimCity (2013) and Cities of
-Tomorrow. Its production runtime is one integrated x86 `d3d9.dll`. It forwards
-Direct3D calls to Windows and initializes Simoder after successful graphics
-creation, outside `DllMain`. Exact game-build validation precedes game hooks.
+Simoder is an in-game mod manager and runtime for SimCity (2013) and Cities of
+Tomorrow written in Rust (`edition = "2024"`). Its production distribution is one
+integrated 32-bit x86 `d3d9.dll` placed beside `SimCity.exe`. It forwards
+Direct3D 9 calls to Windows and initializes Simoder after graphics creation,
+outside `DllMain`. Exact PE32 game-build validation precedes game hooks.
+
+## Crate Architecture
+
+| Crate | Responsibility |
+| --- | --- |
+| `simoder-core` | Core identifiers (`Tgi`), GlassBox FNV-1 hashing, IDA byte-signature scanner, runtime PROP table patching, producer-side sensitive path redaction, and the bounded `2048`/`64` `DiagnosticLogPipeline`. |
+| `simoder-formats` | Binary and text codecs reusing `Simoder-OpenSCP` (`dbpf`, `sc-properties`, `rw4`, `sc-format`), `serde_toon` (`config.toon` / `state.toon`), and `oxilangtag` BCP-47 locale fallback resolution. |
+| `simoder-mods` | Mod discovery, Schema 2 (`simoder.authoring`) and Schema 3 (`simoder.raw-resources`) manifest validation, `PatchRegistry`, DBPF overlay packaging, `ABI v2` `NativeModuleHost`, decoupled `HostToolRegistry`, and `Simoder-OpenSCP` debug-tools overlay builder. |
+| `simoder-scripting` | Dual-engine `ScriptVm` (`Luau` via `mlua` and `JavaScript` ES2023 via `rquickjs`), `ScriptScheduler`, `PreHook`/`PostHook`/`OverrideFunction`, cross-VM proxies, `DelayedCalls`, and `Utils`. |
+| `simoder-crash` | Controlled Beta crash handler, SHA-256 build-verified stack symbolication, full-dump consent gating, 14-channel Backend <-> Frontend `EAWebKit` bridge observer (`BridgeTime`), and `SLDelta` v4 / `cEcoGame` rule telemetry. |
+| `simoder-d3d9` | 32-bit x86 `d3d9.dll` proxy export table (`ordinals 16..=38`), PE32 retail build verifier (`goblin`), COM vftable/shader validation, single-owner bootstrap coordinator, and `IntegratedSimoderRuntime`. |
 
 ## Installation
 
-Close SimCity and copy `d3d9.dll` beside the actual `SimCity.exe`, usually
-`<installation>/SimCity/SimCity.exe`. Launch normally through EA App. Updates
-replace the same DLL while the game is closed. Remove it to uninstall automatic
-startup; user settings and mods remain. Preserve any existing foreign graphics
-proxy: this runtime does not implement proxy chaining.
-
-There is no launcher, injector, binary extractor or bundled Node.js. The Luau VM
-and compiler are statically linked. Examples, developer executables, optional
-authoring toolchains and IDE support belong to Simoder-DevTools.
-
-The internal [native module boundary](docs/architecture/native-module-boundary.md)
-is qualified with separate DevTools fixtures. Production native admission remains
-closed until the required base provider is available.
-
-For the supported EA directory layout:
+Close SimCity and copy the built 32-bit `d3d9.dll` (`target/i686-pc-windows-msvc/release/simoder_d3d9.dll` renamed to `d3d9.dll`) beside `SimCity.exe` (`<installation>/SimCity/SimCity.exe`). Launch normally through EA App.
 
 ```text
 <installation>/
   SimCity/SimCity.exe
   SimCity/d3d9.dll
   mods/<user-mod>/mod.toml
-  mods/cache/                 # generated immutable source generations
   simoder/config.toon         # generated settings
   simoder/state.toon          # generated activation order
   simoder/logs/               # diagnostics
+  simoder/crashes/            # redacted crash reports
 ```
 
-The runtime creates mutable data; one installation DLL does not mean zero data
-files. Installation in Program Files and writing settings may require appropriate
-permissions. See [installation details](docs/single-file-installation.md).
+## Build & Verification
 
-## Mods
-
-The overlay manages discovery, explicit enable/disable, changed-on-disk previews
-and transactional reload. Refresh does not enable new mods. Current installed
-manifests use `mod.toml`; retired TOON mod manifests and `project.toml` require
-offline migration in DevTools. Configuration/state TOON remains a separate
-supported format.
-
-Declarative patches modify supported scalar floats on existing game resources.
-Catalog aliases retain canonical IDs and explicit provenance; a local alias is
-not a verified original EA name. See [declarative patches](docs/declarative-patches.md)
-and [stable input validation](docs/mod-input-validation.md).
-
-Luau source mods compile in-process into immutable generations. TypeScript and
-native-resource authoring require optional DevTools tooling; their final tool
-registration contract is still being completed. Raw-resource manifests validate
-payloads and full-width IDs, but activation requiring `resource.register` or
-`resource.replace` remains blocked. See [resource contracts](docs/resource-projects.md).
-
-Developer services are explicitly enabled service mods under `mods/`. ModLoader
-owns their process job; disable or game exit terminates owned services. The
-actual MCP/DevBridge package is distributed separately. See
-[developer service mods](docs/developer-service-mods.md).
-
-## Build
-
-Use MSVC, the Windows SDK, CMake and Python. The game is x86:
+Simoder targets Rust `edition = "2024"` and compiles for both 64-bit host verification (`x86_64-pc-windows-msvc`) and the 32-bit game runtime target (`i686-pc-windows-msvc`):
 
 ```powershell
-cmake --preset vs2022-x86
-cmake --build --preset vs2022-release
-ctest --preset vs2022-release
-cmake --install build/vs2022 --config Release --prefix build/staged
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --target i686-pc-windows-msvc -- -D warnings
+cargo test --workspace
+cargo test --workspace --target i686-pc-windows-msvc
+cargo build --release --target i686-pc-windows-msvc -p simoder-d3d9
 ```
 
-VS2026 presets are also available. The runtime target is `simoder-runtime` and
-its Release artifact is `build/<generator>/bin/Release/d3d9.dll`. Installation
-staging includes legal notices separately; only the DLL goes beside the game EXE.
-Runtime scripting tests exercise embedded Luau without authoring helpers.
-TypeScript authoring tests belong to DevTools and require its worker/toolchain.
-A passing incremental build is not proof of clean-checkout or live-game acceptance.
-CI is being updated to reflect the runtime/DevTools boundary.
+## Repository Policy
 
-## Repository policy
+Examples, authoring CLI tools, and the optional native MCP DevTool mod (`simoder_mcp.dll`) belong to `Simoder-DevTools` and `Simoder-DevTools-MCP`. Audits, exploratory reports, screenshots, and raw investigation evidence belong in ignored `.analysis/`; maintained contracts and guides belong in `docs/`.
 
-Examples belong to Simoder-DevTools. Audits, exploratory reports, screenshots and
-raw evidence belong to ignored `.analysis/`; maintained contracts and guides
-belong to `docs/`. Proprietary game binaries, packages, local mods and generated
-outputs are excluded. Tests use synthetic redistributable fixtures.
-
-Authored code uses Doxygen comments. Original source is under the [MIT License](LICENSE);
-dependencies retain their [own notices](THIRD_PARTY_NOTICES.md). Imported game and
-catalog data are not relicensed by Simoder.
+Authored Rust code uses idiomatic Rustdoc (`//!` and `///` with `[`Type`]` intra-doc links) and enforces `#![forbid(unsafe_code)]` across internal modules (see [Definition of Done](docs/ai/definition-of-done.md)). Original source is under the [MIT License](LICENSE); dependencies retain their [own notices](THIRD_PARTY_NOTICES.md).

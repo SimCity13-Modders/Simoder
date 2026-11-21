@@ -9,10 +9,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 goblin.workspace = true
+parking_lot.workspace = true
 simoder-core = { path = "../simoder-core" }
+simoder-crash = { path = "../simoder-crash" }
 simoder-formats = { path = "../simoder-formats" }
+simoder-mods = { path = "../simoder-mods" }
+simoder-scripting = { path = "../simoder-scripting" }
 strum.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true

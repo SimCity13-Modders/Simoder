@@ -1,6 +1,0 @@
-#pragma once
-#include <string_view>
-namespace sc13::dev::session {
-/** @summary Embed the fixed, game-authored-API router in the single production DLL. */
-inline constexpr std::string_view kSessionRouterSource = R"SIMODERROUTER(@SC13_SESSION_ROUTER_SOURCE@)SIMODERROUTER";
-}

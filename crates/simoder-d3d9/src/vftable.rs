@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Direct3D 9 COM vftable validation and shader bytecode identification derived from `Simoder-OpenSCP`.
 
 use crate::config::{

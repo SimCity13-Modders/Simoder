@@ -2,13 +2,19 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use simoder_d3d9::{
     BootstrapCoordinator, BootstrapOutcome, COFF_MACHINE_X86, D3D9_EXPORT_COUNT, D3d9Error,
-    D3d9Export, IMAGE_SCN_MEM_EXECUTE, ModuleRange, PROXY_DISABLED_MARKER_FILE, Pe32Image,
-    SIMODER_RUST_ABI_VERSION, ShaderKind, all_d3d9_exports, assess_pe32_bytes,
-    inspect_shader_blob, is_simcity_executable, lookup_export_by_name, lookup_export_by_ordinal,
-    render_module_def, runtime_abi_version, validate_com_vftable,
+    D3d9Export, D3d9ForwardingTable, IMAGE_SCN_MEM_EXECUTE, IntegratedSimoderRuntime, ModuleRange,
+    PROXY_DISABLED_MARKER_FILE, Pe32Image, SIMODER_RUST_ABI_VERSION, ShaderKind, all_d3d9_exports,
+    assess_pe32_bytes, inspect_shader_blob, is_simcity_executable, lookup_export_by_name,
+    lookup_export_by_ordinal, render_module_def, runtime_abi_version, validate_com_vftable,
+};
+use simoder_formats::DeveloperConsoleConfig;
+use simoder_mods::{
+    ModToolAnnotations, ModToolDescriptor, NativeModuleCallbacks, NativeModuleRegistration,
+    NativeModuleScopeState, SdHandle, SdLifecycleState, SdModuleDescriptorV2, SdResult,
 };
 
 fn build_synthetic_pe32() -> Vec<u8> {
@@ -291,4 +297,120 @@ fn bootstrap_coordinator_enforces_single_owner_marker_and_config_seeding() {
         BootstrapCoordinator::new().try_begin_bootstrap(&parent_trav, &simcity_exe, &sys_dir),
         Err(D3d9Error::InvalidInstallPath(_))
     ));
+}
+
+struct TestNativeAddon;
+
+impl NativeModuleCallbacks for TestNativeAddon {
+    fn query_v2(&self, host_version: u32, descriptor: &mut SdModuleDescriptorV2) -> SdResult {
+        if host_version != 2 {
+            return SdResult::Version;
+        }
+        descriptor.fill_canonical()
+    }
+
+    fn prepare_v2(&self, _owner: SdHandle) -> SdResult {
+        SdResult::Ok
+    }
+
+    fn admit_v2(&self, _owner: SdHandle) -> SdResult {
+        SdResult::Ok
+    }
+
+    fn quiesce_v2(&self, _owner: SdHandle) -> SdResult {
+        SdResult::Ok
+    }
+
+    fn drain_v2(&self, _owner: SdHandle) -> SdResult {
+        SdResult::Ok
+    }
+}
+
+extern "system" fn mock_d3d9_create(sdk_version: u32) -> usize {
+    (sdk_version as usize) + 0x1000
+}
+
+#[test]
+fn integrated_runtime_unites_all_subsystems_and_forwarding_table_dispatches_d3d9_factory() {
+    let dir = tempfile::tempdir().unwrap();
+    let game_dir = dir.path().join("SimCity");
+    let sys_dir = dir.path().join("System32");
+    fs::create_dir_all(&game_dir).unwrap();
+    fs::create_dir_all(&sys_dir).unwrap();
+
+    let proxy_dll = game_dir.join("d3d9.dll");
+    let simcity_exe = game_dir.join("SimCity.exe");
+    fs::write(&simcity_exe, build_synthetic_pe32()).unwrap();
+
+    let runtime = IntegratedSimoderRuntime::new();
+    let outcome = runtime
+        .boot(&proxy_dll, &simcity_exe, &sys_dir, 1000)
+        .unwrap();
+    assert!(matches!(outcome, BootstrapOutcome::Initialized { .. }));
+
+    // Verify DiagnosticLogPipeline captured the startup event.
+    let batch = runtime
+        .logs()
+        .drain_batch(1010, DeveloperConsoleConfig::default());
+    assert_eq!(batch.file_records.len(), 1);
+    assert!(
+        batch.file_records[0]
+            .message
+            .contains("Simoder runtime initialized")
+    );
+
+    // Verify CrashHandlerCoordinator and ModManager were initialized.
+    runtime.with_crash_handler_mut(|ch| assert!(ch.is_some()));
+    runtime.with_mod_manager_mut(|mm| assert!(mm.is_some()));
+
+    // Verify decoupled HostToolRegistry works inside the integrated runtime.
+    runtime.with_tool_registry_mut(|reg| {
+        reg.register_tool(
+            ModToolDescriptor {
+                owner_mod_id: "dawid.road-helper".into(),
+                owner_generation: 1,
+                name: "status".into(),
+                description: "Read road helper status.".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+                required_grants: vec![],
+                annotations: ModToolAnnotations::read_only(true),
+            },
+            Arc::new(|_| Ok(serde_json::json!({"ok": true}))),
+        )
+        .unwrap();
+        assert_eq!(reg.list_tools().len(), 1);
+    });
+
+    // Verify ABI v2 native module attachment and shutdown/drain.
+    let sha = "b".repeat(64);
+    let reg = NativeModuleRegistration {
+        module_id: "simoder.devtools.mcp".into(),
+        expected_sha256: sha.clone(),
+        observed_sha256: sha,
+        source_size_bytes: 128 * 1024,
+        mapped_image_bytes: 256 * 1024,
+        native_trust_approved: true,
+    };
+    let owner = runtime
+        .load_and_admit_native_module(&reg, Arc::new(TestNativeAddon))
+        .unwrap();
+    runtime.with_native_host_mut(|host| {
+        assert_eq!(
+            host.generation_state(owner),
+            Some(NativeModuleScopeState::Active)
+        );
+    });
+    assert_eq!(runtime.shutdown_native_module(owner, true), SdResult::Ok);
+    runtime.with_native_host_mut(|host| {
+        assert_eq!(host.lifecycle_state(), SdLifecycleState::Stopped);
+    });
+
+    // Verify D3d9ForwardingTable dispatches Direct3DCreate9 cleanly.
+    let forwarder = D3d9ForwardingTable::new();
+    assert_eq!(forwarder.invoke_create9(32), 0);
+    forwarder.set_create9_target(Some(mock_d3d9_create));
+    assert_eq!(forwarder.invoke_create9(32), 0x1020);
+    assert_eq!(forwarder.factory_call_count(), 2);
+    assert_eq!(forwarder.last_sdk_version(), 32);
 }

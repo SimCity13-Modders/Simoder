@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! PE32 binary analysis built atop [`goblin::pe::PE`] for retail `SimCity.exe` verification,
 //! RVA mapping, and x86 instruction reference scanning.
 

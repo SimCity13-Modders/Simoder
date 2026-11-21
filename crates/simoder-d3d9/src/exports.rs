@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Windows `d3d9.dll` 23-ordinal ABI contract (`16..=38`) and module-definition (`.def`) renderer.
 
 use std::str::FromStr;

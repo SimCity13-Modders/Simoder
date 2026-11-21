@@ -1481,8 +1481,13 @@ name = "simoder-d3d9"
 version = "0.2.0"
 dependencies = [
  "goblin",
+ "parking_lot",
+ "serde_json",
  "simoder-core",
+ "simoder-crash",
  "simoder-formats",
+ "simoder-mods",
+ "simoder-scripting",
  "strum",
  "tempfile",
  "thiserror 2.0.21",
