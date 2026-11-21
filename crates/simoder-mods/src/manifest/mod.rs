@@ -4,7 +4,8 @@
 mod authoring;
 mod raw;
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Read as _};
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer};
@@ -154,6 +155,11 @@ pub(super) fn check_bounded(value: &str, field: &str, max_len: usize) -> Result<
 /// symlinks/reparse points, missing or corrupted assets, vanilla copies disguised as new assets, and
 /// inconsistent symbol/property definitions.
 pub fn load_mod_definition(directory: &Path) -> Result<ModDefinition, ModError> {
+    let (definition, _) = load_mod_definition_with_bytes(directory)?;
+    Ok(definition)
+}
+
+fn read_checked_manifest_bytes(directory: &Path) -> Result<Vec<u8>, ModError> {
     let dir_meta = assets::reject_reparse_or_symlink(directory)?;
     if !dir_meta.is_dir() {
         return Err(ModError::ManifestValidation(format!(
@@ -162,22 +168,16 @@ pub fn load_mod_definition(directory: &Path) -> Result<ModDefinition, ModError> 
         )));
     }
     let manifest_path = directory.join(config::MOD_MANIFEST_FILE_NAME);
-    if !manifest_path.try_exists()? {
-        return Err(ModError::ManifestValidation(format!(
-            "missing '{}'; migrate retired manifests to Schema 2 TOML",
-            config::MOD_MANIFEST_FILE_NAME
-        )));
-    }
-    for retired in config::RETIRED_MANIFEST_FILES {
-        if directory.join(retired).try_exists()? {
+    let manifest_meta = match fs::symlink_metadata(&manifest_path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return Err(ModError::ManifestValidation(format!(
-                "ambiguous mod directory: '{}' cannot coexist with retired '{retired}'",
+                "missing '{}'; migrate retired manifests to Schema 2 TOML",
                 config::MOD_MANIFEST_FILE_NAME
             )));
         }
-    }
-
-    let manifest_meta = assets::reject_reparse_or_symlink(&manifest_path)?;
+        Err(err) => return Err(err.into()),
+        Ok(_) => assets::reject_reparse_or_symlink(&manifest_path)?,
+    };
     if !manifest_meta.is_file() {
         return Err(ModError::ManifestValidation(format!(
             "'{}' is not a regular file",
@@ -191,17 +191,47 @@ pub fn load_mod_definition(directory: &Path) -> Result<ModDefinition, ModError> 
             config::MAX_MANIFEST_BYTES
         )));
     }
+    let file = File::open(&manifest_path)?;
+    let mut bytes = Vec::with_capacity(manifest_meta.len() as usize);
+    file.take(config::MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > config::MAX_MANIFEST_BYTES {
+        return Err(ModError::ManifestValidation(format!(
+            "'{}' exceeds {} bytes limit",
+            config::MOD_MANIFEST_FILE_NAME,
+            config::MAX_MANIFEST_BYTES
+        )));
+    }
+    Ok(bytes)
+}
 
-    let raw_toml = fs::read_to_string(&manifest_path)?;
-    let probe: ManifestProbe = toml::from_str(&raw_toml)?;
+fn load_mod_definition_with_bytes(directory: &Path) -> Result<(ModDefinition, Vec<u8>), ModError> {
+    let manifest_bytes = read_checked_manifest_bytes(directory)?;
+    for retired in config::RETIRED_MANIFEST_FILES {
+        if directory.join(retired).try_exists()? {
+            return Err(ModError::ManifestValidation(format!(
+                "ambiguous mod directory: '{}' cannot coexist with retired '{retired}'",
+                config::MOD_MANIFEST_FILE_NAME
+            )));
+        }
+    }
+
+    let raw_toml = std::str::from_utf8(&manifest_bytes).map_err(|err| {
+        ModError::ManifestValidation(format!(
+            "'{}' is not valid UTF-8: {err}",
+            config::MOD_MANIFEST_FILE_NAME
+        ))
+    })?;
+    let probe: ManifestProbe = toml::from_str(raw_toml)?;
     let is_raw = probe.contract.as_deref() == Some(config::RAW_RESOURCES_CONTRACT)
         || probe.schema_version == Some(config::RAW_RESOURCES_SCHEMA_VERSION);
 
-    if is_raw {
-        raw::parse(directory, &raw_toml)
+    let definition = if is_raw {
+        raw::parse(directory, raw_toml)?
     } else {
-        authoring::parse(directory, &raw_toml)
-    }
+        authoring::parse(directory, raw_toml)?
+    };
+    Ok((definition, manifest_bytes))
 }
 
 /// Produce a diagnostic blocking activation when a validated Schema 3 raw-resources mod requires runtime support.
@@ -216,11 +246,18 @@ pub fn raw_resource_runtime_diagnostic(definition: &ModDefinition) -> Option<Str
 
 /// Compute a deterministic SHA-256 fingerprint covering `mod.toml` bytes and all bundled asset digests.
 pub fn compute_definition_fingerprint(definition: &ModDefinition) -> Result<ModFingerprint, ModError> {
-    let manifest_bytes = fs::read(definition.directory.join(config::MOD_MANIFEST_FILE_NAME))?;
+    let manifest_bytes = read_checked_manifest_bytes(&definition.directory)?;
+    Ok(fingerprint_with_manifest_bytes(definition, &manifest_bytes))
+}
+
+fn fingerprint_with_manifest_bytes(
+    definition: &ModDefinition,
+    manifest_bytes: &[u8],
+) -> ModFingerprint {
     let mut hasher = Sha256::new();
     hasher.update(b"simoder.mod.fingerprint.v1\0");
     hasher.update((manifest_bytes.len() as u64).to_le_bytes());
-    hasher.update(&manifest_bytes);
+    hasher.update(manifest_bytes);
 
     let mut asset_entries: Vec<(&str, &str)> = match &definition.payload {
         ModPayload::Authoring(data) => data
@@ -242,18 +279,18 @@ pub fn compute_definition_fingerprint(definition: &ModDefinition) -> Result<ModF
         hasher.update(digest.as_bytes());
     }
 
-    Ok(ModFingerprint(hasher.finalize().into()))
+    ModFingerprint(hasher.finalize().into())
 }
 
 /// Load a mod candidate while guarding against concurrent file edits across [`config::CANDIDATE_STABILITY_ATTEMPTS`].
 pub fn load_stable_candidate(
     directory: &Path,
 ) -> Result<(ModDefinition, ModFingerprint), ModError> {
-    let manifest_path = directory.join(config::MOD_MANIFEST_FILE_NAME);
     for _ in 0..config::CANDIDATE_STABILITY_ATTEMPTS {
-        let before_manifest = assets::sha256_file(&manifest_path)?;
-        let definition = load_mod_definition(directory)?;
-        if before_manifest != assets::sha256_file(&manifest_path)? {
+        let before_bytes = read_checked_manifest_bytes(directory)?;
+        let before_hash = assets::sha256_bytes(&before_bytes);
+        let (definition, parsed_bytes) = load_mod_definition_with_bytes(directory)?;
+        if before_hash != assets::sha256_bytes(&parsed_bytes) {
             continue;
         }
         let payload_paths: Vec<(&Path, &str)> = match &definition.payload {
@@ -268,15 +305,24 @@ pub fn load_stable_candidate(
                 .map(|r| (r.resolved_path.as_path(), r.sha256.as_str()))
                 .collect(),
         };
-        let payloads_stable = payload_paths.into_iter().all(|(path, expected)| {
-            assets::sha256_file(path)
-                .map(|digest| hex::encode(digest) == expected)
-                .unwrap_or(false)
-        });
-        if payloads_stable {
-            let fingerprint = compute_definition_fingerprint(&definition)?;
-            return Ok((definition, fingerprint));
+        let mut payloads_stable = true;
+        for (path, expected) in payload_paths {
+            assets::reject_reparse_or_symlink(path)?;
+            let digest = hex::encode(assets::sha256_file(path)?);
+            if digest != expected {
+                payloads_stable = false;
+                break;
+            }
         }
+        if !payloads_stable {
+            continue;
+        }
+        let after_bytes = read_checked_manifest_bytes(directory)?;
+        if before_hash != assets::sha256_bytes(&after_bytes) {
+            continue;
+        }
+        let fingerprint = fingerprint_with_manifest_bytes(&definition, &parsed_bytes);
+        return Ok((definition, fingerprint));
     }
 
     Err(ModError::UnstableInputs(format!(

@@ -53,7 +53,7 @@ impl Default for DeveloperConsoleConfig {
 
 /// Top-level loader configuration supporting both `config.toon` bootstrap settings and TOML overrides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoaderConfig {
     /// Master switch for activating Simoder runtime hooks.
     pub enabled: bool,
@@ -136,7 +136,7 @@ impl LoaderConfig {
 pub fn load_or_create_config(simoder_directory: &Path) -> Result<LoaderConfig, FormatError> {
     fs::create_dir_all(simoder_directory)?;
     let path = simoder_directory.join(CONFIG_TOON_FILE_NAME);
-    if !path.exists() {
+    if !path.try_exists()? {
         write_atomic(&path, default_config_text().as_bytes())?;
     }
     let root: ToonBootstrapConfig = load_toon_file_typed(&path)?;
@@ -147,6 +147,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FormatError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut temp = NamedTempFile::new_in(parent)?;
     temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
     temp.persist(path).map_err(|err| err.error)?;
     Ok(())
 }

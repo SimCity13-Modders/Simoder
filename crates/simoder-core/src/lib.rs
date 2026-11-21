@@ -58,7 +58,10 @@ fn parse_hex_u32(raw: &str) -> Result<u32, CoreError> {
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
-    if hex_digits.is_empty() || hex_digits.len() > 8 {
+    if hex_digits.is_empty()
+        || hex_digits.len() > 8
+        || !hex_digits.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return Err(CoreError::InvalidHexComponent(raw.to_string()));
     }
     u32::from_str_radix(hex_digits, 16)

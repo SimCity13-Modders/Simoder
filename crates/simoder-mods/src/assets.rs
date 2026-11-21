@@ -264,6 +264,6 @@ pub fn audit_mod_directory_no_vanilla_copies(
     Ok(offenders)
 }
 
-fn normalized_digest_set(digests: &HashSet<String>) -> HashSet<String> {
+pub(crate) fn normalized_digest_set(digests: &HashSet<String>) -> HashSet<String> {
     digests.iter().map(|d| d.to_ascii_lowercase()).collect()
 }

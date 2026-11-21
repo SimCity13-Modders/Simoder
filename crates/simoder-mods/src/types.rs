@@ -3,9 +3,9 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde_with::DeserializeFromStr;
 use simoder_core::{CoreError, Tgi, hex, parse_tgi};
 use simoder_formats::FormatError;
 use strum::{EnumString, IntoStaticStr, VariantArray};
@@ -14,18 +14,6 @@ use crate::config::{
     GLB_TYPE_ID, MATERIAL_PARAMS_TYPE_ID, MATERIAL_TEXTURE_SLOT_COUNT, MAX_MOD_ID_LEN, PNG_TYPE_ID,
     PROP_TYPE_ID, RAW_ASSET_TYPE_ID, RW4_TYPE_ID,
 };
-
-macro_rules! impl_case_insensitive_deserialize {
-    ($ty:ty, $label:literal) => {
-        impl<'de> Deserialize<'de> for $ty {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let raw = String::deserialize(deserializer)?;
-                Self::from_str(&raw)
-                    .map_err(|_| de::Error::custom(format!("unknown {} '{raw}'", $label)))
-            }
-        }
-    };
-}
 
 /// Errors produced during mod discovery, manifest validation, asset inspection,
 /// state persistence, patch resolution, or overlay packaging.
@@ -100,6 +88,7 @@ fn format_paths(paths: &[PathBuf]) -> String {
     Eq,
     Hash,
     Serialize,
+    DeserializeFromStr,
     EnumString,
     IntoStaticStr,
     VariantArray,
@@ -123,8 +112,6 @@ pub enum ModState {
     Missing,
 }
 
-impl_case_insensitive_deserialize!(ModState, "mod state");
-
 impl ModState {
     /// Return the canonical lowercase state name (`"inactive"`, `"active"`, etc.).
     pub fn as_str(self) -> &'static str {
@@ -147,6 +134,7 @@ impl fmt::Display for ModState {
     Eq,
     Hash,
     Serialize,
+    DeserializeFromStr,
     EnumString,
     IntoStaticStr,
     VariantArray,
@@ -166,8 +154,6 @@ pub enum PatchOperation {
     Divide,
 }
 
-impl_case_insensitive_deserialize!(PatchOperation, "patch operation");
-
 impl PatchOperation {
     /// Return the canonical lowercase operation name.
     pub fn as_str(self) -> &'static str {
@@ -184,6 +170,7 @@ impl PatchOperation {
     Eq,
     Hash,
     Serialize,
+    DeserializeFromStr,
     EnumString,
     IntoStaticStr,
     VariantArray,
@@ -194,8 +181,6 @@ pub enum PropertyValueType {
     /// 32-bit IEEE-754 scalar float (`sc_properties::PropType::Float`, `0x000D0000` runtime metadata).
     Float,
 }
-
-impl_case_insensitive_deserialize!(PropertyValueType, "property value type");
 
 impl PropertyValueType {
     /// Return the canonical lowercase type name (`"float"`).
@@ -213,6 +198,7 @@ impl PropertyValueType {
     Eq,
     Hash,
     Serialize,
+    DeserializeFromStr,
     EnumString,
     IntoStaticStr,
     VariantArray,
@@ -234,8 +220,6 @@ pub enum AssetKind {
     /// Non-empty custom binary payload not otherwise typed above.
     Raw,
 }
-
-impl_case_insensitive_deserialize!(AssetKind, "asset kind");
 
 impl AssetKind {
     /// Return the canonical kebab-case asset kind identifier.
@@ -265,6 +249,7 @@ impl AssetKind {
     Eq,
     Hash,
     Serialize,
+    DeserializeFromStr,
     EnumString,
     IntoStaticStr,
     VariantArray,
@@ -277,8 +262,6 @@ pub enum RawResourceOperation {
     /// Replace an existing vanilla resource TGI (requires [`RuntimeCapability::ResourceReplace`]).
     Replace,
 }
-
-impl_case_insensitive_deserialize!(RawResourceOperation, "raw resource operation");
 
 impl RawResourceOperation {
     /// Return the runtime capability required by this resource operation.
@@ -301,6 +284,7 @@ impl RawResourceOperation {
     PartialOrd,
     Ord,
     Serialize,
+    DeserializeFromStr,
     EnumString,
     IntoStaticStr,
     VariantArray,
@@ -316,8 +300,6 @@ pub enum RuntimeCapability {
     #[serde(rename = "resource.replace")]
     ResourceReplace,
 }
-
-impl_case_insensitive_deserialize!(RuntimeCapability, "runtime capability");
 
 impl RuntimeCapability {
     /// Return the canonical capability string identifier.
@@ -335,6 +317,7 @@ impl RuntimeCapability {
     Eq,
     Hash,
     Serialize,
+    DeserializeFromStr,
     EnumString,
     IntoStaticStr,
     VariantArray,
@@ -347,8 +330,6 @@ pub enum PackageMountLocation {
     /// Mounted in user profile packages (`Packages/`); does not override base-game resources directly.
     UserPackages,
 }
-
-impl_case_insensitive_deserialize!(PackageMountLocation, "package mount location");
 
 /// Security policy verdict produced by inspecting package metadata records (`0x00B1B104` in `0x40404000`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

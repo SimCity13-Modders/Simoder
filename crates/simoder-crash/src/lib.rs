@@ -33,15 +33,13 @@ fn redact_windows_user_paths(input: &str) -> String {
             && bytes[i].is_ascii_alphabetic()
             && bytes[i + 1] == b':'
             && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/')
-            && input[i + 3..].len() >= 6
-            && (input[i + 3..i + 9].eq_ignore_ascii_case("users\\")
-                || input[i + 3..i + 9].eq_ignore_ascii_case("users/"))
+            && (bytes[i + 3..i + 9].eq_ignore_ascii_case(b"users\\")
+                || bytes[i + 3..i + 9].eq_ignore_ascii_case(b"users/"))
         {
             out.push_str("<USERPROFILE>");
             i += 9;
             while i < bytes.len()
-                && bytes[i] != b'\\'
-                && bytes[i] != b'/'
+                && !matches!(bytes[i], b'\\' | b'/' | b'"' | b'\'' | b',' | b')' | b';')
                 && !bytes[i].is_ascii_whitespace()
             {
                 i += 1;
@@ -76,8 +74,12 @@ fn redact_prefixed_secret(input: &str, needle: &str, require_boundary: bool) -> 
 
         if matched {
             out.push_str(&rest[..needle_len]);
-            out.push_str("<REDACTED>");
             i += needle_len;
+            if matches!(bytes.get(i), Some(b'"' | b'\'')) {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            out.push_str("<REDACTED>");
             while i < input.len() {
                 let ch = input[i..].chars().next().unwrap_or(' ');
                 if ch.is_whitespace() || matches!(ch, '"' | '\'' | ';' | ',' | '&' | ')') {

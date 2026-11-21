@@ -84,9 +84,10 @@ pub fn validate_com_vftable(
 
 /// Inspect a captured SimCity/D3D9 shader container blob (`[total_len: u32][version_token: u32]...`).
 ///
-/// Follows `isShaderBlob` in `Simoder-OpenSCP/tools/dynamic/hook_d3d9.js`:
-/// enforces DWORD alignment, bounds `SHADER_BLOB_MIN_BYTES..=SHADER_BLOB_MAX_BYTES`,
-/// and checks the D3D9 version token prefix (`0xFFFF` pixel shader, `0xFFFE` vertex shader)
+/// Only requires the 8-byte header prefix (`total_byte_len` and `version_token`) without requiring
+/// full trailing shader instructions; follows `isShaderBlob` in `Simoder-OpenSCP/tools/dynamic/hook_d3d9.js`
+/// by enforcing DWORD alignment, bounds `SHADER_BLOB_MIN_BYTES..=SHADER_BLOB_MAX_BYTES`,
+/// and checking the D3D9 version token prefix (`0xFFFF` pixel shader, `0xFFFE` vertex shader)
 /// to distinguish true shaders from similarly shaped vertex declarations.
 pub fn inspect_shader_blob(bytes: &[u8]) -> Option<ShaderBytecodeSummary> {
     if bytes.len() < 8 {

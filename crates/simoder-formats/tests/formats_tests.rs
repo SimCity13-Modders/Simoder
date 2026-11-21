@@ -212,4 +212,9 @@ fn creates_loads_and_validates_config_toon_and_toml() {
     assert_eq!(toml_cfg.default_locale, "pl-PL");
     assert!(toml_cfg.dev_mode);
     assert_eq!(toml_cfg.mods_dir, "mods");
+
+    assert!(matches!(
+        LoaderConfig::from_toml("unknown_typo_field = true\n"),
+        Err(FormatError::ConfigParse(_))
+    ));
 }

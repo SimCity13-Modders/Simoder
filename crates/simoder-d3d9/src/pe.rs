@@ -1,7 +1,8 @@
 //! PE32 binary analysis built atop [`goblin::pe::PE`] for retail `SimCity.exe` verification,
 //! RVA mapping, and x86 instruction reference scanning.
 
-use std::fs;
+use std::fs::File;
+use std::io::Read as _;
 use std::path::Path;
 
 pub use goblin::pe::header::COFF_MACHINE_X86;
@@ -77,81 +78,100 @@ pub struct BuildAssessment {
 impl Pe32Image {
     /// Parse and validate a complete 32-bit x86 PE32 image from an in-memory byte slice using [`goblin`].
     pub fn parse(bytes: &[u8]) -> Result<Self, D3d9Error> {
+        Self::parse_owned(bytes.to_vec())
+    }
+
+    fn parse_owned(bytes: Vec<u8>) -> Result<Self, D3d9Error> {
         if bytes.len() < 0x100 || bytes.len() > MAX_PE_FILE_BYTES {
             return Err(D3d9Error::InvalidPe(
                 "PE image is too small or exceeds defensive size limit".to_string(),
             ));
         }
 
-        let mut opts = ParseOptions::default();
-        opts.parse_attribute_certificates = false;
-        let pe = PE::parse_with_opts(bytes, &opts)
-            .map_err(|err| D3d9Error::InvalidPe(err.to_string()))?;
+        let sections = {
+            let mut opts = ParseOptions::default();
+            opts.parse_attribute_certificates = false;
+            let pe = PE::parse_with_opts(&bytes, &opts)
+                .map_err(|err| D3d9Error::InvalidPe(err.to_string()))?;
 
-        let machine = pe.header.coff_header.machine;
-        let Some(opt) = pe.header.optional_header else {
-            return Err(D3d9Error::InvalidPe(
-                "PE image is missing optional header".to_string(),
-            ));
-        };
-        if machine != COFF_MACHINE_X86 || pe.is_64 || opt.standard_fields.magic != MAGIC_32 {
-            return Err(D3d9Error::InvalidPe(
-                "image is not a supported 32-bit x86 PE32 binary".to_string(),
-            ));
-        }
-        if pe.sections.is_empty() || pe.sections.len() > MAX_SECTIONS {
-            return Err(D3d9Error::InvalidPe(
-                "PE section count is zero or exceeds maximum".to_string(),
-            ));
-        }
-
-        let image_base = u32::try_from(pe.image_base)
-            .map_err(|_| D3d9Error::InvalidPe("PE32 image base exceeds 32-bit range".to_string()))?;
-        let entry_point_rva = u32::try_from(pe.entry)
-            .map_err(|_| D3d9Error::InvalidPe("PE32 entry point exceeds 32-bit range".to_string()))?;
-        let image_size = opt.windows_fields.size_of_image;
-
-        let mut sections = Vec::with_capacity(pe.sections.len());
-        for sec in &pe.sections {
-            let name = sec.name().unwrap_or("<invalid>").to_string();
-            let raw_end = (sec.pointer_to_raw_data as usize)
-                .checked_add(sec.size_of_raw_data as usize)
-                .ok_or_else(|| D3d9Error::InvalidPe("section bounds overflow".to_string()))?;
-            if raw_end > bytes.len() {
-                return Err(D3d9Error::InvalidPe(format!(
-                    "PE section '{name}' raw payload extends outside image"
-                )));
+            let machine = pe.header.coff_header.machine;
+            let Some(opt) = pe.header.optional_header else {
+                return Err(D3d9Error::InvalidPe(
+                    "PE image is missing optional header".to_string(),
+                ));
+            };
+            if machine != COFF_MACHINE_X86 || pe.is_64 || opt.standard_fields.magic != MAGIC_32 {
+                return Err(D3d9Error::InvalidPe(
+                    "image is not a supported 32-bit x86 PE32 binary".to_string(),
+                ));
             }
-            sections.push(PeSection {
-                name,
-                virtual_address: sec.virtual_address,
-                virtual_size: sec.virtual_size,
-                raw_offset: sec.pointer_to_raw_data,
-                raw_size: sec.size_of_raw_data,
-                characteristics: sec.characteristics,
-            });
-        }
+            if pe.sections.is_empty() || pe.sections.len() > MAX_SECTIONS {
+                return Err(D3d9Error::InvalidPe(
+                    "PE section count is zero or exceeds maximum".to_string(),
+                ));
+            }
+
+            let image_base = u32::try_from(pe.image_base).map_err(|_| {
+                D3d9Error::InvalidPe("PE32 image base exceeds 32-bit range".to_string())
+            })?;
+            let entry_point_rva = u32::try_from(pe.entry).map_err(|_| {
+                D3d9Error::InvalidPe("PE32 entry point exceeds 32-bit range".to_string())
+            })?;
+            let image_size = opt.windows_fields.size_of_image;
+
+            let mut sections = Vec::with_capacity(pe.sections.len());
+            for sec in &pe.sections {
+                let name = sec.name().unwrap_or("<invalid>").to_string();
+                let raw_end = (sec.pointer_to_raw_data as usize)
+                    .checked_add(sec.size_of_raw_data as usize)
+                    .ok_or_else(|| D3d9Error::InvalidPe("section bounds overflow".to_string()))?;
+                if raw_end > bytes.len() {
+                    return Err(D3d9Error::InvalidPe(format!(
+                        "PE section '{name}' raw payload extends outside image"
+                    )));
+                }
+                let mapped_span = sec.virtual_size.max(sec.size_of_raw_data);
+                if sec.virtual_address.checked_add(mapped_span).is_none() {
+                    return Err(D3d9Error::InvalidPe(format!(
+                        "PE section '{name}' virtual address range overflows 32-bit RVA"
+                    )));
+                }
+                sections.push(PeSection {
+                    name,
+                    virtual_address: sec.virtual_address,
+                    virtual_size: sec.virtual_size,
+                    raw_offset: sec.pointer_to_raw_data,
+                    raw_size: sec.size_of_raw_data,
+                    characteristics: sec.characteristics,
+                });
+            }
+
+            (machine, image_base, entry_point_rva, image_size, sections)
+        };
 
         Ok(Self {
-            bytes: bytes.to_vec(),
-            machine,
-            image_base,
-            entry_point_rva,
-            image_size,
-            sections,
+            bytes,
+            machine: sections.0,
+            image_base: sections.1,
+            entry_point_rva: sections.2,
+            image_size: sections.3,
+            sections: sections.4,
         })
     }
 
-    /// Open and parse an x86 PE32 file from disk within [`MAX_PE_FILE_BYTES`].
+    /// Open and parse an x86 PE32 file from disk within [`MAX_PE_FILE_BYTES`] without duplicate copies.
     pub fn open(path: &Path) -> Result<Self, D3d9Error> {
-        let meta = fs::metadata(path)?;
-        if meta.len() < 0x100 || meta.len() > MAX_PE_FILE_BYTES as u64 {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        if len < 0x100 || len > MAX_PE_FILE_BYTES as u64 {
             return Err(D3d9Error::InvalidPe(
                 "PE file on disk is missing, too small, or exceeds size limit".to_string(),
             ));
         }
-        let bytes = fs::read(path)?;
-        Self::parse(&bytes)
+        let mut bytes = Vec::with_capacity(len as usize);
+        file.take(MAX_PE_FILE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Self::parse_owned(bytes)
     }
 
     /// Return the COFF machine identifier (expected [`COFF_MACHINE_X86`]).
@@ -201,7 +221,7 @@ impl Pe32Image {
     pub fn file_offset_to_rva(&self, file_offset: u32) -> Option<u32> {
         self.sections.iter().find_map(|sec| {
             if file_offset >= sec.raw_offset && (file_offset - sec.raw_offset) < sec.raw_size {
-                Some(sec.virtual_address + (file_offset - sec.raw_offset))
+                sec.virtual_address.checked_add(file_offset - sec.raw_offset)
             } else {
                 None
             }
@@ -275,9 +295,12 @@ impl Pe32Image {
                 Some((sec.virtual_address, raw))
             })
             .flat_map(move |(base_rva, raw)| {
-                raw.windows(width)
-                    .enumerate()
-                    .map(move |(offset, window)| (base_rva + offset as u32, window))
+                raw.windows(width).enumerate().filter_map(move |(offset, window)| {
+                    u32::try_from(offset)
+                        .ok()
+                        .and_then(|rel| base_rva.checked_add(rel))
+                        .map(|rva| (rva, window))
+                })
             })
     }
 }

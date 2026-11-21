@@ -1,6 +1,7 @@
 //! Bounded TOON 4.1+ codec wrapper backed by [`serde_toon`] with size and BOM guards.
 
-use std::fs;
+use std::fs::File;
+use std::io::Read as _;
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
@@ -15,8 +16,8 @@ use crate::FormatError;
 
 /// Maximum byte size (1 MiB) accepted when reading or parsing a single `.toon` document.
 ///
-/// Preserves the defensive input cap (`kMaximumFileSize = 1024 * 1024`) from the Simoder C++ loader
-/// to reject accidentally oversized or corrupted manifests before allocating parser state.
+/// Enforces a defensive 1 MiB input ceiling (`TOON_MAX_FILE_BYTES`) to reject accidentally
+/// oversized or corrupted manifests before allocating parser state.
 pub const TOON_MAX_FILE_BYTES: usize = 1024 * 1024;
 
 /// Optional UTF-8 Byte Order Mark (`0xEF 0xBB 0xBF`) stripped prior to passing TOON text to [`serde_toon`].
@@ -57,12 +58,23 @@ pub fn load_toon_file_typed<T: DeserializeOwned>(path: &Path) -> Result<T, Forma
 }
 
 fn read_bounded_toon_file(path: &Path) -> Result<String, FormatError> {
-    let meta = fs::metadata(path)?;
-    if meta.len() > TOON_MAX_FILE_BYTES as u64 {
+    let file = File::open(path)?;
+    if file.metadata()?.len() > TOON_MAX_FILE_BYTES as u64 {
         return Err(FormatError::ConfigValidation(format!(
             "TOON file exceeds the {} byte limit",
             TOON_MAX_FILE_BYTES
         )));
     }
-    Ok(fs::read_to_string(path)?)
+    let mut raw = Vec::new();
+    file.take(TOON_MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut raw)?;
+    if raw.len() > TOON_MAX_FILE_BYTES {
+        return Err(FormatError::ConfigValidation(format!(
+            "TOON file exceeds the {} byte limit",
+            TOON_MAX_FILE_BYTES
+        )));
+    }
+    String::from_utf8(raw).map_err(|err| {
+        FormatError::ConfigValidation(format!("TOON file is not valid UTF-8: {err}"))
+    })
 }

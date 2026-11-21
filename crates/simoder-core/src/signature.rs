@@ -50,7 +50,7 @@ impl Signature {
                 bytes.push(SignatureByte::Wildcard);
                 continue;
             }
-            if token.len() != 2 || !token.is_ascii() {
+            if token.len() != 2 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(CoreError::InvalidSignature(
                     "every concrete signature token must contain exactly two hex digits".to_string(),
                 ));

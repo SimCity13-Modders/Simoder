@@ -5,5 +5,22 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mlua.workspace = true
+oxilangtag.workspace = true
+parking_lot.workspace = true
+relative-path.workspace = true
+rquickjs.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+simoder-core = { path = "../simoder-core" }
+simoder-formats = { path = "../simoder-formats" }
+slotmap.workspace = true
+strum.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(all(target_arch = "x86", target_os = "windows"))'.dependencies]
+rquickjs = { workspace = true, features = ["bindgen"] }

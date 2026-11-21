@@ -22,7 +22,14 @@ rw4 = { git = "https://github.com/FluffyChi-Xing/fluffy-open-scp", rev = "42fd54
 goblin = { version = "0.9", default-features = false, features = ["pe32", "std", "alloc"] }
 anstyle = "1.0"
 gltf = { version = "1", default-features = false }
+mlua = { version = "0.12", features = ["luau", "vendored", "send", "serde"] }
+oxilangtag = "0.1"
+parking_lot = "0.12"
 png = "0.18"
+relative-path = "2"
+rquickjs = { version = "0.14", default-features = false, features = ["std", "classes", "parallel"] }
+serde_with = { version = "3", default-features = false, features = ["macros", "std"] }
+slotmap = "1"
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"

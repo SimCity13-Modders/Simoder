@@ -2,7 +2,9 @@
 //! and verified runtime PROP float sequence application.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
+
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use simoder_core::{
     RuntimePropertyRecord, RuntimeTableStatus, SCALAR_FLOAT_METADATA, Tgi, tgi_key,
@@ -113,11 +115,11 @@ impl PatchRegistry {
     }
 
     fn read_inner(&self) -> RwLockReadGuard<'_, RegistryInner> {
-        self.inner.read().expect("patch registry lock poisoned")
+        self.inner.read()
     }
 
     fn write_inner(&self) -> RwLockWriteGuard<'_, RegistryInner> {
-        self.inner.write().expect("patch registry lock poisoned")
+        self.inner.write()
     }
 
     /// Activate `owner` with `patches` using a fresh monotonic sequence, returning sorted affected TGIs.

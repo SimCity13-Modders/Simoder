@@ -104,8 +104,9 @@ pub(super) fn parse(directory: &Path, raw_toml: &str) -> Result<ModDefinition, M
         }
         let size = entry.size as u64;
         check_bounded_non_empty(&entry.payload, "resources.payload", config::MAX_SOURCE_LEN)?;
+        let assets_prefix = format!("{}/", config::ASSETS_ROOT_DIR_NAME);
         let resolved_path =
-            assets::resolve_safe_relative_path(directory, &entry.payload, Some("assets/"))?;
+            assets::resolve_safe_relative_path(directory, &entry.payload, Some(&assets_prefix))?;
         let actual_len = fs::metadata(&resolved_path)?.len();
         if actual_len != size {
             return Err(ModError::AssetValidation(format!(

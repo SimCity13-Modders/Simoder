@@ -2,14 +2,14 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use simoder_formats::{load_toon_file_typed, toon_to_string};
 use tempfile::NamedTempFile;
 
-use crate::{config, types::*};
+use crate::{assets, config, types::*};
 
 /// Strict TOON schema for `state.toon`, recording active mod IDs in activation order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,8 +24,12 @@ pub struct PersistedEnabledState {
 /// Returns an empty vector when `path` does not exist. Rejects malformed TOON syntax,
 /// unknown keys, invalid mod IDs via [`is_valid_mod_id`], and duplicate entries.
 pub fn load_enabled_state(path: &Path) -> Result<Vec<String>, ModError> {
-    if !path.try_exists()? {
-        return Ok(Vec::new());
+    match fs::symlink_metadata(path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+        Ok(_) => {
+            assets::reject_reparse_or_symlink(path)?;
+        }
     }
     let state: PersistedEnabledState = load_toon_file_typed(path)?;
     validate_enabled_list(&state.enabled)?;

@@ -15,7 +15,7 @@ Start with [policy](policy.md), then load only the relevant skill. Skills are in
 | Maintain targeted documentation | simoder-knowledge | simoder-documentation |
 | Exact state transfer | simoder-handoff | coordinator/recipient |
 
-Read [delegation](delegation.md) for existing specialists such as REA, [audit scopes](audit-scopes.md) for evidence obligations, [lifecycle](lifecycle.md) for gates and [contracts](contracts.md) for records. [Repository boundaries](repository-boundaries.md) prevent changing runtime/tool ownership accidentally. [Provider qualification](providers.md) distinguishes discoverable configuration from tested behavior. [Controls](controls.md) records what is currently enforceable.
+Read [delegation](delegation.md) for existing specialists such as REA, [audit scopes](audit-scopes.md) for evidence obligations, [definition of done](definition-of-done.md) for blocking MUST vs non-blocking SHOULD quality gates and Stop-Line criteria, [lifecycle](lifecycle.md) for gates and [contracts](contracts.md) for records. [Repository boundaries](repository-boundaries.md) prevent changing runtime/tool ownership accidentally. [Provider qualification](providers.md) distinguishes discoverable configuration from tested behavior. [Controls](controls.md) records what is currently enforceable.
 
 Typical invocation: `Use $simoder-engineering for this task; delegate native ABI discovery to an available REA specialist and request independent audit before human acceptance.` No model override is required.
 

@@ -1,6 +1,7 @@
 //! Single-owner pinned bootstrap coordinator and trusted Windows path layout for `simoder-d3d9`.
 
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use simoder_formats::{LoaderConfig, load_or_create_config};
@@ -26,14 +27,13 @@ pub struct InstallPaths {
 impl InstallPaths {
     /// Resolve and validate installation and system DLL paths without consulting `PATH` or `CWD`.
     ///
-    /// Rejects layouts missing a game root directory or pointing `proxy_dll_path` directly at `system_d3d9_path`
+    /// Requires absolute canonical paths without `.` or `..` traversal components, and rejects
+    /// layouts missing a game root or pointing `proxy_dll_path` directly at `system_d3d9_path`
     /// (preventing infinite proxy self-forwarding).
     pub fn resolve(proxy_dll_path: &Path, system_dir: &Path) -> Result<Self, D3d9Error> {
-        if system_dir.as_os_str().is_empty() {
-            return Err(D3d9Error::InvalidInstallPath(
-                "system directory cannot be empty".to_string(),
-            ));
-        }
+        validate_clean_absolute_path(proxy_dll_path, "proxy DLL")?;
+        validate_clean_absolute_path(system_dir, "system directory")?;
+
         let proxy_dir = proxy_dll_path.parent().ok_or_else(|| {
             D3d9Error::InvalidInstallPath("proxy DLL path has no parent directory".to_string())
         })?;
@@ -70,9 +70,9 @@ pub enum BootstrapOutcome {
     /// First-time initialization succeeded for `SimCity.exe` with `config.toon` loaded and host pinned.
     Initialized {
         /// Validated filesystem layout.
-        paths: InstallPaths,
+        paths: Box<InstallPaths>,
         /// Loaded (or newly seeded) [`LoaderConfig`] from `simoder/config.toon`.
-        config: LoaderConfig,
+        config: Box<LoaderConfig>,
         /// On-disk PE32 build assessment when `executable_path` exists on disk.
         build: Option<BuildAssessment>,
     },
@@ -151,27 +151,65 @@ impl BootstrapCoordinator {
         self.module_pinned.store(true, Ordering::Release);
 
         let marker_path = paths.data_root.join(PROXY_DISABLED_MARKER_FILE);
-        if marker_path.exists() {
+        if marker_path.try_exists()? {
             return Ok(BootstrapOutcome::DisabledByMarkerFile { marker_path });
         }
 
         let config = load_or_create_config(&paths.data_root)?;
-        let build = if executable_path.is_file() {
+        let build = if executable_path.try_exists()? && fs::metadata(executable_path)?.is_file() {
             Some(assess_game_executable(executable_path)?)
         } else {
             None
         };
 
         Ok(BootstrapOutcome::Initialized {
-            paths,
-            config,
+            paths: Box::new(paths),
+            config: Box::new(config),
             build,
         })
     }
 }
 
+fn validate_clean_absolute_path(path: &Path, label: &str) -> Result<(), D3d9Error> {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err(D3d9Error::InvalidInstallPath(format!(
+            "{label} path must be non-empty and absolute: {}",
+            path.display()
+        )));
+    }
+    let has_dot_segment = path
+        .to_string_lossy()
+        .split(['\\', '/'])
+        .any(|seg| seg == "." || seg == "..");
+    if has_dot_segment
+        || path
+            .components()
+            .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+    {
+        return Err(D3d9Error::InvalidInstallPath(format!(
+            "{label} path must not contain '.' or '..' traversal components: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn normalized_windows_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('/', "\\")
-        .to_ascii_lowercase()
+    let raw = path.to_string_lossy().replace('/', "\\");
+    let stripped = if let Some(unc) = raw
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| raw.strip_prefix(r"\\?\unc\"))
+    {
+        format!(r"\\{unc}")
+    } else {
+        raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
+    };
+    let unc_prefix = stripped.starts_with(r"\\");
+    let parts: Vec<&str> = stripped.split('\\').filter(|s| !s.is_empty() && *s != ".").collect();
+    let joined = if unc_prefix {
+        format!(r"\\{}", parts.join(r"\"))
+    } else {
+        parts.join(r"\")
+    };
+    joined.to_ascii_lowercase()
 }

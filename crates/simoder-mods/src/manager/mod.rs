@@ -5,17 +5,19 @@ mod discovery;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 
-use simoder_core::{Tgi, tgi_key};
+use parking_lot::{Mutex, MutexGuard};
+use simoder_core::Tgi;
 
-use crate::{patch_registry::*, state_store, types::*};
+use crate::{assets, patch_registry::*, state_store, types::*};
 
 use discovery::scan_mods_directory;
 
 /// Optional callback invoked after registry mutations with the affected target TGIs.
 pub type RuntimeRefreshCallback = Box<dyn Fn(&[Tgi]) -> Result<(), String> + Send + Sync>;
+type SharedRefreshCallback = Arc<dyn Fn(&[Tgi]) -> Result<(), String> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 struct PendingCandidate {
@@ -31,7 +33,7 @@ enum ModLifecycle {
         diagnostic: Option<String>,
     },
     ChangedPending {
-        pending: PendingCandidate,
+        pending: Box<PendingCandidate>,
         diagnostic: String,
     },
     ChangedInvalid {
@@ -70,9 +72,9 @@ impl ModLifecycle {
         }
     }
 
-    const fn pending(&self) -> Option<&PendingCandidate> {
+    fn pending(&self) -> Option<&PendingCandidate> {
         match self {
-            Self::ChangedPending { pending, .. } => Some(pending),
+            Self::ChangedPending { pending, .. } => Some(pending.as_ref()),
             _ => None,
         }
     }
@@ -140,7 +142,7 @@ pub struct ModManager {
     mods_directory: PathBuf,
     state_path: PathBuf,
     registry: Arc<PatchRegistry>,
-    refresh_callback: Option<RuntimeRefreshCallback>,
+    refresh_callback: Option<SharedRefreshCallback>,
     known_vanilla_digests: HashSet<String>,
     stopping: AtomicBool,
     state: Mutex<InnerState>,
@@ -166,7 +168,7 @@ impl ModManager {
 
     /// Attach a [`RuntimeRefreshCallback`] notified with sorted affected TGIs after enable/disable/reload.
     pub fn with_refresh_callback(mut self, callback: RuntimeRefreshCallback) -> Self {
-        self.refresh_callback = Some(callback);
+        self.refresh_callback = Some(Arc::from(callback));
         self
     }
 
@@ -175,10 +177,8 @@ impl ModManager {
         mut self,
         digests: impl IntoIterator<Item = String>,
     ) -> Self {
-        self.known_vanilla_digests = digests
-            .into_iter()
-            .map(|d| d.to_ascii_lowercase())
-            .collect();
+        let raw: HashSet<String> = digests.into_iter().collect();
+        self.known_vanilla_digests = assets::normalized_digest_set(&raw);
         self
     }
 
@@ -193,7 +193,7 @@ impl ModManager {
     }
 
     fn lock_state(&self) -> MutexGuard<'_, InnerState> {
-        self.state.lock().expect("mod manager state lock poisoned")
+        self.state.lock()
     }
 
     fn lock_ready_state(
@@ -236,6 +236,7 @@ impl ModManager {
             errors.push(err.to_string());
         }
 
+        let mut pending_notifications = Vec::new();
         if let Some(requested_ids) = requested {
             for id in requested_ids {
                 let inactive = inner
@@ -246,13 +247,16 @@ impl ModManager {
                     errors.push(format!("Persisted mod '{id}' is unavailable"));
                     continue;
                 }
-                if let Err(err) = self.enable_locked(&mut inner, &id, false) {
-                    if let Some(rec) = inner.records.get_mut(&id) {
-                        rec.lifecycle = ModLifecycle::Failed {
-                            diagnostic: err.to_string(),
-                        };
+                match self.enable_locked(&mut inner, &id, false) {
+                    Ok(affected) => pending_notifications.push((id, affected)),
+                    Err(err) => {
+                        if let Some(rec) = inner.records.get_mut(&id) {
+                            rec.lifecycle = ModLifecycle::Failed {
+                                diagnostic: err.to_string(),
+                            };
+                        }
+                        errors.push(format!("Mod '{id}': {err}"));
                     }
-                    errors.push(format!("Mod '{id}': {err}"));
                 }
             }
         }
@@ -261,6 +265,12 @@ impl ModManager {
             errors.push(err.to_string());
         }
         inner.initialized = true;
+        drop(inner);
+
+        for (id, affected) in pending_notifications {
+            self.notify_runtime_refresh(&id, &affected, "enable");
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -276,65 +286,73 @@ impl ModManager {
 
     /// Enable (`true`) or disable (`false`) mod `id`, persisting `state.toon` before registry publication.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), ModError> {
-        let mut inner = self.lock_ready_state("Mod manager is not initialized")?;
-        if enabled {
-            self.refresh_locked(&mut inner).map_err(|err| {
-                ModError::Lifecycle(format!("Could not refresh mod files before enable: {err}"))
-            })?;
-            self.enable_locked(&mut inner, id, true)
-        } else {
-            self.disable_locked(&mut inner, id, true, true)
-        }
+        let (affected, action) = {
+            let mut inner = self.lock_ready_state("Mod manager is not initialized")?;
+            if enabled {
+                self.refresh_locked(&mut inner).map_err(|err| {
+                    ModError::Lifecycle(format!("Could not refresh mod files before enable: {err}"))
+                })?;
+                (self.enable_locked(&mut inner, id, true)?, "enable")
+            } else {
+                (self.disable_locked(&mut inner, id, true, true)?, "disable")
+            }
+        };
+        self.notify_runtime_refresh(id, &affected, action);
+        Ok(())
     }
 
     /// Hot-reload pending changes on an already active `id`, optionally checking `expected_revision`.
     ///
     /// Preserves the mod's original activation sequence relative to other enabled mods.
     pub fn reload(&self, id: &str, expected_revision: Option<&str>) -> Result<(), ModError> {
-        let mut inner = self.lock_ready_state("Mod manager is not initialized")?;
-        self.refresh_locked(&mut inner)?;
+        let affected = {
+            let mut inner = self.lock_ready_state("Mod manager is not initialized")?;
+            self.refresh_locked(&mut inner)?;
 
-        let (pending, current_patches) = {
-            let record = inner.records.get(id).ok_or_else(|| {
-                ModError::Lifecycle("No valid pending definition for an active mod".into())
-            })?;
-            if !self.registry.is_active(id) {
-                return Err(ModError::Lifecycle(
-                    "No valid pending definition for an active mod".into(),
-                ));
-            }
-            let ModLifecycle::ChangedPending { pending, .. } = &record.lifecycle else {
-                return Err(ModError::Lifecycle(
-                    "No valid pending definition for an active mod".into(),
-                ));
+            let pending = {
+                let record = inner.records.get(id).ok_or_else(|| {
+                    ModError::Lifecycle("No valid pending definition for an active mod".into())
+                })?;
+                if !self.registry.is_active(id) {
+                    return Err(ModError::Lifecycle(
+                        "No valid pending definition for an active mod".into(),
+                    ));
+                }
+                let ModLifecycle::ChangedPending { pending, .. } = &record.lifecycle else {
+                    return Err(ModError::Lifecycle(
+                        "No valid pending definition for an active mod".into(),
+                    ));
+                };
+                if let Some(expected) = expected_revision
+                    && !expected.is_empty()
+                    && expected != pending.fingerprint.to_hex()
+                {
+                    return Err(ModError::Lifecycle(
+                        "Reload preview is stale; review the latest pending definition".into(),
+                    ));
+                }
+                pending.as_ref().clone()
             };
-            if let Some(expected) = expected_revision
-                && !expected.is_empty()
-                && expected != pending.fingerprint.to_hex()
-            {
-                return Err(ModError::Lifecycle(
-                    "Reload preview is stale; review the latest pending definition".into(),
-                ));
-            }
-            (pending.clone(), record.definition.patches().to_vec())
+
+            let affected = match self.registry.replace(id, pending.definition.patches()) {
+                Ok(affected) => affected,
+                Err(err) => {
+                    if let Some(rec) = inner.records.get_mut(id) {
+                        rec.lifecycle.set_diagnostic(format!("Reload rejected: {err}"));
+                    }
+                    return Err(err);
+                }
+            };
+
+            let record = inner.records.get_mut(id).ok_or_else(|| {
+                ModError::Lifecycle(format!("Mod record '{id}' missing after reload"))
+            })?;
+            record.definition = pending.definition;
+            record.fingerprint = pending.fingerprint;
+            record.lifecycle = ModLifecycle::Active { diagnostic: None };
+            affected
         };
-
-        if let Err(err) = self.registry.replace(id, pending.definition.patches()) {
-            if let Some(rec) = inner.records.get_mut(id) {
-                rec.lifecycle.set_diagnostic(format!("Reload rejected: {err}"));
-            }
-            return Err(err);
-        }
-
-        let affected = collect_patch_targets_union(&current_patches, pending.definition.patches());
-        let record = inner
-            .records
-            .get_mut(id)
-            .expect("verified record disappeared under lock");
-        record.definition = pending.definition;
-        record.fingerprint = pending.fingerprint;
-        record.lifecycle = ModLifecycle::Active { diagnostic: None };
-        self.notify_runtime_refresh(&affected, record, "reload");
+        self.notify_runtime_refresh(id, &affected, "reload");
         Ok(())
     }
 
@@ -402,32 +420,34 @@ impl ModManager {
         let mut retained_failed_dirs = HashSet::new();
         let mut persistence_changed = false;
         let mut refresh_errors = Vec::new();
+        let mut pending_notifications = Vec::new();
 
         let existing_ids: Vec<String> = inner.records.keys().cloned().collect();
         for id in existing_ids {
             let registered = self.registry.is_active(&id);
             if let Some(candidate) = scan.unique.remove(&id) {
-                let record = inner.records.get_mut(&id).expect("record exists");
-                if registered && record.fingerprint != candidate.fingerprint {
-                    record.lifecycle = ModLifecycle::ChangedPending {
-                        pending: PendingCandidate {
-                            definition: candidate.definition,
-                            fingerprint: candidate.fingerprint,
-                        },
-                        diagnostic:
-                            "Files changed while active; preview and reload, or switch OFF/ON"
-                                .into(),
-                    };
-                } else if registered {
-                    let diagnostic = match &record.lifecycle {
-                        ModLifecycle::Active { diagnostic } => diagnostic.clone(),
-                        _ => None,
-                    };
-                    record.lifecycle = ModLifecycle::Active { diagnostic };
-                } else {
-                    record.definition = candidate.definition;
-                    record.fingerprint = candidate.fingerprint;
-                    record.lifecycle = ModLifecycle::Inactive;
+                if let Some(record) = inner.records.get_mut(&id) {
+                    if registered && record.fingerprint != candidate.fingerprint {
+                        record.lifecycle = ModLifecycle::ChangedPending {
+                            pending: Box::new(PendingCandidate {
+                                definition: candidate.definition,
+                                fingerprint: candidate.fingerprint,
+                            }),
+                            diagnostic:
+                                "Files changed while active; preview and reload, or switch OFF/ON"
+                                    .into(),
+                        };
+                    } else if registered {
+                        let diagnostic = match &record.lifecycle {
+                            ModLifecycle::Active { diagnostic } => diagnostic.clone(),
+                            _ => None,
+                        };
+                        record.lifecycle = ModLifecycle::Active { diagnostic };
+                    } else {
+                        record.definition = candidate.definition;
+                        record.fingerprint = candidate.fingerprint;
+                        record.lifecycle = ModLifecycle::Inactive;
+                    }
                 }
                 continue;
             }
@@ -437,33 +457,40 @@ impl ModManager {
                 continue;
             }
 
-            let record_dir = inner.records[&id].definition.directory.clone();
+            let Some(record_dir) = inner.records.get(&id).map(|rec| rec.definition.directory.clone())
+            else {
+                continue;
+            };
             if let Some((fail_msg, _)) = scan.failed_by_path.get(&record_dir) {
-                let record = inner.records.get_mut(&id).expect("record exists");
-                record.lifecycle = ModLifecycle::ChangedInvalid {
-                    diagnostic: format!(
-                        "Changed files are invalid; active definition retained: {fail_msg}"
-                    ),
-                };
+                if let Some(record) = inner.records.get_mut(&id) {
+                    record.lifecycle = ModLifecycle::ChangedInvalid {
+                        diagnostic: format!(
+                            "Changed files are invalid; active definition retained: {fail_msg}"
+                        ),
+                    };
+                }
                 retained_failed_dirs.insert(record_dir);
                 continue;
             }
             if scan.duplicate_ids.contains(&id) {
-                let record = inner.records.get_mut(&id).expect("record exists");
-                record.lifecycle = ModLifecycle::ChangedInvalid {
-                    diagnostic:
-                        "Duplicate mod ID detected; active definition retained until OFF".into(),
-                };
+                if let Some(record) = inner.records.get_mut(&id) {
+                    record.lifecycle = ModLifecycle::ChangedInvalid {
+                        diagnostic:
+                            "Duplicate mod ID detected; active definition retained until OFF".into(),
+                    };
+                }
                 continue;
             }
 
             match self.disable_locked(inner, &id, false, false) {
-                Ok(()) => {
+                Ok(affected) => {
                     persistence_changed = true;
-                    let record = inner.records.get_mut(&id).expect("record exists");
-                    record.lifecycle = ModLifecycle::Missing {
-                        diagnostic: "Active mod directory is missing or no longer valid".into(),
-                    };
+                    if let Some(record) = inner.records.get_mut(&id) {
+                        record.lifecycle = ModLifecycle::Missing {
+                            diagnostic: "Active mod directory is missing or no longer valid".into(),
+                        };
+                    }
+                    pending_notifications.push((id, affected));
                 }
                 Err(err) => {
                     let msg = format!("Failed to unload missing mod '{id}': {err}");
@@ -509,6 +536,10 @@ impl ModManager {
         failed_list.extend(scan.duplicate_ui_entries);
         inner.failed_discoveries = failed_list;
 
+        for (id, affected) in pending_notifications {
+            self.notify_runtime_refresh_inline(inner, &id, &affected, "disable");
+        }
+
         if refresh_errors.is_empty() {
             Ok(())
         } else {
@@ -521,7 +552,7 @@ impl ModManager {
         inner: &mut InnerState,
         id: &str,
         persist: bool,
-    ) -> Result<(), ModError> {
+    ) -> Result<Vec<Tgi>, ModError> {
         if self.is_stopping() {
             return Err(ModError::Lifecycle("Mod runtime is stopping".into()));
         }
@@ -570,10 +601,10 @@ impl ModManager {
         };
 
         inner.enabled_order = candidate_order;
-        let record = inner.records.get_mut(id).expect("record exists");
-        record.lifecycle = ModLifecycle::Active { diagnostic: None };
-        self.notify_runtime_refresh(&affected, record, "enable");
-        Ok(())
+        if let Some(record) = inner.records.get_mut(id) {
+            record.lifecycle = ModLifecycle::Active { diagnostic: None };
+        }
+        Ok(affected)
     }
 
     fn disable_locked(
@@ -582,7 +613,7 @@ impl ModManager {
         id: &str,
         persist: bool,
         finalize_pending: bool,
-    ) -> Result<(), ModError> {
+    ) -> Result<Vec<Tgi>, ModError> {
         let Some(record) = inner.records.get_mut(id) else {
             return Err(ModError::Lifecycle(format!("Unknown mod ID '{id}'")));
         };
@@ -624,29 +655,58 @@ impl ModManager {
         };
 
         inner.enabled_order = candidate_order;
-        let record = inner.records.get_mut(id).expect("record exists");
-        match previous_lifecycle {
-            ModLifecycle::ChangedPending { pending, .. } if finalize_pending => {
-                record.definition = pending.definition;
-                record.fingerprint = pending.fingerprint;
-                record.lifecycle = ModLifecycle::Inactive;
+        if let Some(record) = inner.records.get_mut(id) {
+            match previous_lifecycle {
+                ModLifecycle::ChangedPending { pending, .. } if finalize_pending => {
+                    record.definition = pending.definition;
+                    record.fingerprint = pending.fingerprint;
+                    record.lifecycle = ModLifecycle::Inactive;
+                }
+                ModLifecycle::ChangedInvalid { diagnostic } => {
+                    record.lifecycle = ModLifecycle::Failed {
+                        diagnostic: if diagnostic.is_empty() {
+                            "Changed files must validate before this mod can be enabled again"
+                                .into()
+                        } else {
+                            diagnostic
+                        },
+                    };
+                }
+                _ => record.lifecycle = ModLifecycle::Inactive,
             }
-            ModLifecycle::ChangedInvalid { diagnostic } => {
-                record.lifecycle = ModLifecycle::Failed {
-                    diagnostic: if diagnostic.is_empty() {
-                        "Changed files must validate before this mod can be enabled again".into()
-                    } else {
-                        diagnostic
-                    },
-                };
-            }
-            _ => record.lifecycle = ModLifecycle::Inactive,
         }
-        self.notify_runtime_refresh(&affected, record, "disable");
-        Ok(())
+        Ok(affected)
     }
 
-    fn notify_runtime_refresh(&self, affected: &[Tgi], record: &mut ModRecord, action: &str) {
+    fn notify_runtime_refresh(&self, id: &str, affected: &[Tgi], action: &str) {
+        let Some(callback) = self.refresh_callback.as_ref().map(Arc::clone) else {
+            return;
+        };
+        if affected.is_empty() {
+            return;
+        }
+        if let Err(err_msg) = callback(affected) {
+            let reason = if err_msg.is_empty() {
+                "unspecified runtime refresh error".to_string()
+            } else {
+                err_msg
+            };
+            let mut inner = self.lock_state();
+            if let Some(record) = inner.records.get_mut(id) {
+                record.lifecycle.append_diagnostic(format!(
+                    "Registry state committed, but live {action} failed: {reason}"
+                ));
+            }
+        }
+    }
+
+    fn notify_runtime_refresh_inline(
+        &self,
+        inner: &mut InnerState,
+        id: &str,
+        affected: &[Tgi],
+        action: &str,
+    ) {
         let Some(callback) = &self.refresh_callback else {
             return;
         };
@@ -659,19 +719,11 @@ impl ModManager {
             } else {
                 err_msg
             };
-            record.lifecycle.append_diagnostic(format!(
-                "Registry state committed, but live {action} failed: {reason}"
-            ));
+            if let Some(record) = inner.records.get_mut(id) {
+                record.lifecycle.append_diagnostic(format!(
+                    "Registry state committed, but live {action} failed: {reason}"
+                ));
+            }
         }
     }
-}
-
-fn collect_patch_targets_union(
-    left: &[ResourcePatchDefinition],
-    right: &[ResourcePatchDefinition],
-) -> Vec<Tgi> {
-    let mut set: HashSet<Tgi> = left.iter().chain(right.iter()).map(|p| p.target).collect();
-    let mut out: Vec<Tgi> = set.drain().collect();
-    out.sort_by_key(|&t| tgi_key(t));
-    out
 }

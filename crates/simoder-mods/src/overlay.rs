@@ -145,26 +145,25 @@ pub fn build_mod_overlay_package(
     let new_assets = definition.new_assets();
     assets::validate_no_vanilla_copies(new_assets, known_vanilla_digests)?;
 
-    let normalized_vanilla: HashSet<String> = known_vanilla_digests
-        .iter()
-        .map(|d| d.to_ascii_lowercase())
-        .collect();
-    let reference_digests: HashSet<String> = definition
-        .vanilla_references()
-        .iter()
-        .filter_map(|r| r.expected_sha256.as_ref())
-        .map(|d| d.to_ascii_lowercase())
-        .collect();
+    let normalized_vanilla = assets::normalized_digest_set(known_vanilla_digests);
+    let reference_digests = assets::normalized_digest_set(
+        &definition
+            .vanilla_references()
+            .iter()
+            .filter_map(|r| r.expected_sha256.as_ref().cloned())
+            .collect(),
+    );
 
     let mut entries = Vec::with_capacity(new_assets.len() + extra_entries.len());
     let mut seen_tgis = HashSet::with_capacity(new_assets.len() + extra_entries.len());
 
     for asset in new_assets {
-        let tgi = asset.target.unwrap_or(Tgi {
+        let tgi = asset.target.unwrap_or_else(|| Tgi {
             type_id: asset.kind.default_type_id(),
             group: config::MOD_ASSET_GROUP_ID,
             instance: assets::allocate_mod_instance_id(&definition.manifest.id, &asset.id),
         });
+        assets::reject_reparse_or_symlink(&asset.resolved_path)?;
         let bytes = fs::read(&asset.resolved_path)?;
         let digest = hex::encode(assets::sha256_bytes(&bytes));
         if digest != asset.sha256 {

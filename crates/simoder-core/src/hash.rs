@@ -15,8 +15,8 @@ pub const GLASSBOX_FNV1_PRIME: u32 = 0x0100_0193;
 /// Compute the GlassBox resource/rule 32-bit FNV-1 hash matching retail `HashName32` over ASCII-lowercased bytes.
 pub fn fnv1_name_hash(name: &str) -> u32 {
     let mut hash = GLASSBOX_FNV1_OFFSET_BASIS;
-    for byte in name.to_ascii_lowercase().as_bytes() {
-        hash = hash.wrapping_mul(GLASSBOX_FNV1_PRIME) ^ u32::from(*byte);
+    for byte in name.bytes().map(|b| b.to_ascii_lowercase()) {
+        hash = hash.wrapping_mul(GLASSBOX_FNV1_PRIME) ^ u32::from(byte);
     }
     hash
 }

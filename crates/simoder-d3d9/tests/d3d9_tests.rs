@@ -123,6 +123,14 @@ fn pe32_parser_validates_sections_rva_mapping_and_e8_relative_calls() {
     assert!(!assessment.verified_retail_text);
 
     assert!(matches!(Pe32Image::parse(b"NOT_PE"), Err(D3d9Error::InvalidPe(_))));
+
+    let mut overflow_pe = build_synthetic_pe32();
+    let sec = 0x80 + 24 + 96;
+    overflow_pe[sec + 12..sec + 16].copy_from_slice(&0xFFFF_FFF0_u32.to_le_bytes());
+    assert!(matches!(
+        Pe32Image::parse(&overflow_pe),
+        Err(D3d9Error::InvalidPe(_))
+    ));
 }
 
 #[test]
@@ -256,10 +264,31 @@ fn bootstrap_coordinator_enforces_single_owner_marker_and_config_seeding() {
         BootstrapOutcome::DisabledByMarkerFile { .. }
     ));
 
-    // Self-forwarding loop protection rejects proxy_dll == system_dir/d3d9.dll
+    // Self-forwarding loop protection rejects proxy_dll == system_dir/d3d9.dll (including verbatim \\?\)
     let self_loop = BootstrapCoordinator::new();
     assert!(matches!(
         self_loop.try_begin_bootstrap(&sys_dir.join("d3d9.dll"), &simcity_exe, &sys_dir),
+        Err(D3d9Error::InvalidInstallPath(_))
+    ));
+    let verbatim_sys_dll = Path::new(&format!(r"\\?\{}", sys_dir.join("d3d9.dll").display())).to_path_buf();
+    assert!(matches!(
+        BootstrapCoordinator::new().try_begin_bootstrap(&verbatim_sys_dll, &simcity_exe, &sys_dir),
+        Err(D3d9Error::InvalidInstallPath(_))
+    ));
+
+    // Relative paths and '.' / '..' traversal segments are rejected cleanly.
+    assert!(matches!(
+        BootstrapCoordinator::new().try_begin_bootstrap(Path::new(r"SimCity\d3d9.dll"), &simcity_exe, &sys_dir),
+        Err(D3d9Error::InvalidInstallPath(_))
+    ));
+    let dotted = sys_dir.join(".").join("d3d9.dll");
+    assert!(matches!(
+        BootstrapCoordinator::new().try_begin_bootstrap(&dotted, &simcity_exe, &sys_dir),
+        Err(D3d9Error::InvalidInstallPath(_))
+    ));
+    let parent_trav = sys_dir.join("..").join("System32").join("d3d9.dll");
+    assert!(matches!(
+        BootstrapCoordinator::new().try_begin_bootstrap(&parent_trav, &simcity_exe, &sys_dir),
         Err(D3d9Error::InvalidInstallPath(_))
     ));
 }

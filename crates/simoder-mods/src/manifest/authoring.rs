@@ -1,7 +1,8 @@
 //! Schema 2 (`simoder.authoring`) typed TOML manifest parsing and cross-field validation.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::File;
+use std::io::Read as _;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -398,17 +399,16 @@ fn resolve_property_patch(
     })
 }
 
+type ResolvedAuthoringAssets = (
+    Vec<NewAssetDefinition>,
+    Vec<VanillaReferenceDefinition>,
+    Vec<MaterialBundleDefinition>,
+);
+
 fn resolve_assets(
     directory: &Path,
     dto: AssetsDto,
-) -> Result<
-    (
-        Vec<NewAssetDefinition>,
-        Vec<VanillaReferenceDefinition>,
-        Vec<MaterialBundleDefinition>,
-    ),
-    ModError,
-> {
+) -> Result<ResolvedAuthoringAssets, ModError> {
     let mut references = Vec::with_capacity(dto.references.len());
     let mut ref_aliases = HashSet::new();
     let mut ref_targets = HashSet::new();
@@ -461,8 +461,9 @@ fn resolve_assets(
             ModError::AssetValidation(format!("unsupported asset kind '{}' for '{}'", a.kind, a.id))
         })?;
         check_bounded_non_empty(&a.path, "assets.new.path", config::MAX_SOURCE_LEN)?;
+        let assets_prefix = format!("{}/", config::ASSETS_ROOT_DIR_NAME);
         let resolved_path =
-            assets::resolve_safe_relative_path(directory, &a.path, Some("assets/"))?;
+            assets::resolve_safe_relative_path(directory, &a.path, Some(&assets_prefix))?;
         if !assets::is_lowercase_sha256_hex(&a.sha256) {
             return Err(ModError::AssetValidation(format!(
                 "new asset '{}' requires a 64-character lowercase SHA-256 digest",
@@ -498,14 +499,23 @@ fn resolve_assets(
             })
             .transpose()?;
 
-        let disk_len = fs::metadata(&resolved_path)?.len();
+        let file = File::open(&resolved_path)?;
+        let disk_len = file.metadata()?.len();
         if disk_len != size {
             return Err(ModError::AssetValidation(format!(
                 "new asset '{}' size mismatch: manifest={size}, disk={disk_len}",
                 a.id
             )));
         }
-        let bytes = fs::read(&resolved_path)?;
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.take(size + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != size {
+            return Err(ModError::AssetValidation(format!(
+                "new asset '{}' size changed during read: expected {size}, got {}",
+                a.id,
+                bytes.len()
+            )));
+        }
         let actual_sha = hex::encode(assets::sha256_bytes(&bytes));
         if actual_sha != a.sha256 {
             return Err(ModError::AssetValidation(format!(

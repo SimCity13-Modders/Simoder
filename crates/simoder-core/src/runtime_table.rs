@@ -3,7 +3,7 @@
 /// Metadata word encoding scalar PROP float type `0x000D` in SimCity's parsed runtime PROP vector.
 ///
 /// Upper 16 bits hold `sc_properties::PropType::Float` file type ID `13` (`0x000D`), while lower
-/// 16 bits hold scalar flags `0x0000` (matching verified C++ `kScalarFloatMetadata = 0x000D0000`).
+/// 16 bits hold scalar flags `0x0000`, forming the combined binary record tag `0x000D_0000`.
 pub const SCALAR_FLOAT_METADATA: u32 = 0x000D_0000;
 
 /// Fixed byte width of one entry in SimCity's parsed in-memory runtime PROP vector.
