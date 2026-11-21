@@ -1,99 +1,22 @@
 #![forbid(unsafe_code)]
 
-//! Crash report representation and sensitive-data redaction for Beta diagnostics.
+//! Controlled Beta crash diagnostics, build-verified stack symbolication, full-dump consent gating,
+//! and `Simoder-OpenSCP` Backend <-> Frontend (`bridge_observer`) & GlassBox (`engine_telemetry`) observers.
+//!
+//! General central logging (`LogLevel`, `LogSourceType`, `LogRecord`, `DiagnosticLogPipeline`) and
+//! producer-side text redaction (`redact_sensitive_text`) live in [`simoder_core`] and are re-exported
+//! here for convenience without duplication.
 
-use serde::{Deserialize, Serialize};
+pub mod bridge_observer;
+pub mod config;
+pub mod engine_telemetry;
+pub mod redaction;
+pub mod report;
+pub mod types;
 
-/// Structured Beta crash report payload with sensitive user paths and credentials redacted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CrashReport {
-    /// Human-readable fault summary.
-    pub summary: String,
-    /// Captured stack frames with sensitive user profile segments redacted.
-    pub frames: Vec<String>,
-    /// Additional redacted engine/loader notes.
-    pub redacted_notes: String,
-}
-
-/// Redact Windows user profile paths (`<drive>:\Users\<name>`) and token credentials from text.
-pub fn redact_sensitive_text(input: &str) -> String {
-    let stage1 = redact_windows_user_paths(input);
-    let stage2 = redact_prefixed_secret(&stage1, "bearer ", true);
-    redact_prefixed_secret(&stage2, "token=", false)
-}
-
-/// Replace Windows user home segments (`X:\Users\<name>` or `X:/Users/<name>`) with `<USERPROFILE>`.
-fn redact_windows_user_paths(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if i + 9 <= bytes.len()
-            && bytes[i].is_ascii_alphabetic()
-            && bytes[i + 1] == b':'
-            && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/')
-            && (bytes[i + 3..i + 9].eq_ignore_ascii_case(b"users\\")
-                || bytes[i + 3..i + 9].eq_ignore_ascii_case(b"users/"))
-        {
-            out.push_str("<USERPROFILE>");
-            i += 9;
-            while i < bytes.len()
-                && !matches!(bytes[i], b'\\' | b'/' | b'"' | b'\'' | b',' | b')' | b';')
-                && !bytes[i].is_ascii_whitespace()
-            {
-                i += 1;
-            }
-            continue;
-        }
-
-        let ch = input[i..].chars().next().unwrap_or('\0');
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-
-    out
-}
-
-/// Mask secret values following an ASCII case-insensitive prefix (`needle`) up to whitespace, quote, or delimiter.
-fn redact_prefixed_secret(input: &str, needle: &str, require_boundary: bool) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-    let needle_len = needle.len();
-    let bytes = input.as_bytes();
-
-    while i < input.len() {
-        let rest = &input[i..];
-        let boundary_ok = !require_boundary
-            || i == 0
-            || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
-        let matched = boundary_ok
-            && rest.len() >= needle_len
-            && rest.is_char_boundary(needle_len)
-            && rest[..needle_len].eq_ignore_ascii_case(needle);
-
-        if matched {
-            out.push_str(&rest[..needle_len]);
-            i += needle_len;
-            if matches!(bytes.get(i), Some(b'"' | b'\'')) {
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-            out.push_str("<REDACTED>");
-            while i < input.len() {
-                let ch = input[i..].chars().next().unwrap_or(' ');
-                if ch.is_whitespace() || matches!(ch, '"' | '\'' | ';' | ',' | '&' | ')') {
-                    break;
-                }
-                i += ch.len_utf8();
-            }
-            continue;
-        }
-
-        let ch = rest.chars().next().unwrap_or('\0');
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-
-    out
-}
+pub use simoder_core::{
+    DiagnosticLogPipeline, DrainedLogBatch, LogConsoleFilter, LogLevel, LogRecord, LogSourceType,
+};
+pub use {
+    bridge_observer::*, config::*, engine_telemetry::*, redaction::*, report::*, types::*,
+};

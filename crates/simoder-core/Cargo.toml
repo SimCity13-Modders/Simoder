@@ -8,6 +8,7 @@ license.workspace = true
 anstyle.workspace = true
 dbpf.workspace = true
 hex.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 sha2.workspace = true
 strum.workspace = true

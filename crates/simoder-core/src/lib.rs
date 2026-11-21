@@ -5,12 +5,13 @@
 pub mod filter;
 pub mod hash;
 pub mod logging;
+pub mod redaction;
 pub mod runtime_table;
 pub mod signature;
 
 pub use dbpf::ResourceId;
 pub use dbpf::ResourceId as Tgi;
-pub use {filter::*, hash::*, logging::*, runtime_table::*, signature::*};
+pub use {filter::*, hash::*, logging::*, redaction::*, runtime_table::*, signature::*};
 pub use hex;
 pub use sha2::{Digest, Sha256};
 

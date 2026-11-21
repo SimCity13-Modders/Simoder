@@ -1454,6 +1454,7 @@ dependencies = [
  "anstyle",
  "dbpf",
  "hex",
+ "parking_lot",
  "serde",
  "sha2",
  "strum",
@@ -1464,8 +1465,15 @@ dependencies = [
 name = "simoder-crash"
 version = "0.2.0"
 dependencies = [
+ "parking_lot",
  "serde",
  "serde_json",
+ "serde_with",
+ "simoder-core",
+ "simoder-formats",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

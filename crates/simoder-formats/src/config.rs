@@ -5,7 +5,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use simoder_core::LogLevel;
+use simoder_core::{LogConsoleFilter, LogLevel};
 use tempfile::NamedTempFile;
 
 use crate::FormatError;
@@ -48,6 +48,24 @@ impl Default for DeveloperConsoleConfig {
             capture_mod_logs: true,
             level: LogLevel::Info,
         }
+    }
+}
+
+impl From<&DeveloperConsoleConfig> for LogConsoleFilter {
+    fn from(cfg: &DeveloperConsoleConfig) -> Self {
+        Self {
+            enabled: cfg.enabled,
+            capture_game_logs: cfg.capture_game_logs,
+            capture_loader_logs: cfg.capture_loader_logs,
+            capture_mod_logs: cfg.capture_mod_logs,
+            level: cfg.level,
+        }
+    }
+}
+
+impl From<DeveloperConsoleConfig> for LogConsoleFilter {
+    fn from(cfg: DeveloperConsoleConfig) -> Self {
+        Self::from(&cfg)
     }
 }
 
