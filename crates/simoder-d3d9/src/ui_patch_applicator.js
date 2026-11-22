@@ -54,9 +54,6 @@
             if (sim && sim.cLauncher3D) {
                 return sim.cLauncher3D.mPreloadDone === true ? "main.menu" : "loading";
             }
-            if (doc.body) {
-                return "main.menu";
-            }
             return "cold";
         };
 
@@ -86,9 +83,11 @@
         if (!window.__simoderUiHost) {
             window.__simoderUiHost = {
                 revision: -1,
+                reloadGen: -1,
                 lastPhase: "",
                 events: [],
                 activeModalClose: null,
+                activeRegionContext: null,
                 escBound: false
             };
         }
@@ -115,13 +114,11 @@
         };
 
         var ensureStyles = function () {
-            if (doc.getElementById("simoder-ui-styles")) { return; }
-            var style = doc.createElement("style");
-            style.id = "simoder-ui-styles";
-            style.textContent =
+            var cssText =
                 ".simoder-slot-launcher{position:fixed;left:336px;bottom:8px;z-index:99980;font-family:Arial,Helvetica,sans-serif;}" +
-                ".simoder-slot-hub{position:fixed;left:44px;bottom:84px;z-index:99980;font-family:Arial,Helvetica,sans-serif;}" +
-                ".simoder-slot-ingame{position:fixed;left:24px;bottom:24px;z-index:99980;font-family:Arial,Helvetica,sans-serif;}" +
+                ".simoder-slot-hub{position:fixed;left:44px;bottom:84px;z-index:99980;font-family:Arial,Helvetica,sans-serif;display:none;}" +
+                ".simoder-slot-region{position:fixed;z-index:99982;font-family:Arial,Helvetica,sans-serif;display:none;}" +
+                ".simoder-slot-ingame{position:fixed;z-index:99980;font-family:Arial,Helvetica,sans-serif;display:none;}" +
                 ".simoder-modal-slot{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99990;background:rgba(16,28,42,0.58);font-family:Arial,Helvetica,sans-serif;overflow:hidden;}" +
                 ".simoder-modal{position:fixed;top:36px;bottom:36px;left:50%;margin-left:-330px;width:660px;max-width:92%;text-align:left;background:#edf2f7;background-image:-webkit-linear-gradient(top,#f8fbfe 0%,#e5edf5 100%);border:2px solid #9db1c4;border-radius:4px;color:#1d2e3d;box-shadow:0 10px 30px rgba(8,18,30,0.55);overflow:hidden;box-sizing:border-box;}" +
                 ".simoder-modal-header{position:absolute;top:0;left:0;right:0;height:42px;line-height:42px;background:#3c5268;background-image:-webkit-linear-gradient(top,#516a82 0%,#334659 100%);color:#ffffff;padding:0 44px 0 16px;font-size:15px;font-weight:bold;letter-spacing:0.4px;border-bottom:2px solid #2ca7e6;text-shadow:0 1px 1px rgba(0,0,0,0.45);box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
@@ -143,8 +140,12 @@
                 ".simoder-btn:hover{background:#e9f4fd;background-image:-webkit-linear-gradient(top,#ffffff 0%,#e5f2fc 50%,#cbe2f6 100%);border-color:#2ca7e6;}" +
                 ".simoder-btn>span{display:inline-block;vertical-align:middle;}" +
                 ".simoder-slot-launcher .simoder-btn{padding:3px 10px;font-size:11px;line-height:16px;}" +
-                ".simoder-slot-hub .simoder-btn{display:block;width:100%;padding:12px 18px;font-size:14px;text-transform:uppercase;letter-spacing:0.6px;text-align:left;background-color:transparent;background-image:url('Graphics/Common/Buttons/Button_HUB_Main_Normal.png'),-webkit-linear-gradient(top,#f8fbfe 0%,#e1eaf3 50%,#ccd9e7 100%);background-size:100% 100%;border:none;box-shadow:none;}" +
-                ".simoder-slot-hub .simoder-btn:hover{background-image:url('Graphics/Common/Buttons/Button_HUB_Main_Highlighted.png'),-webkit-linear-gradient(top,#ffffff 0%,#e7f3fc 50%,#cee5f8 100%);border:none;}" +
+                ".simoder-slot-hub .simoder-btn{display:block;width:100%;height:100%;padding:0 16px;font-size:16px;font-weight:bold;line-height:1;text-transform:uppercase;letter-spacing:0.6px;text-align:center;color:#243b53;border:1px solid #a8b7c6;border-radius:999px;background:#eef3f8;background-image:-webkit-linear-gradient(top,#ffffff 0%,#f5f8fb 48%,#d4dee8 100%);text-shadow:0 1px 0 rgba(255,255,255,0.92);box-shadow:inset 0 1px 0 rgba(255,255,255,0.95),0 2px 5px rgba(10,22,36,0.42);box-sizing:border-box;}" +
+                ".simoder-slot-hub .simoder-btn:hover{background:#f5faff;background-image:-webkit-linear-gradient(top,#ffffff 0%,#ebf4fd 48%,#c6dcf2 100%);border-color:#2ca7e6;}" +
+                ".simoder-slot-hub .simoder-btn-vanilla{background:transparent!important;background-image:none!important;border:0!important;box-shadow:none!important;padding:0!important;margin:0!important;border-radius:0!important;overflow:visible!important;position:relative!important;}" +
+                ".simoder-slot-hub .simoder-btn-vanilla>.simoder-badge{position:absolute;top:2px;right:12px;z-index:2;}" +
+                ".simoder-slot-region .simoder-btn{padding:5px 12px;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:0.4px;border-radius:14px;box-shadow:0 2px 8px rgba(8,18,30,0.45);}" +
+                ".simoder-slot-ingame .simoder-btn{display:block;width:100%;height:100%;padding:0 14px;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;text-align:center;border-radius:14px;box-sizing:border-box;}" +
                 ".simoder-btn-primary{background:#3aa526;background-image:-webkit-linear-gradient(top,#63d149 0%,#39a323 55%,#2b8918 100%);border-color:#237213;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.35),0 1px 1px rgba(0,0,0,0.15);}" +
                 ".simoder-btn-primary:hover{background:#46b831;background-image:-webkit-linear-gradient(top,#72dd58 0%,#42b32b 55%,#33991e 100%);border-color:#1c5f0f;}" +
                 ".simoder-btn-danger{background:#c93d32;background-image:-webkit-linear-gradient(top,#e35d52 0%,#c7382d 55%,#a6281e 100%);border-color:#841e16;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.28),0 1px 1px rgba(0,0,0,0.15);}" +
@@ -170,11 +171,22 @@
                 ".simoder-tab-btn-active{background:#ffffff;color:#16293b;border-color:#2ca7e6;border-top:2px solid #2ca7e6;}" +
                 ".simoder-progress-track{width:100%;height:14px;background:#d3dde7;border:1px solid #9cb0c4;border-radius:3px;overflow:hidden;box-sizing:border-box;}" +
                 ".simoder-progress-fill{height:100%;background:#48bf34;background-image:-webkit-linear-gradient(top,#72df5c 0%,#369f22 100%);}";
+            var existingStyle = doc.getElementById("simoder-ui-styles");
+            if (existingStyle) {
+                if (existingStyle.textContent !== cssText) {
+                    existingStyle.textContent = cssText;
+                }
+                return;
+            }
+            var style = doc.createElement("style");
+            style.id = "simoder-ui-styles";
+            style.textContent = cssText;
             (doc.head || doc.body).appendChild(style);
         };
 
         var slotClassFor = function (viewName, slotName) {
             if (slotName === "modal.overlay") { return "simoder-modal-slot"; }
+            if (slotName === "region.actions") { return "simoder-slot-region"; }
             if (viewName === "launcher.menu") { return "simoder-slot-launcher"; }
             if (viewName === "main.menu") { return "simoder-slot-hub"; }
             return "simoder-slot-ingame";
@@ -221,9 +233,144 @@
         };
 
         var findMainMenuHubColumn = function () {
-            if (!doc.getElementsByTagName) { return null; }
             var viewH = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
             var viewW = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
+            var mgr = window.gUIManager || uiMgr;
+            var isCtrlVisible = function (ctrl) {
+                if (!ctrl) { return false; }
+                if (typeof ctrl.GetAbsoluteVisibility === "function") {
+                    return !!ctrl.GetAbsoluteVisibility();
+                }
+                return ctrl.mIsVisible !== false;
+            };
+            var containsCtrl = function (root, target) {
+                if (!root || !target) { return false; }
+                if (typeof root.ContainsControl === "function") {
+                    return !!root.ContainsControl(target);
+                }
+                var cur = target;
+                while (cur) {
+                    if (cur === root) { return true; }
+                    cur = cur.mParentControl;
+                }
+                return false;
+            };
+            var readPlayTypography = function (ctrl) {
+                if (!ctrl || !ctrl.mRootElement || typeof window.getComputedStyle !== "function") { return null; }
+                var textEl = ctrl.mTextElement || null;
+                if (!textEl && ctrl.mRootElement.getElementsByTagName) {
+                    var kids = ctrl.mRootElement.getElementsByTagName("*");
+                    var ki;
+                    for (ki = 0; ki < kids.length; ki += 1) {
+                        if (kids[ki] && kids[ki].textContent && String(kids[ki].textContent).replace(/^\s+|\s+$/g, "").length > 0) {
+                            textEl = kids[ki];
+                            break;
+                        }
+                    }
+                }
+                if (!textEl) { textEl = ctrl.mRootElement; }
+                try {
+                    var cs = window.getComputedStyle(textEl, null);
+                    if (!cs) { return null; }
+                    return {
+                        fontFamily: cs.fontFamily || "",
+                        fontSize: cs.fontSize || "",
+                        fontWeight: cs.fontWeight || "",
+                        color: cs.color || ""
+                    };
+                } catch (_e) {
+                    return null;
+                }
+            };
+
+            var getLocalPos = function (ctrl) {
+                if (!ctrl) { return [0, 0]; }
+                if (typeof ctrl.GetAbsolutePosition === "function") {
+                    try {
+                        var p = ctrl.GetAbsolutePosition();
+                        if (p && p.length >= 2 && isFinite(p[0]) && isFinite(p[1])) {
+                            return [p[0], p[1]];
+                        }
+                    } catch (_e) {}
+                }
+                return [Number(ctrl.mLeft || 0), Number(ctrl.mTop || 0)];
+            };
+
+            if (mgr && typeof mgr.FindControlByID === "function") {
+                var playCtrl = mgr.FindControlByID(237051648);
+                if (playCtrl && isCtrlVisible(playCtrl) && playCtrl.mRootElement &&
+                    typeof playCtrl.mWidth === "number" && typeof playCtrl.mHeight === "number" &&
+                    playCtrl.mWidth >= 100 && playCtrl.mHeight >= 20 &&
+                    typeof playCtrl.mRootElement.getBoundingClientRect === "function") {
+                    var playRect = playCtrl.mRootElement.getBoundingClientRect();
+                    if (playRect && playRect.width >= 100 && playRect.height >= 20 &&
+                        playRect.left >= 0 && playRect.top >= 0 && playRect.right <= viewW && playRect.bottom <= viewH) {
+                        var playPos = getLocalPos(playCtrl);
+                        var resumeCtrl = mgr.FindControlByID(237051575);
+                        var resumePos = null;
+                        var localPitch = Math.round(playCtrl.mHeight + 8);
+                        if (resumeCtrl && isCtrlVisible(resumeCtrl) && resumeCtrl.mRootElement && typeof resumeCtrl.mHeight === "number") {
+                            resumePos = getLocalPos(resumeCtrl);
+                            if (playPos[1] > resumePos[1]) {
+                                localPitch = Math.max(24, Math.min(140, Math.round(playPos[1] - resumePos[1])));
+                            }
+                        }
+                        var hubCtrl = mgr.FindControlByID(241896001);
+                        var walkRoot = hubCtrl || playCtrl.mParentControl;
+                        var panels = [];
+                        var playCenterX = playPos[0] + playCtrl.mWidth * 0.5;
+                        var seenCtrls = [];
+                        var alreadySeen = function (c) {
+                            var si;
+                            for (si = 0; si < seenCtrls.length; si += 1) {
+                                if (seenCtrls[si] === c) { return true; }
+                            }
+                            return false;
+                        };
+                        var collectPanels = function (ctrl) {
+                            if (!ctrl || !isCtrlVisible(ctrl) || alreadySeen(ctrl)) { return; }
+                            seenCtrls.push(ctrl);
+                            if (ctrl === playCtrl || ctrl === resumeCtrl || containsCtrl(playCtrl, ctrl) || (resumeCtrl && containsCtrl(resumeCtrl, ctrl))) {
+                                return;
+                            }
+                            if (ctrl.mRootElement && typeof ctrl.mWidth === "number" && typeof ctrl.mHeight === "number" && ctrl.mWidth > 0 && ctrl.mHeight > 0) {
+                                var cPos = getLocalPos(ctrl);
+                                var ctrlCenterX = cPos[0] + ctrl.mWidth * 0.5;
+                                if (Math.abs(ctrlCenterX - playCenterX) <= 40 &&
+                                    ctrl.mWidth >= playCtrl.mWidth * 0.75 && ctrl.mWidth <= playCtrl.mWidth + 140 &&
+                                    cPos[1] <= playPos[1] + 20 && cPos[1] + ctrl.mHeight >= playPos[1] + playCtrl.mHeight - 20 &&
+                                    ctrl.mHeight >= playCtrl.mHeight * 1.4 && ctrl.mHeight <= playCtrl.mHeight * 6) {
+                                    panels.push(ctrl);
+                                }
+                            }
+                            if (ctrl.mChildren && ctrl.mChildren.length) {
+                                var ci;
+                                for (ci = 0; ci < ctrl.mChildren.length; ci += 1) {
+                                    collectPanels(ctrl.mChildren[ci]);
+                                }
+                            }
+                        };
+                        collectPanels(walkRoot);
+                        if (playCtrl.mParentControl && playCtrl.mParentControl !== walkRoot) {
+                            collectPanels(playCtrl.mParentControl);
+                        }
+                        return {
+                            rect: playRect,
+                            playPos: playPos,
+                            resumePos: resumePos,
+                            localPitch: localPitch,
+                            typography: readPlayTypography(playCtrl),
+                            playCtrl: playCtrl,
+                            resumeCtrl: resumeCtrl,
+                            panels: panels,
+                            viewW: viewW,
+                            viewH: viewH
+                        };
+                    }
+                }
+            }
+
+            if (!doc.getElementsByTagName) { return null; }
             var all = doc.getElementsByTagName("*");
             var bestRect = null;
             var i, el, bg, src, rect;
@@ -239,19 +386,286 @@
                     continue;
                 }
                 rect = el.getBoundingClientRect();
-                if (!rect || rect.width < 180 || rect.height < 36 || rect.bottom > viewH - 56 || rect.left > viewW * 0.5) {
+                if (!rect || rect.width < 140 || rect.height < 20 || rect.top < 0 || rect.bottom > viewH - 20 || rect.left > viewW * 0.5) {
                     continue;
                 }
                 if (!bestRect || rect.bottom > bestRect.bottom) {
                     bestRect = rect;
                 }
             }
-            return bestRect ? { rect: bestRect, viewW: viewW, viewH: viewH } : null;
+            return bestRect ? { rect: bestRect, playPos: null, resumePos: null, localPitch: Math.round(bestRect.height + 8), typography: null, playCtrl: null, resumeCtrl: null, panels: [], viewW: viewW, viewH: viewH } : null;
+        };
+
+        var removeVanillaHubButton = function () {
+            var existing = doc.getElementById("simoder-hub-vanilla-mods");
+            if (existing && existing.parentNode) {
+                existing.parentNode.removeChild(existing);
+            }
+        };
+
+        var mountVanillaHubButton = function (container, hub) {
+            if (!container || !hub || !hub.playCtrl || !hub.playCtrl.mRootElement || !hub.playCtrl.mRootElement.parentNode || !container.querySelector) {
+                return false;
+            }
+            var btn = container.querySelector(".simoder-btn");
+            if (!btn) { return false; }
+
+            var labelText = "";
+            var badgeText = "";
+            var ci, ch;
+            for (ci = 0; ci < btn.childNodes.length; ci += 1) {
+                ch = btn.childNodes[ci];
+                if (ch.nodeType === 1 && ch.className && String(ch.className).indexOf("simoder-badge") !== -1) {
+                    badgeText = ch.textContent ? String(ch.textContent) : "";
+                } else if (ch.textContent) {
+                    labelText += String(ch.textContent);
+                }
+            }
+            labelText = labelText.replace(/^\s+|\s+$/g, "") || "MODS";
+
+            var parentEl = hub.playCtrl.mRootElement.parentNode;
+            var clone = doc.getElementById("simoder-hub-vanilla-mods");
+            if (!clone || clone.parentNode !== parentEl || clone.getAttribute("data-simoder-vanilla-label") !== labelText || clone.getAttribute("data-simoder-vanilla-badge") !== badgeText) {
+                removeVanillaHubButton();
+                clone = hub.playCtrl.mRootElement.cloneNode(true);
+                var stripIds = function (node) {
+                    if (!node || node.nodeType !== 1) { return; }
+                    if (node.removeAttribute) { node.removeAttribute("id"); }
+                    var k;
+                    for (k = 0; k < node.childNodes.length; k += 1) {
+                        stripIds(node.childNodes[k]);
+                    }
+                };
+                stripIds(clone);
+                clone.id = "simoder-hub-vanilla-mods";
+                clone.setAttribute("data-simoder-slot", "hub.vanilla.clone");
+                clone.setAttribute("data-simoder-vanilla-label", labelText);
+                clone.setAttribute("data-simoder-vanilla-badge", badgeText);
+
+                var replacedLabel = false;
+                var replaceText = function (node) {
+                    if (!node) { return; }
+                    if (node.nodeType === 3) {
+                        var trimmed = String(node.nodeValue || "").replace(/^\s+|\s+$/g, "");
+                        if (trimmed.length > 0) {
+                            node.nodeValue = replacedLabel ? "" : labelText;
+                            replacedLabel = true;
+                        }
+                        return;
+                    }
+                    var k;
+                    for (k = 0; k < node.childNodes.length; k += 1) {
+                        replaceText(node.childNodes[k]);
+                    }
+                };
+                replaceText(clone);
+
+                if (badgeText) {
+                    var badgeEl = doc.createElement("span");
+                    badgeEl.className = "simoder-badge";
+                    badgeEl.textContent = badgeText;
+                    if (badgeEl.style) {
+                        badgeEl.style.position = "absolute";
+                        badgeEl.style.top = "2px";
+                        badgeEl.style.right = "12px";
+                        badgeEl.style.zIndex = "5";
+                    }
+                    clone.appendChild(badgeEl);
+                }
+
+                parentEl.appendChild(clone);
+            }
+
+            if (clone.style) {
+                var playStyle = hub.playCtrl.mRootElement.style || {};
+                var baseTop = parseFloat(playStyle.top);
+                if (isNaN(baseTop)) { baseTop = Number(hub.playCtrl.mTop || 0); }
+                clone.style.position = "absolute";
+                clone.style.left = playStyle.left || (Math.round(hub.playCtrl.mLeft || 0) + "px");
+                clone.style.top = Math.round(baseTop + hub.localPitch) + "px";
+                clone.style.right = "auto";
+                clone.style.bottom = "auto";
+                clone.style.width = playStyle.width || (Math.round(hub.playCtrl.mWidth || 0) + "px");
+                clone.style.height = playStyle.height || (Math.round(hub.playCtrl.mHeight || 0) + "px");
+                clone.style.cursor = "pointer";
+                clone.style.pointerEvents = "auto";
+                clone.style.visibility = "visible";
+                clone.style.opacity = "1";
+                if (!clone.style.display || clone.style.display === "none") {
+                    clone.style.display = "inline";
+                }
+            }
+
+            var dType = hub.playCtrl.mDrawableType;
+            var styles = hub.playCtrl.mStyleList;
+            var stateClasses = ["cButtonNormal", "cButtonRollover", "cButtonDown", "cButtonDisabled"];
+            var applyState = function (stateIndex) {
+                var stCls = stateClasses[stateIndex] || "cButtonNormal";
+                if (dType !== 1 && clone.className) {
+                    var clsStr = String(clone.className).replace(/\bcButton(Normal|Rollover|Down|Disabled)\b/g, stCls);
+                    if (clsStr.indexOf(stCls) === -1) {
+                        clsStr += " " + stCls;
+                    }
+                    clone.className = clsStr;
+                }
+                if (!styles || styles.length <= stateIndex || !styles[stateIndex]) { return; }
+                var st = String(styles[stateIndex]);
+                if (dType === 1) {
+                    clone.className = st;
+                    return;
+                }
+                var k, chNode, cls, spaceIdx;
+                var updatedImg = false;
+                for (k = 0; k < clone.childNodes.length; k += 1) {
+                    chNode = clone.childNodes[k];
+                    if (!chNode || chNode.nodeType !== 1) { continue; }
+                    if (chNode.tagName === "IMG") {
+                        chNode.src = st;
+                        updatedImg = true;
+                    } else if (dType === 2 && chNode.className) {
+                        cls = String(chNode.className);
+                        if (cls.indexOf("pin") === 0) {
+                            spaceIdx = cls.indexOf(" ");
+                            chNode.className = (spaceIdx !== -1 ? cls.slice(0, spaceIdx) : cls) + " " + st;
+                        }
+                    }
+                }
+                if (!updatedImg && clone.getElementsByTagName && /\.(png|jpg|jpeg|dds)$/i.test(st)) {
+                    var imgs = clone.getElementsByTagName("img");
+                    if (imgs && imgs.length > 0) {
+                        imgs[0].src = st;
+                    }
+                }
+            };
+            var playUiSound = function (soundId) {
+                if (soundId && window.scrui && typeof window.scrui.Play2DSound === "function") {
+                    try { window.scrui.Play2DSound(soundId); } catch (_e) {}
+                }
+            };
+            applyState(clone.__simoderDown ? 2 : (clone.__simoderHover ? 1 : 0));
+            clone.onmouseover = function () {
+                if (!clone.__simoderHover) {
+                    clone.__simoderHover = true;
+                    playUiSound(hub.playCtrl.mAudioMouseOnID);
+                }
+                applyState(clone.__simoderDown ? 2 : 1);
+            };
+            clone.onmouseout = function (e) {
+                var rel = e ? (e.relatedTarget || e.toElement) : null;
+                if (rel && clone.contains && (rel === clone || clone.contains(rel))) {
+                    return;
+                }
+                clone.__simoderHover = false;
+                clone.__simoderDown = false;
+                applyState(0);
+            };
+            clone.onmousedown = function () {
+                clone.__simoderDown = true;
+                playUiSound(hub.playCtrl.mAudioMouseDownID);
+                applyState(2);
+            };
+            clone.onmouseup = function () {
+                clone.__simoderDown = false;
+                applyState(clone.__simoderHover ? 1 : 0);
+            };
+            clone.onclick = function () {
+                if (btn && typeof btn.onclick === "function") {
+                    btn.onclick();
+                }
+            };
+
+            container.style.display = "none";
+            return true;
+        };
+
+        var findActiveRegionPreview = function () {
+            if (!sim) { return null; }
+            var viewH = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
+            var viewW = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
+            var myGames = sim.gMyGamesUIHandler || (sim.cLauncher3D && sim.cLauncher3D.mPanels && sim.cLauncher3D.mPanels.MY_GAMES_PANEL && sim.cLauncher3D.mPanels.MY_GAMES_PANEL.uiHandler);
+            if (!myGames) { return null; }
+            var tabs = [myGames.mContinueTab, myGames.mCreateTab];
+            var i, tab, mapCtrl, reg, rootEl, rect;
+            for (i = 0; i < tabs.length; i += 1) {
+                tab = tabs[i];
+                if (!tab || !tab.mOverviewMap || !tab.mOverviewMap.mRegionData) { continue; }
+                mapCtrl = tab.mOverviewMap;
+                reg = mapCtrl.mRegionData;
+                if (!reg.id) { continue; }
+                rootEl = mapCtrl.mRootElement || (mapCtrl.mRootLayout && mapCtrl.mRootLayout.mRootElement) || (mapCtrl.mParentControl && mapCtrl.mParentControl.mRootElement);
+                if (!rootEl || typeof rootEl.getBoundingClientRect !== "function") { continue; }
+                rect = rootEl.getBoundingClientRect();
+                if (!rect || rect.width < 180 || rect.height < 120 || rect.right > viewW + 4 || rect.bottom > viewH + 4 || rect.left < 0 || rect.top < 0) {
+                    continue;
+                }
+                return {
+                    rect: rect,
+                    regionId: String(reg.id),
+                    regionName: String(reg.name || ""),
+                    sandbox: !!(reg.sandbox === true || reg.sandbox === "true"),
+                    viewW: viewW,
+                    viewH: viewH
+                };
+            }
+            return null;
+        };
+
+        var findInGameEscapeMenu = function () {
+            if (!sim) { return null; }
+            var mgr = window.gUIManager || uiMgr;
+            if (!mgr || typeof mgr.FindControlByID !== "function") { return null; }
+            var menuCtrl = mgr.FindControlByID(sim.kWinIDMainMenu || 185362957);
+            if (!menuCtrl || menuCtrl.mIsVisible !== true || !menuCtrl.mRootElement) { return null; }
+            if (typeof sim.IsOptionMenuVisible === "function" && !sim.IsOptionMenuVisible()) { return null; }
+            var menuEl = menuCtrl.mRootElement;
+            if (typeof menuEl.getBoundingClientRect !== "function") { return null; }
+            var menuRect = menuEl.getBoundingClientRect();
+            if (!menuRect || menuRect.width < 120 || menuRect.height < 80) { return null; }
+            var viewH = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
+            var all = menuEl.getElementsByTagName ? menuEl.getElementsByTagName("*") : [];
+            var bestRect = null;
+            var i, el, r;
+            for (i = 0; i < all.length; i += 1) {
+                el = all[i];
+                if (isSimoderNode(el) || typeof el.getBoundingClientRect !== "function") { continue; }
+                r = el.getBoundingClientRect();
+                if (!r || r.width < 100 || r.width > menuRect.width - 8 || r.height < 22 || r.height > 64 || r.bottom > viewH) {
+                    continue;
+                }
+                if (el.tagName === "BUTTON" || (el.style && el.style.cursor === "pointer") || (el.className && String(el.className).indexOf("button") !== -1) || (el.textContent && String(el.textContent).replace(/^\s+|\s+$/g, "").length > 0 && r.width >= menuRect.width * 0.55)) {
+                    if (!bestRect || r.bottom > bestRect.bottom) {
+                        bestRect = r;
+                    }
+                }
+            }
+            if (!bestRect) { return null; }
+            return { menuEl: menuEl, menuRect: menuRect, btnRect: bestRect, viewH: viewH };
         };
 
         var positionSlotContainer = function (container, viewName, slotName) {
-            if (!container || !container.style || slotName !== "menu.actions") { return; }
+            if (!container || !container.style) { return; }
+            if (slotName === "region.actions") {
+                var preview = findActiveRegionPreview();
+                if (!preview) {
+                    container.style.display = "none";
+                    host.activeRegionContext = null;
+                    return;
+                }
+                host.activeRegionContext = {
+                    regionId: preview.regionId,
+                    regionName: preview.regionName,
+                    sandbox: preview.sandbox
+                };
+                container.style.display = "block";
+                container.style.left = Math.round(preview.rect.right - 138) + "px";
+                container.style.top = Math.round(preview.rect.bottom - 38) + "px";
+                container.style.right = "auto";
+                container.style.bottom = "auto";
+                return;
+            }
+            if (slotName !== "menu.actions") { return; }
             if (viewName === "launcher.menu") {
+                container.style.display = "block";
                 var anchor = findLauncherFooterAnchor();
                 if (anchor) {
                     var targetLeft = Math.round(anchor.rect.right + 18);
@@ -265,13 +679,93 @@
                 }
             } else if (viewName === "main.menu") {
                 var hub = findMainMenuHubColumn();
-                if (hub) {
-                    container.style.left = Math.round(hub.rect.left) + "px";
-                    container.style.right = "auto";
-                    container.style.top = Math.round(hub.rect.bottom + 8) + "px";
-                    container.style.bottom = "auto";
-                    container.style.width = Math.round(hub.rect.width) + "px";
+                if (!hub) {
+                    container.style.display = "none";
+                    removeVanillaHubButton();
+                    return;
                 }
+                if (hub.panels && hub.panels.length && hub.playCtrl && hub.playPos) {
+                    var origPlayTop = hub.playCtrl.mTop;
+                    var origPlayHeight = hub.playCtrl.mHeight;
+                    var origResumeTop = hub.resumeCtrl ? hub.resumeCtrl.mTop : null;
+                    var origResumeHeight = hub.resumeCtrl ? hub.resumeCtrl.mHeight : null;
+                    var modsBottomY = hub.playPos[1] + hub.localPitch + hub.playCtrl.mHeight;
+                    var containsPanel = function (candidate) {
+                        var j;
+                        for (j = 0; j < hub.panels.length; j += 1) {
+                            if (hub.panels[j] === candidate) { return true; }
+                        }
+                        return false;
+                    };
+                    var pi, pCtrl, vPin, pPos, targetHeight;
+                    for (pi = 0; pi < hub.panels.length; pi += 1) {
+                        pCtrl = hub.panels[pi];
+                        if (!pCtrl || typeof pCtrl.SetHeight !== "function" || typeof pCtrl.mHeight !== "number") { continue; }
+                        vPin = pCtrl.mVerticalPinType;
+                        if (pCtrl.mParentControl && containsPanel(pCtrl.mParentControl) && (vPin === 2 || vPin === 4 || vPin === 5)) {
+                            continue;
+                        }
+                        if (pCtrl.mControlID === 241896001) {
+                            targetHeight = Math.round(hub.playCtrl.mTop + hub.localPitch + hub.playCtrl.mHeight);
+                        } else {
+                            pPos = typeof pCtrl.GetAbsolutePosition === "function" ? pCtrl.GetAbsolutePosition() : [Number(pCtrl.mLeft || 0), Number(pCtrl.mTop || 0)];
+                            targetHeight = Math.round((modsBottomY - pPos[1]) - 7);
+                        }
+                        if (targetHeight > 0 && Math.abs(pCtrl.mHeight - targetHeight) > 1) {
+                            pCtrl.SetHeight(targetHeight);
+                        }
+                    }
+                    if (typeof hub.playCtrl.SetPosition === "function" &&
+                        typeof origPlayTop === "number" && typeof origPlayHeight === "number" &&
+                        (hub.playCtrl.mTop !== origPlayTop || hub.playCtrl.mHeight !== origPlayHeight)) {
+                        hub.playCtrl.SetPosition(hub.playCtrl.mLeft, origPlayTop, hub.playCtrl.mWidth, origPlayHeight);
+                    }
+                    if (hub.resumeCtrl && typeof hub.resumeCtrl.SetPosition === "function" &&
+                        typeof origResumeTop === "number" && typeof origResumeHeight === "number" &&
+                        (hub.resumeCtrl.mTop !== origResumeTop || hub.resumeCtrl.mHeight !== origResumeHeight)) {
+                        hub.resumeCtrl.SetPosition(hub.resumeCtrl.mLeft, origResumeTop, hub.resumeCtrl.mWidth, origResumeHeight);
+                    }
+                }
+                if (mountVanillaHubButton(container, hub)) {
+                    return;
+                }
+                var step = Math.round(hub.rect.height + 8);
+                container.style.display = "block";
+                container.style.left = Math.round(hub.rect.left) + "px";
+                container.style.right = "auto";
+                container.style.top = Math.round(hub.rect.top + step) + "px";
+                container.style.bottom = "auto";
+                container.style.width = Math.round(hub.rect.width) + "px";
+                container.style.height = Math.round(hub.rect.height) + "px";
+                if (hub.typography && container.querySelector) {
+                    var hubBtn = container.querySelector(".simoder-btn");
+                    if (hubBtn && hubBtn.style) {
+                        if (hub.typography.fontSize) { hubBtn.style.fontSize = hub.typography.fontSize; }
+                        if (hub.typography.fontFamily) { hubBtn.style.fontFamily = hub.typography.fontFamily; }
+                        if (hub.typography.fontWeight) { hubBtn.style.fontWeight = hub.typography.fontWeight; }
+                        if (hub.typography.color) { hubBtn.style.color = hub.typography.color; }
+                    }
+                }
+            } else if (viewName === "ingame.options") {
+                var esc = findInGameEscapeMenu();
+                if (!esc) {
+                    container.style.display = "none";
+                    return;
+                }
+                var escGap = 8;
+                if (esc.menuEl.style && esc.menuEl.getAttribute("data-simoder-esc-expanded") !== "1") {
+                    if (esc.btnRect.bottom + escGap + esc.btnRect.height > esc.menuRect.bottom - 6) {
+                        esc.menuEl.style.height = Math.round(esc.menuRect.height + esc.btnRect.height + escGap) + "px";
+                        esc.menuEl.setAttribute("data-simoder-esc-expanded", "1");
+                    }
+                }
+                container.style.display = "block";
+                container.style.left = Math.round(esc.btnRect.left) + "px";
+                container.style.right = "auto";
+                container.style.top = Math.round(esc.btnRect.bottom + escGap) + "px";
+                container.style.bottom = "auto";
+                container.style.width = Math.round(esc.btnRect.width) + "px";
+                container.style.height = Math.round(esc.btnRect.height) + "px";
             }
         };
 
@@ -341,7 +835,11 @@
                 }
                 (function (pId, act, tId, chk) {
                     el.onclick = function () {
-                        pushEvent(pId, act || "click", tId, kind === "toggle" ? String(!chk) : null);
+                        var payload = kind === "toggle" ? String(!chk) : null;
+                        if (act === "open_region_mods" && host.activeRegionContext) {
+                            payload = JSON.stringify(host.activeRegionContext);
+                        }
+                        pushEvent(pId, act || "click", tId, payload);
                     };
                 }(patchId, node.action, node.id, !!node.checked));
             } else if (kind === "input") {
@@ -516,7 +1014,8 @@
             return el;
         };
 
-        var needsReconcile = host.revision !== packet.revision || host.lastPhase !== phase;
+        var reqReloadGen = typeof packet.reloadGen === "number" ? packet.reloadGen : 0;
+        var needsReconcile = host.revision !== packet.revision || host.lastPhase !== phase || host.reloadGen !== reqReloadGen;
         var patches = packet.patches || [];
         var activeForPhase = [];
         var i;
@@ -534,6 +1033,10 @@
                 var actionsSlot = doc.getElementById("simoder-slot-" + phase.replace(/[^a-zA-Z0-9_-]/g, "_") + "-menu_actions");
                 if (actionsSlot) {
                     positionSlotContainer(actionsSlot, phase, "menu.actions");
+                }
+                var regionSlot = doc.getElementById("simoder-slot-" + phase.replace(/[^a-zA-Z0-9_-]/g, "_") + "-region_actions");
+                if (regionSlot) {
+                    positionSlotContainer(regionSlot, phase, "region.actions");
                 }
             }
         }
@@ -580,8 +1083,12 @@
                 } else {
                     container.appendChild(wrapper);
                 }
+                if (phase === "main.menu" && (p.slot || "menu.actions") === "menu.actions") {
+                    mountVanillaHubButton(container, findMainMenuHubColumn());
+                }
             }
             host.revision = packet.revision;
+            host.reloadGen = reqReloadGen;
             host.lastPhase = phase;
         }
 

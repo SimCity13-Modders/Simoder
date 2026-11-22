@@ -26,7 +26,7 @@ use crate::pe::Pe32Image;
 use crate::proxy_ffi::global_simoder_runtime;
 use crate::runtime::NativeModCandidateState;
 use crate::win32_loader::{emit_log, to_wide_null};
-use crate::win32_window_dispatch::wake_ui_dispatch;
+use crate::win32_window_dispatch::{eval_js_on_game_thread, wake_ui_dispatch};
 
 type HModule = *mut c_void;
 type FarProc = *const c_void;
@@ -64,6 +64,96 @@ struct SdHostApiV2Raw {
     credential_api_ptr: usize,
     semantic_api_ptr: usize,
 }
+
+#[repr(C)]
+struct SdSemanticHostApiV2Raw {
+    size: u32,
+    version: u32,
+    eval_ui_js: extern "C" fn(
+        script_ptr: *const u8,
+        script_len: usize,
+        arg_ptr: *const u8,
+        arg_len: usize,
+        out_buf: *mut u8,
+        out_cap: usize,
+        out_len: *mut usize,
+        timeout_ms: u32,
+    ) -> u32,
+}
+
+const MAX_SEMANTIC_JS_INPUT_BYTES: usize = 128 * 1024;
+
+extern "C" fn host_eval_ui_js(
+    script_ptr: *const u8,
+    script_len: usize,
+    arg_ptr: *const u8,
+    arg_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+    out_len: *mut usize,
+    timeout_ms: u32,
+) -> u32 {
+    if script_ptr.is_null()
+        || script_len == 0
+        || script_len > MAX_SEMANTIC_JS_INPUT_BYTES
+        || arg_len > MAX_SEMANTIC_JS_INPUT_BYTES
+        || (arg_len > 0 && arg_ptr.is_null())
+        || out_len.is_null()
+    {
+        return SdResult::Invalid as u32;
+    }
+
+    // SAFETY: Caller passes valid UTF-8 byte ranges for `script_len` and `arg_len`.
+    let script_bytes = unsafe { std::slice::from_raw_parts(script_ptr, script_len) };
+    let Ok(script) = std::str::from_utf8(script_bytes) else {
+        return SdResult::Invalid as u32;
+    };
+    let arg_bytes = if arg_len == 0 {
+        &[]
+    } else {
+        // SAFETY: `arg_ptr` checked non-null when `arg_len > 0`.
+        unsafe { std::slice::from_raw_parts(arg_ptr, arg_len) }
+    };
+    let Ok(arg) = std::str::from_utf8(arg_bytes) else {
+        return SdResult::Invalid as u32;
+    };
+
+    let (status_code, payload_bytes): (SdResult, Vec<u8>) =
+        match eval_js_on_game_thread(script, arg, timeout_ms) {
+            Ok(text) => (SdResult::Ok, text.into_bytes()),
+            Err(err_msg) => {
+                let code = if err_msg.contains("timed out") {
+                    SdResult::Deadline
+                } else if err_msg.contains("not ready") {
+                    SdResult::NotReady
+                } else {
+                    SdResult::OperationFailed
+                };
+                (code, err_msg.into_bytes())
+            }
+        };
+
+    // SAFETY: `out_len` checked non-null at entrypoint.
+    unsafe {
+        *out_len = payload_bytes.len();
+    }
+    if payload_bytes.len() > out_cap || out_buf.is_null() {
+        return SdResult::BufferSmall as u32;
+    }
+    if !payload_bytes.is_empty() {
+        // SAFETY: `out_buf` is non-null with capacity `out_cap >= payload_bytes.len()`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload_bytes.as_ptr(), out_buf, payload_bytes.len());
+        }
+    }
+    status_code as u32
+}
+
+static SEMANTIC_HOST_API_V2: SdSemanticHostApiV2Raw = SdSemanticHostApiV2Raw {
+    size: size_of::<SdSemanticHostApiV2Raw>() as u32,
+    version: 1,
+    eval_ui_js: host_eval_ui_js,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -127,7 +217,7 @@ impl NativeModuleCallbacks for Win32NativeCallbacks {
             lifecycle_api_ptr: 0,
             dispatch_api_ptr: 0,
             credential_api_ptr: 0,
-            semantic_api_ptr: 0,
+            semantic_api_ptr: &SEMANTIC_HOST_API_V2 as *const SdSemanticHostApiV2Raw as usize,
         };
         let code = (self.prepare_fn)(&host);
         SdResult::from_repr(code).unwrap_or(SdResult::Invalid)

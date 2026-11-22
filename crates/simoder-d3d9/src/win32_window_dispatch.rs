@@ -1,12 +1,15 @@
 #![allow(unsafe_code)]
 
 //! Owning-thread Win32 window subclassing, `WM_APP` dispatch, periodic UI timer,
-//! and clean teardown ported from the verified `game_window_dispatch.cpp` contract.
+//! and clean teardown for the verified game window thread.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::null_mut;
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -85,6 +88,59 @@ static DISPATCH_CLOSED: AtomicBool = AtomicBool::new(false);
 static MODAL_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static ACTIVE_CALLS: AtomicU32 = AtomicU32::new(0);
 static UI_TICK_CALLBACK: OnceLock<Mutex<Option<UiTickCallback>>> = OnceLock::new();
+static PENDING_JS_EVALS: OnceLock<Mutex<VecDeque<PendingJsEval>>> = OnceLock::new();
+
+struct PendingJsEval {
+    script: String,
+    arg: String,
+    reply: SyncSender<Result<String, String>>,
+}
+
+fn pending_js_evals() -> &'static Mutex<VecDeque<PendingJsEval>> {
+    PENDING_JS_EVALS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn drain_pending_js_evals(hwnd_val: usize) {
+    loop {
+        let next = pending_js_evals().lock().pop_front();
+        let Some(req) = next else {
+            break;
+        };
+        let res = crate::eawebkit_bridge::eval_active_view_script(hwnd_val, &req.script, &req.arg);
+        let _ = req.reply.send(res);
+    }
+}
+
+/// Evaluate a strict-ES5 JS function on the verified game window owning thread (`WM_APP_SIMODER_SYNC`).
+pub fn eval_js_on_game_thread(
+    script: &str,
+    arg: &str,
+    timeout_ms: u32,
+) -> Result<String, String> {
+    if DISPATCH_CLOSED.load(Ordering::Acquire) {
+        return Err("game window dispatch is closed".into());
+    }
+    let hwnd_val = CURRENT_HWND.load(Ordering::Acquire);
+    let tid = CURRENT_TID.load(Ordering::Acquire);
+    if hwnd_val == 0 || tid == 0 {
+        return Err("game window dispatch is not ready".into());
+    }
+    // SAFETY: Queries current Win32 thread ID.
+    let current_tid = unsafe { GetCurrentThreadId() };
+    if current_tid == tid {
+        return crate::eawebkit_bridge::eval_active_view_script(hwnd_val, script, arg);
+    }
+    let (tx, rx) = mpsc::sync_channel(1);
+    pending_js_evals().lock().push_back(PendingJsEval {
+        script: script.to_string(),
+        arg: arg.to_string(),
+        reply: tx,
+    });
+    wake_ui_dispatch();
+    let wait = Duration::from_millis(timeout_ms.clamp(100, 15_000) as u64);
+    rx.recv_timeout(wait)
+        .map_err(|err| format!("EAWebKit UI eval timed out or canceled: {err}"))?
+}
 
 fn prop_name() -> &'static [u16] {
     PROP_NAME_W.get_or_init(|| {
@@ -156,10 +212,11 @@ unsafe extern "system" fn router_wndproc(
             unsafe {
                 let _ = KillTimer(hwnd, SIMODER_UI_TIMER_ID);
             }
-        } else if (msg == WM_APP_SIMODER_SYNC || (msg == WM_TIMER && wparam == SIMODER_UI_TIMER_ID))
-            && let Some(cb) = *callback_slot().lock()
-        {
-            cb(hwnd_val);
+        } else if msg == WM_APP_SIMODER_SYNC || (msg == WM_TIMER && wparam == SIMODER_UI_TIMER_ID) {
+            drain_pending_js_evals(hwnd_val);
+            if let Some(cb) = *callback_slot().lock() {
+                cb(hwnd_val);
+            }
             if msg == WM_APP_SIMODER_SYNC {
                 return 0;
             }
@@ -309,6 +366,12 @@ pub fn shutdown_window_dispatch() {
     DISPATCH_CLOSED.store(true, Ordering::Release);
     MODAL_OVERLAY_ACTIVE.store(false, Ordering::Release);
     *callback_slot().lock() = None;
+    {
+        let mut queue = pending_js_evals().lock();
+        while let Some(req) = queue.pop_front() {
+            let _ = req.reply.send(Err("window dispatch shutting down".into()));
+        }
+    }
     let hwnd_val = CURRENT_HWND.swap(0, Ordering::AcqRel);
     if hwnd_val == 0 {
         return;

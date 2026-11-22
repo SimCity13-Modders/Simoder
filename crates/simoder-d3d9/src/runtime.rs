@@ -93,6 +93,8 @@ pub struct IntegratedSimoderRuntime {
     ui_observation: Mutex<UiViewObservation>,
     pending_ui_events: Mutex<VecDeque<UiPatchEvent>>,
     native_candidates: Mutex<BTreeMap<String, NativeModCandidateState>>,
+    region_mod_overrides: Mutex<BTreeMap<String, BTreeMap<String, bool>>>,
+    region_mods_path: Mutex<Option<PathBuf>>,
 }
 
 impl Default for IntegratedSimoderRuntime {
@@ -122,6 +124,8 @@ impl IntegratedSimoderRuntime {
             }),
             pending_ui_events: Mutex::new(VecDeque::new()),
             native_candidates: Mutex::new(BTreeMap::new()),
+            region_mod_overrides: Mutex::new(BTreeMap::new()),
+            region_mods_path: Mutex::new(None),
         }
     }
 
@@ -253,6 +257,49 @@ impl IntegratedSimoderRuntime {
         }
     }
 
+    /// Read per-region mod enablement overrides (`mod_id -> enabled`) for `region_id`.
+    pub fn get_region_mods(&self, region_id: &str) -> BTreeMap<String, bool> {
+        self.region_mod_overrides
+            .lock()
+            .get(region_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Set and persist a per-region mod enablement override (`region_id`, `mod_id`, `enabled`).
+    pub fn set_region_mod_enabled(
+        &self,
+        region_id: &str,
+        mod_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let reg = region_id.trim();
+        let mid = mod_id.trim();
+        if reg.is_empty() || reg.contains(',') || reg.contains('\n') || mid.is_empty() || mid.contains(',') || mid.contains('\n') {
+            return Err("Invalid region_id or mod_id for region mod context".into());
+        }
+        let mut guard = self.region_mod_overrides.lock();
+        guard
+            .entry(reg.to_string())
+            .or_default()
+            .insert(mid.to_string(), enabled);
+        if let Some(path) = self.region_mods_path.lock().as_ref() {
+            let mut lines = Vec::new();
+            for (r, mods) in guard.iter() {
+                for (m, &en) in mods {
+                    lines.push(format!("{r},{m},{en}"));
+                }
+            }
+            let body = if lines.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", lines.join("\n"))
+            };
+            fs::write(path, body).map_err(|e| format!("Failed saving region_mods.toon: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Borrow the one-shot [`BootstrapCoordinator`].
     pub const fn bootstrap(&self) -> &BootstrapCoordinator {
         &self.bootstrap
@@ -347,6 +394,25 @@ impl IntegratedSimoderRuntime {
 
             let mods_root = paths.game_root.join(&config.mods_dir);
             let state_path = paths.data_root.join("state.toon");
+            let region_mods_path = paths.data_root.join("region_mods.toon");
+            if let Ok(raw) = fs::read_to_string(&region_mods_path) {
+                let mut loaded: BTreeMap<String, BTreeMap<String, bool>> = BTreeMap::new();
+                for line in raw.lines() {
+                    let parts: Vec<&str> = line.trim().splitn(3, ',').collect();
+                    if parts.len() == 3
+                        && !parts[0].is_empty()
+                        && !parts[1].is_empty()
+                        && let Ok(en) = parts[2].parse::<bool>()
+                    {
+                        loaded
+                            .entry(parts[0].to_string())
+                            .or_default()
+                            .insert(parts[1].to_string(), en);
+                    }
+                }
+                *self.region_mod_overrides.lock() = loaded;
+            }
+            *self.region_mods_path.lock() = Some(region_mods_path);
             let patch_registry = Arc::new(PatchRegistry::new());
             *self.mod_manager.lock() = Some(ModManager::new(&mods_root, &state_path, patch_registry));
 

@@ -6,6 +6,7 @@
 //! `simoder-formats`, `simoder-mods`, `simoder-scripting`, `simoder-crash`).
 
 pub mod base_bridge;
+pub mod base_hot_reload;
 pub mod bootstrap;
 pub mod config;
 pub mod exports;
@@ -28,8 +29,8 @@ pub(crate) mod win32_window_dispatch;
 use std::path::Path;
 
 pub use {
-    base_bridge::*, bootstrap::*, config::*, exports::*, pe::*, proxy_ffi::*, runtime::*,
-    ui_patch_host::*, vftable::*,
+    base_bridge::*, base_hot_reload::*, bootstrap::*, config::*, exports::*, pe::*, proxy_ffi::*,
+    runtime::*, ui_patch_host::*, vftable::*,
 };
 
 /// Errors returned by `simoder-d3d9` installation path checks, PE32 parsing, and bootstrap orchestration.

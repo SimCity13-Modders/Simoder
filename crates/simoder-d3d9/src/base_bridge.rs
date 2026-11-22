@@ -89,6 +89,19 @@ pub trait ModsActionBackend: Send + Sync {
     fn revoke_native(&self, mod_id: &str) -> Result<(), String>;
     /// Enable or disable an authoring/script mod in [`simoder_mods::ModManager`].
     fn set_enabled(&self, mod_id: &str, enabled: bool) -> Result<(), String>;
+    /// Read per-region mod enablement overrides (`mod_id -> enabled`).
+    fn get_region_mods(&self, _region_id: &str) -> BTreeMap<String, bool> {
+        BTreeMap::new()
+    }
+    /// Set a per-region mod enablement override for `region_id`.
+    fn set_region_mod_enabled(
+        &self,
+        _region_id: &str,
+        _mod_id: &str,
+        _enabled: bool,
+    ) -> Result<(), String> {
+        Err("Per-region mod contexts are unavailable".into())
+    }
 }
 
 /// Default [`ModsActionBackend`] backed by [`IntegratedSimoderRuntime`] for unit/integration testing.
@@ -167,6 +180,20 @@ impl ModsActionBackend for RuntimeOnlyModsBackend {
             mgr.set_enabled(mod_id, enabled).map_err(|e| e.to_string())
         })
     }
+
+    fn get_region_mods(&self, region_id: &str) -> BTreeMap<String, bool> {
+        self.runtime.get_region_mods(region_id)
+    }
+
+    fn set_region_mod_enabled(
+        &self,
+        region_id: &str,
+        mod_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.runtime
+            .set_region_mod_enabled(region_id, mod_id, enabled)
+    }
 }
 
 struct ModuleLoaderState {
@@ -235,6 +262,15 @@ impl BaseRuntimeHost {
 
     /// Execute one UI sync tick (`mods-ui.tick()`) and update composed patches inside `IntegratedSimoderRuntime`.
     pub fn tick_ui(&self) -> Result<(), String> {
+        self.call_mods_ui_method("tick")
+    }
+
+    /// Force `mods-ui.refresh()` so all active composed patches are re-committed to `IntegratedSimoderRuntime`.
+    pub fn refresh_ui(&self) -> Result<(), String> {
+        self.call_mods_ui_method("refresh")
+    }
+
+    fn call_mods_ui_method(&self, method: &str) -> Result<(), String> {
         let lua = self.lua.lock();
         let exports: Table = lua
             .globals()
@@ -246,13 +282,13 @@ impl BaseRuntimeHost {
         let mods_ui: Table = services
             .get("mods-ui")
             .map_err(|e| format!("Simoder-Base service 'mods-ui' missing: {e}"))?;
-        let tick_fn: Function = mods_ui
-            .get("tick")
-            .map_err(|e| format!("Simoder-Base mods-ui.tick missing: {e}"))?;
-        tick_fn
+        let fn_ref: Function = mods_ui
+            .get(method)
+            .map_err(|e| format!("Simoder-Base mods-ui.{method} missing: {e}"))?;
+        fn_ref
             .call::<Value>(())
             .map(|_| ())
-            .map_err(|e| format!("Simoder-Base mods-ui.tick failed: {e}"))
+            .map_err(|e| format!("Simoder-Base mods-ui.{method} failed: {e}"))
     }
 
     /// Evaluate a third-party Luau script binding it through `Simoder-Base`'s frozen mod facade (no `host.mods`).
@@ -659,12 +695,35 @@ fn install_private_host_table(
             .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
-    let b_toggle = backend;
+    let b_toggle = backend.clone();
     mods_tbl
         .set(
             "setEnabled",
             lua.create_function(move |lua, (mod_id, enabled): (String, bool)| {
                 action_result_to_lua(lua, b_toggle.set_enabled(&mod_id, enabled))
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    let b_reg_get = backend.clone();
+    mods_tbl
+        .set(
+            "getRegionMods",
+            lua.create_function(move |lua, region_id: String| {
+                lua.to_value_with(&b_reg_get.get_region_mods(&region_id), SERDE_NIL_OPTIONS)
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    let b_reg_set = backend;
+    mods_tbl
+        .set(
+            "setRegionModEnabled",
+            lua.create_function(move |lua, (region_id, mod_id, enabled): (String, String, bool)| {
+                action_result_to_lua(
+                    lua,
+                    b_reg_set.set_region_mod_enabled(&region_id, &mod_id, enabled),
+                )
             })
             .map_err(|e| e.to_string())?,
         )

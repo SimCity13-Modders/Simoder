@@ -10,7 +10,7 @@ use std::mem::transmute;
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use simoder_crash::BOOTSTRAP_LOG_RELATIVE_PATH;
 use simoder_mods::RESERVED_BASE_MOD_ID;
 
 use crate::base_bridge::{BaseRuntimeHost, ModsActionBackend};
+use crate::base_hot_reload::{BaseHotReloadState, load_applicator_script};
 use crate::bootstrap::BootstrapOutcome;
 use crate::eawebkit_bridge::{
     execute_eawebkit_packet, initialize_eawebkit_bridge, is_eawebkit_bridge_ready,
@@ -29,7 +30,9 @@ use crate::proxy_ffi::{
     FnDirect3DCreate9, FnDirect3DCreate9Ex, global_d3d9_forwarder, global_simoder_runtime,
 };
 use crate::runtime::ModsUiSnapshot;
-use crate::ui_patch_host::{UI_PATCH_APPLICATOR_ES5, build_sync_packet, parse_sync_reply};
+use crate::ui_patch_host::{
+    UI_PATCH_APPLICATOR_ES5, build_sync_packet_with_reload, parse_sync_reply,
+};
 use crate::win32_console::{
     current_thread_id, start_global_logger, stop_global_logger, unix_time_ms,
 };
@@ -70,10 +73,16 @@ static SYSTEM_D3D9_INIT: OnceLock<()> = OnceLock::new();
 static BOOTSTRAP_STARTED: AtomicBool = AtomicBool::new(false);
 static LOADER_STOPPING: AtomicBool = AtomicBool::new(false);
 static EAWEBKIT_VIEW_SEEN: AtomicBool = AtomicBool::new(false);
+static LAST_HOT_RELOAD_POLL_MS: AtomicU64 = AtomicU64::new(0);
 static BASE_HOST_SLOT: OnceLock<Mutex<Option<BaseRuntimeHost>>> = OnceLock::new();
+static BASE_HOT_RELOAD: OnceLock<Mutex<Option<BaseHotReloadState>>> = OnceLock::new();
 
 fn base_host_slot() -> &'static Mutex<Option<BaseRuntimeHost>> {
     BASE_HOST_SLOT.get_or_init(|| Mutex::new(None))
+}
+
+fn base_hot_reload_slot() -> &'static Mutex<Option<BaseHotReloadState>> {
+    BASE_HOT_RELOAD.get_or_init(|| Mutex::new(None))
 }
 
 struct Win32ModsBackend;
@@ -101,6 +110,19 @@ impl ModsActionBackend for Win32ModsBackend {
             mgr.set_enabled(mod_id, enabled).map_err(|e| e.to_string())
         })
     }
+
+    fn get_region_mods(&self, region_id: &str) -> std::collections::BTreeMap<String, bool> {
+        global_simoder_runtime().get_region_mods(region_id)
+    }
+
+    fn set_region_mod_enabled(
+        &self,
+        region_id: &str,
+        mod_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        global_simoder_runtime().set_region_mod_enabled(region_id, mod_id, enabled)
+    }
 }
 
 fn on_ui_sync_tick(hwnd: usize) {
@@ -108,6 +130,37 @@ fn on_ui_sync_tick(hwnd: usize) {
         return;
     }
     let runtime = global_simoder_runtime();
+    let now_ms = unix_time_ms();
+    let last_poll = LAST_HOT_RELOAD_POLL_MS.load(Ordering::Acquire);
+    if now_ms.saturating_sub(last_poll) >= 1000
+        && LAST_HOT_RELOAD_POLL_MS
+            .compare_exchange(last_poll, now_ms, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        && let (Some(watcher), Some(host)) = (
+            base_hot_reload_slot().lock().as_mut(),
+            base_host_slot().lock().as_mut(),
+        )
+    {
+        match watcher.check_and_reload(host, Arc::new(runtime), Arc::new(Win32ModsBackend)) {
+            Ok(Some(report)) => emit_log(
+                LogLevel::Info,
+                LogSourceType::Mod,
+                RESERVED_BASE_MOD_ID,
+                &format!(
+                    "Hot-reloaded Simoder-Base (gen={}, external_applicator={})",
+                    report.reload_gen, report.external_applicator
+                ),
+            ),
+            Ok(None) => {}
+            Err(err) => emit_log(
+                LogLevel::Warning,
+                LogSourceType::Mod,
+                RESERVED_BASE_MOD_ID,
+                &format!("Simoder-Base hot-reload rejected (keeping previous version): {err}"),
+            ),
+        }
+    }
+
     for _pass in 0..2 {
         if let Some(base) = base_host_slot().lock().as_ref()
             && let Err(err) = base.tick_ui()
@@ -122,10 +175,18 @@ fn on_ui_sync_tick(hwnd: usize) {
         }
         let (revision, patches) = runtime.composed_ui_snapshot();
         set_modal_overlay_active(patches.iter().any(|p| p.slot == "modal.overlay"));
-        let Ok(packet) = build_sync_packet(revision, &patches) else {
+        let (reload_gen, applicator_script) = {
+            let guard = base_hot_reload_slot().lock();
+            if let Some(watcher) = guard.as_ref() {
+                (watcher.reload_gen(), watcher.applicator_script().to_string())
+            } else {
+                (0, UI_PATCH_APPLICATOR_ES5.to_string())
+            }
+        };
+        let Ok(packet) = build_sync_packet_with_reload(revision, reload_gen, &patches) else {
             return;
         };
-        match execute_eawebkit_packet(hwnd, UI_PATCH_APPLICATOR_ES5, &packet) {
+        match execute_eawebkit_packet(hwnd, &applicator_script, &packet) {
             Ok(raw_reply) => match parse_sync_reply(&raw_reply) {
                 Ok(reply) => {
                     if !EAWEBKIT_VIEW_SEEN.swap(true, Ordering::AcqRel) {
@@ -264,6 +325,9 @@ pub fn shutdown_loaded_native_modules() {
     if let Some(mut slot) = base_host_slot().try_lock() {
         *slot = None;
     }
+    if let Some(mut watcher) = base_hot_reload_slot().try_lock() {
+        *watcher = None;
+    }
     shutdown_admitted_native_owners();
     stop_global_logger();
 }
@@ -351,18 +415,24 @@ fn run_bootstrap_worker() {
             scan_and_load_native_mods(&paths, &mods_root, &config);
 
             if config.enabled && global_simoder_runtime().is_base_ready() {
+                let base_dir = mods_root.join(RESERVED_BASE_MOD_ID);
                 match BaseRuntimeHost::start_from_base_dir(
-                    &mods_root.join(RESERVED_BASE_MOD_ID),
+                    &base_dir,
                     Arc::new(global_simoder_runtime()),
                     Arc::new(Win32ModsBackend),
                 ) {
                     Ok(host) => {
                         *base_host_slot().lock() = Some(host);
+                        let watcher = BaseHotReloadState::new(base_dir.clone());
+                        let (_, ext_app) = load_applicator_script(&base_dir);
+                        *base_hot_reload_slot().lock() = Some(watcher);
                         emit_log(
                             LogLevel::Info,
                             LogSourceType::Mod,
                             RESERVED_BASE_MOD_ID,
-                            "Initialized Simoder-Base Luau UI composition & Mods UI services",
+                            &format!(
+                                "Initialized Simoder-Base Luau UI composition & Mods UI services (hot_reload=true, external_applicator={ext_app})"
+                            ),
                         );
                     }
                     Err(err) => emit_log(

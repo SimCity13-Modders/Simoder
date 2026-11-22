@@ -2,10 +2,9 @@
 
 //! Verified in-process `EAWebKit` JS execution bridge (`SimCity.exe 10.3.6.0`, `i686-pc-windows-msvc`).
 //!
-//! Ported directly from `src/dev/session/native_script_bridge.cpp` (verified in live gameplay on
-//! `2026-10-13`): matches exact executable SHA-256 + 5 immutable entry signatures, validates
-//! page readability via `VirtualQuery`, verifies owning-thread affinity against `0x00E596F8`,
-//! allocates RAII 12-byte `ValueScope` wrappers, and compiles/invokes ES5 scripts safely.
+//! Matches exact executable SHA-256 + 5 immutable entry signatures, validates page readability via
+//! `VirtualQuery`, verifies owning-thread affinity against `0x00E596F8`, allocates RAII 12-byte
+//! `ValueScope` wrappers, and compiles/invokes ES5 scripts safely.
 
 #[cfg(target_pointer_width = "32")]
 use std::ffi::{CString, c_void};
@@ -140,10 +139,39 @@ pub fn is_eawebkit_bridge_ready() -> bool {
 
 /// Execute `script_source` (pure ES5 JS function `(packetText) -> string`) with `packet_json`
 /// inside the highest-ranked active `EAWebKit` view context on the verified owning UI thread.
+///
+/// The script itself must support `UI_OBSERVE_PACKET_JSON` (`{"op":"observe"}`) for view selection.
 pub fn execute_eawebkit_packet(
     hwnd_val: usize,
     script_source: &str,
     packet_json: &str,
+) -> Result<String, String> {
+    if packet_json.is_empty() {
+        return Err("UI packet size out of bounds".into());
+    }
+    eval_active_view_inner(hwnd_val, None, script_source, packet_json)
+}
+
+/// Evaluate an arbitrary strict-ES5 JS function `(argText) -> string` inside the highest-ranked
+/// active `EAWebKit` view (`window.Client && window.simcity`) on the verified owning UI thread.
+pub fn eval_active_view_script(
+    hwnd_val: usize,
+    script_fn: &str,
+    arg_json: &str,
+) -> Result<String, String> {
+    eval_active_view_inner(hwnd_val, Some(VIEW_PROBE_ES5), script_fn, arg_json)
+}
+
+#[cfg(target_pointer_width = "32")]
+const VIEW_PROBE_ES5: &str = "(function(){try{var g=window.simcity,c=window.Client;var ok=!!(g&&c);var r=0;if(ok){if(g.gGlobalUIHandler)r=4;else if(g.cLauncher3D)r=3;else if(g.gUpdater)r=2;else r=1;}return JSON.stringify({ok:ok,rank:r});}catch(e){return '{\"ok\":false,\"rank\":0}';}})";
+#[cfg(not(target_pointer_width = "32"))]
+const VIEW_PROBE_ES5: &str = "";
+
+fn eval_active_view_inner(
+    hwnd_val: usize,
+    probe_script: Option<&str>,
+    script_source: &str,
+    arg_text: &str,
 ) -> Result<String, String> {
     let base = VERIFIED_BASE.load(Ordering::Acquire);
     if base == 0 {
@@ -151,12 +179,12 @@ pub fn execute_eawebkit_packet(
     }
     #[cfg(not(target_pointer_width = "32"))]
     {
-        let _ = (hwnd_val, script_source, packet_json);
+        let _ = (hwnd_val, probe_script, script_source, arg_text);
         Err("EAWebKit bridge requires 32-bit x86 host process".into())
     }
     #[cfg(target_pointer_width = "32")]
     {
-        execute_packet_x86(base, hwnd_val, script_source, packet_json)
+        execute_packet_x86(base, hwnd_val, probe_script, script_source, arg_text)
     }
 }
 
@@ -272,8 +300,11 @@ fn copy_value_utf8(base: usize, value: *mut c_void) -> Result<String, String> {
         let f: FnString = transmute(str_addr);
         f(value, &mut len)
     };
-    if len == 0 || len > 262_144 || !is_readable(ptr as usize, (len as usize) * 2) {
-        return Err("Native UI JSON result empty or exceeds 256 KiB bound".into());
+    if len == 0 {
+        return Ok(String::new());
+    }
+    if len > 1_048_576 || !is_readable(ptr as usize, (len as usize) * 2) {
+        return Err("Native UI JSON result empty or exceeds 1 MiB bound".into());
     }
     // SAFETY: Verified readable UTF-16 slice within bounds.
     let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
@@ -284,14 +315,17 @@ fn copy_value_utf8(base: usize, value: *mut c_void) -> Result<String, String> {
 fn execute_packet_x86(
     base: usize,
     hwnd_val: usize,
+    probe_script: Option<&str>,
     script_source: &str,
     packet_json: &str,
 ) -> Result<String, String> {
-    if packet_json.is_empty() || packet_json.len() > 131_072 {
+    if packet_json.len() > 131_072 {
         return Err("UI packet size out of bounds".into());
     }
     let script_c = CString::new(script_source).map_err(|_| "script contains NUL".to_string())?;
     let packet_c = CString::new(packet_json).map_err(|_| "packet contains NUL".to_string())?;
+    let probe_source = probe_script.unwrap_or(script_source);
+    let probe_c = CString::new(probe_source).map_err(|_| "probe script contains NUL".to_string())?;
     let observe_c = CString::new(crate::ui_patch_host::UI_OBSERVE_PACKET_JSON)
         .map_err(|_| "observe packet NUL".to_string())?;
 
@@ -376,7 +410,7 @@ fn execute_packet_x86(
 
         let mut func_scope = ValueScope::new(base, ctx);
         // SAFETY: Verified `Compile` on active EAWebKit view context.
-        if !unsafe { compile(ctx, script_c.as_ptr(), &mut func_scope.storage) } {
+        if !unsafe { compile(ctx, probe_c.as_ptr(), &mut func_scope.storage) } {
             continue;
         }
         let mut arg_scope = ValueScope::new(base, ctx);
@@ -399,7 +433,13 @@ fn execute_packet_x86(
         if !obs_json.contains("\"ok\":true") {
             continue;
         }
-        let rank = if obs_json.contains("\"ingame.options\"") {
+        let rank = if probe_script.is_some() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&obs_json) {
+                parsed.get("rank").and_then(|v| v.as_i64()).unwrap_or(1) as i32
+            } else {
+                1
+            }
+        } else if obs_json.contains("\"ingame.options\"") {
             4
         } else if obs_json.contains("\"main.menu\"") {
             3

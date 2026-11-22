@@ -20,6 +20,8 @@ pub struct UiSyncRequest<'a> {
     pub op: &'static str,
     /// Monotonic UI composition revision owned by [`simoder_mods::UiPatchRegistry`].
     pub revision: u64,
+    /// Hot-reload generation counter bumped whenever `Simoder-Base` reloads on disk.
+    pub reload_gen: u64,
     /// Ordered composed patches ready to render for the active phase.
     pub patches: &'a [UiPatchDescriptor],
 }
@@ -41,11 +43,21 @@ pub struct UiSyncReply {
     pub error: Option<String>,
 }
 
-/// Serialize a bounded [`UiSyncRequest`] packet for EAWebKit dispatch.
+/// Serialize a bounded [`UiSyncRequest`] packet for EAWebKit dispatch (`reload_gen = 0`).
 pub fn build_sync_packet(revision: u64, patches: &[UiPatchDescriptor]) -> Result<String, String> {
+    build_sync_packet_with_reload(revision, 0, patches)
+}
+
+/// Serialize a bounded [`UiSyncRequest`] packet with an explicit hot-reload generation counter.
+pub fn build_sync_packet_with_reload(
+    revision: u64,
+    reload_gen: u64,
+    patches: &[UiPatchDescriptor],
+) -> Result<String, String> {
     serde_json::to_string(&UiSyncRequest {
         op: "sync",
         revision,
+        reload_gen,
         patches,
     })
     .map_err(|e| format!("failed serializing UI sync packet: {e}"))

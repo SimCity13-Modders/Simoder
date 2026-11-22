@@ -588,5 +588,135 @@ fn es5_dom_applicator_executes_under_quickjs_and_emits_click_events() {
                 ("chk", Some("true")),
             ]
         );
+
+        // Unrelated advertisement / billboard webviews without window.Client/simcity must report phase="cold".
+        ctx.eval::<(), _>("window.__simoderMockPhase = ''; window.Client = null; window.simcity = null;").unwrap();
+        let cold_raw: String = obs_fn.call((UI_OBSERVE_PACKET_JSON,)).unwrap();
+        let cold_reply = parse_sync_reply(&cold_raw).unwrap();
+        assert_eq!(cold_reply.observation.as_ref().unwrap().phase, "cold");
+        assert!(cold_reply.observation.as_ref().unwrap().active_views.is_empty());
     });
+}
+
+#[test]
+fn base_mods_ui_supports_region_mods_context_isolation() {
+    let runtime = Arc::new(IntegratedSimoderRuntime::new());
+    let backend: Arc<dyn ModsActionBackend> = Arc::new(RuntimeOnlyModsBackend::new(runtime.clone()));
+    let host = BaseRuntimeHost::start_from_base_dir(&simoder_base_dir(), runtime.clone(), backend)
+        .expect("Simoder-Base DAG should boot cleanly");
+
+    runtime.set_ui_observation(UiViewObservation {
+        phase: "main.menu".into(),
+        active_views: vec!["main.menu".into()],
+        locale: "en-us".into(),
+    });
+    host.tick_ui().expect("initial main menu tick should pass");
+
+    let (_rev, patches) = runtime.composed_ui_snapshot();
+    assert!(
+        patches
+            .iter()
+            .any(|p| p.patch_id == "simoder.base.mods-trigger-region" && p.slot == "region.actions"),
+        "mods-trigger-region must be registered on region.actions"
+    );
+
+    runtime.push_ui_events([UiPatchEvent {
+        patch_id: "simoder.base.mods-trigger-region".into(),
+        action: "open_region_mods".into(),
+        target_id: Some("mods_region_trigger_btn".into()),
+        value: Some(r#"{"regionId":"6","regionName":"Simoder Sandbox"}"#.into()),
+    }]);
+    host.tick_ui().expect("open_region_mods should open region modal");
+
+    let (_rev, modal_patches) = runtime.composed_ui_snapshot();
+    let modal = modal_patches
+        .iter()
+        .find(|p| p.patch_id == "simoder.base.mods-modal")
+        .expect("region mods modal must appear");
+    assert!(
+        modal.node.label.as_deref().unwrap_or("").contains("Simoder Sandbox (#6)"),
+        "modal title should reflect selected region context"
+    );
+
+    runtime
+        .set_region_mod_enabled("6", "city.tweaks", true)
+        .unwrap();
+    runtime
+        .set_region_mod_enabled("7", "city.tweaks", false)
+        .unwrap();
+    assert_eq!(runtime.get_region_mods("6").get("city.tweaks"), Some(&true));
+    assert_eq!(runtime.get_region_mods("7").get("city.tweaks"), Some(&false));
+}
+
+#[test]
+fn base_hot_reload_swaps_scripts_and_applicator_and_rejects_broken_edits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_src = simoder_base_dir();
+    for entry in walkdir::WalkDir::new(&base_src)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(&base_src).unwrap();
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !rel_str.starts_with("scripts/") && !rel_str.starts_with("ui/") && rel_str != "mod.toml" {
+            continue;
+        }
+        let dst = tmp.path().join(rel);
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(entry.path(), dst).unwrap();
+    }
+
+    let runtime = Arc::new(IntegratedSimoderRuntime::new());
+    let backend: Arc<dyn ModsActionBackend> = Arc::new(RuntimeOnlyModsBackend::new(runtime.clone()));
+    let mut host = BaseRuntimeHost::start_from_base_dir(tmp.path(), runtime.clone(), backend.clone())
+        .expect("temp Simoder-Base should boot");
+    let mut watcher = simoder_d3d9::BaseHotReloadState::new(tmp.path().to_path_buf());
+    assert_eq!(watcher.reload_gen(), 0);
+    assert!(
+        watcher
+            .check_and_reload(&mut host, runtime.clone(), backend.clone())
+            .unwrap()
+            .is_none(),
+        "unchanged files must not trigger hot reload"
+    );
+
+    // Modify both Luau script and ui/applicator.js on disk.
+    let mods_ui_path = tmp.path().join("scripts/services/mods-ui.luau");
+    let mut mods_ui_src = std::fs::read_to_string(&mods_ui_path).unwrap();
+    mods_ui_src.push_str("\n-- hot-reload test marker\n");
+    std::fs::write(&mods_ui_path, mods_ui_src).unwrap();
+
+    let app_path = tmp.path().join("ui/applicator.js");
+    let mut app_src = std::fs::read_to_string(&app_path).unwrap();
+    app_src.push_str("\n/* hot-reload-marker */\n");
+    std::fs::write(&app_path, app_src).unwrap();
+
+    let report = watcher
+        .check_and_reload(&mut host, runtime.clone(), backend.clone())
+        .expect("valid edit should hot reload cleanly")
+        .expect("changed files should report reload");
+    assert_eq!(report.reload_gen, 1);
+    assert!(report.external_applicator);
+    assert!(watcher.applicator_script().contains("hot-reload-marker"));
+    let (_rev, reloaded_patches) = runtime.composed_ui_snapshot();
+    assert!(
+        reloaded_patches
+            .iter()
+            .any(|p| p.patch_id == "simoder.base.mods-trigger-main"),
+        "dropping old BaseRuntimeHost must not leave composed patches wiped after HotReload"
+    );
+
+    // Introduce a Luau syntax error and ensure the previous working VM stays active.
+    std::fs::write(&mods_ui_path, "this is invalid luau @@@").unwrap();
+    let err = watcher
+        .check_and_reload(&mut host, runtime.clone(), backend)
+        .expect_err("broken Luau edit must be rejected");
+    assert!(!err.is_empty());
+    assert_eq!(watcher.reload_gen(), 1);
+    host.tick_ui()
+        .expect("previous working Luau VM must remain functional after failed hot reload");
 }
