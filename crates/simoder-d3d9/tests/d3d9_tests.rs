@@ -382,7 +382,7 @@ fn integrated_runtime_unites_all_subsystems_and_forwarding_table_dispatches_d3d9
         assert_eq!(reg.list_tools().len(), 1);
     });
 
-    // Verify ABI v2 native module attachment and shutdown/drain.
+    // Verify ABI v2 native module admission is blocked (`SdResult::NotReady`) until `simoder.base` is verified.
     let sha = "b".repeat(64);
     let reg = NativeModuleRegistration {
         module_id: "simoder.devtools.mcp".into(),
@@ -392,6 +392,25 @@ fn integrated_runtime_unites_all_subsystems_and_forwarding_table_dispatches_d3d9
         mapped_image_bytes: 256 * 1024,
         native_trust_approved: true,
     };
+    assert_eq!(
+        runtime.load_and_admit_native_module(&reg, Arc::new(TestNativeAddon)),
+        Err(SdResult::NotReady)
+    );
+
+    // Install and verify mandatory `simoder.base` Luau entrypoint, then promote readiness and admit.
+    let mods_dir = dir.path().join("mods");
+    let base_scripts_dir = mods_dir.join("simoder.base").join("scripts");
+    fs::create_dir_all(&base_scripts_dir).unwrap();
+    fs::write(base_scripts_dir.join("init.luau"), "return { ready = true }").unwrap();
+    fs::write(
+        mods_dir.join("simoder.base").join("mod.toml"),
+        "schemaVersion = 2\nformat = \"simoder.authoring\"\n\n\
+         [metadata]\nid = \"simoder.base\"\nname = \"Simoder Base\"\nversion = \"0.2.0\"\n\n\
+         [scripts]\nlanguage = \"luau\"\nentry = \"scripts/init.luau\"\n",
+    )
+    .unwrap();
+    assert_eq!(runtime.initialize_mods_and_base(&mods_dir, true), Ok(true));
+
     let owner = runtime
         .load_and_admit_native_module(&reg, Arc::new(TestNativeAddon))
         .unwrap();

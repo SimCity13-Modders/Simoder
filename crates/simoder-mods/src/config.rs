@@ -10,6 +10,9 @@ pub const RETIRED_MANIFEST_FILES: [&str; 2] = ["mod.toon", "project.toml"];
 /// Canonical TOON filename storing ordered active mod IDs across launches.
 pub const STATE_FILE_NAME: &str = "state.toon";
 
+/// Canonical TOON filename storing user-approved or denied native `.dll` mod SHA-256 trust decisions.
+pub const NATIVE_TRUST_FILE_NAME: &str = "native_trust.toon";
+
 /// Reserved internal mod identifier blocked from third-party authoring and raw manifests.
 pub const RESERVED_BASE_MOD_ID: &str = "simoder.base";
 
@@ -55,6 +58,9 @@ pub const AUTHORING_SCHEMA_VERSION: i64 = 2;
 
 /// Canonical `format` identifier for authoring `mod.toml` manifests.
 pub const AUTHORING_FORMAT: &str = "simoder.authoring";
+
+/// Canonical `format` identifier for packaged native DevTool `mod.toml` manifests.
+pub const NATIVE_DEVTOOL_FORMAT: &str = "simoder.native-devtool";
 
 /// Schema version number for raw DBPF resource manifests (`simoder.raw-resources`).
 pub const RAW_RESOURCES_SCHEMA_VERSION: i64 = 3;

@@ -84,7 +84,7 @@ pub(super) fn scan_mods_directory(
     let mut grouped: BTreeMap<String, Vec<DiscoveredCandidate>> = BTreeMap::new();
 
     for path in dir_entries {
-        if is_shared_cache_dir(&path) {
+        if is_shared_cache_dir(&path) || is_base_mod_dir(&path) {
             continue;
         }
         match assets::reject_reparse_or_symlink(&path) {
@@ -161,6 +161,12 @@ fn is_shared_cache_dir(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case(config::SHARED_CACHE_DIR_NAME))
+}
+
+fn is_base_mod_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(config::RESERVED_BASE_MOD_ID))
 }
 
 fn display_leaf(path: &Path) -> String {

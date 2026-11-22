@@ -5,17 +5,32 @@
 //! single-owner pinned bootstrap coordination, and unified runtime orchestration (`simoder-core`,
 //! `simoder-formats`, `simoder-mods`, `simoder-scripting`, `simoder-crash`).
 
+pub mod base_bridge;
 pub mod bootstrap;
 pub mod config;
 pub mod exports;
 pub mod pe;
 pub mod proxy_ffi;
 pub mod runtime;
+pub mod ui_patch_host;
 pub mod vftable;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod eawebkit_bridge;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_console;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_loader;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_native;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_window_dispatch;
 
 use std::path::Path;
 
-pub use {bootstrap::*, config::*, exports::*, pe::*, proxy_ffi::*, runtime::*, vftable::*};
+pub use {
+    base_bridge::*, bootstrap::*, config::*, exports::*, pe::*, proxy_ffi::*, runtime::*,
+    ui_patch_host::*, vftable::*,
+};
 
 /// Errors returned by `simoder-d3d9` installation path checks, PE32 parsing, and bootstrap orchestration.
 #[derive(Debug, thiserror::Error)]

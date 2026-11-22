@@ -60,7 +60,7 @@ pub(super) fn parse(directory: &Path, raw_toml: &str) -> Result<ModDefinition, M
         }
     }
 
-    let manifest = dto.metadata.into_manifest()?;
+    let manifest = dto.metadata.into_manifest(false)?;
     if dto.resources.is_empty() || dto.resources.len() > config::MAX_RESOURCE_ENTRIES {
         return Err(ModError::ManifestValidation(format!(
             "'[[resources]]' count must be within 1..={}",

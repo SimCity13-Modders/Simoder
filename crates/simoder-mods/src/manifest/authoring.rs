@@ -25,6 +25,35 @@ struct AuthoringManifestDto {
     patches: Vec<PatchBlockDto>,
     #[serde(default)]
     assets: AssetsDto,
+    #[serde(default)]
+    scripts: Option<ScriptsDto>,
+    #[serde(default)]
+    native: Option<NativeDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScriptsDto {
+    language: String,
+    entry: String,
+    #[serde(alias = "memoryMiB", alias = "memory_mib")]
+    memory_mib: Option<u32>,
+    #[serde(alias = "budgetMs", alias = "budget_ms")]
+    budget_ms: Option<u32>,
+}
+
+const fn default_native_abi() -> u32 {
+    crate::native_host::SD_U2A_HOST_VERSION
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeDto {
+    #[serde(alias = "module")]
+    entry: String,
+    #[serde(alias = "contractVersion", default = "default_native_abi")]
+    abi: u32,
+    sha256: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -139,7 +168,11 @@ struct SymbolCatalog {
     resources: HashMap<String, (Tgi, String)>,
 }
 
-pub(super) fn parse(directory: &Path, raw_toml: &str) -> Result<ModDefinition, ModError> {
+pub(super) fn parse(
+    directory: &Path,
+    raw_toml: &str,
+    allow_reserved_base: bool,
+) -> Result<ModDefinition, ModError> {
     let dto: AuthoringManifestDto = toml::from_str(raw_toml)?;
     if dto.schema_version != config::AUTHORING_SCHEMA_VERSION {
         return Err(ModError::ManifestValidation(format!(
@@ -148,22 +181,36 @@ pub(super) fn parse(directory: &Path, raw_toml: &str) -> Result<ModDefinition, M
             config::AUTHORING_SCHEMA_VERSION
         )));
     }
-    if dto.format != config::AUTHORING_FORMAT {
+    if dto.format != config::AUTHORING_FORMAT && dto.format != config::NATIVE_DEVTOOL_FORMAT {
         return Err(ModError::ManifestValidation(format!(
-            "unsupported manifest format '{}'; expected '{}'",
+            "unsupported manifest format '{}'; expected '{}' or '{}'",
             dto.format,
-            config::AUTHORING_FORMAT
+            config::AUTHORING_FORMAT,
+            config::NATIVE_DEVTOOL_FORMAT
         )));
     }
 
-    let manifest = dto.metadata.into_manifest()?;
+    let manifest = dto.metadata.into_manifest(allow_reserved_base)?;
     let catalog = build_symbol_catalog(dto.symbols)?;
     let patches = resolve_patches(dto.patches, &catalog)?;
     let (new_assets, vanilla_references, materials) = resolve_assets(directory, dto.assets)?;
+    let scripts = dto
+        .scripts
+        .map(|s| resolve_scripts(directory, s))
+        .transpose()?;
+    let native = dto
+        .native
+        .map(|n| resolve_native(directory, n))
+        .transpose()?;
 
-    if patches.is_empty() && new_assets.is_empty() && vanilla_references.is_empty() {
+    if patches.is_empty()
+        && new_assets.is_empty()
+        && vanilla_references.is_empty()
+        && scripts.is_none()
+        && native.is_none()
+    {
         return Err(ModError::ManifestValidation(
-            "authoring mod must declare at least one [[patches]], [[assets.new]], or [[assets.references]] entry".into(),
+            "authoring mod must declare at least one [[patches]], [[assets.new]], [[assets.references]], [scripts], or [native] entry".into(),
         ));
     }
 
@@ -175,7 +222,70 @@ pub(super) fn parse(directory: &Path, raw_toml: &str) -> Result<ModDefinition, M
             new_assets,
             vanilla_references,
             materials,
+            scripts,
+            native,
         }),
+    })
+}
+
+fn resolve_scripts(directory: &Path, dto: ScriptsDto) -> Result<ScriptModConfig, ModError> {
+    check_bounded_non_empty(&dto.language, "scripts.language", config::MAX_FIELD_LEN)?;
+    let language = dto.language.trim().to_ascii_lowercase();
+    if language != "luau" && language != "js" {
+        return Err(ModError::ManifestValidation(format!(
+            "unsupported script language '{}'; expected 'luau' or 'js'",
+            dto.language
+        )));
+    }
+    check_bounded_non_empty(&dto.entry, "scripts.entry", config::MAX_SOURCE_LEN)?;
+    let resolved_path = assets::resolve_safe_relative_path(directory, &dto.entry, None)?;
+    Ok(ScriptModConfig {
+        language,
+        entry: dto.entry,
+        memory_mib: dto.memory_mib,
+        budget_ms: dto.budget_ms,
+        resolved_path,
+    })
+}
+
+fn resolve_native(directory: &Path, dto: NativeDto) -> Result<NativeModConfig, ModError> {
+    check_bounded_non_empty(&dto.entry, "native.entry", config::MAX_SOURCE_LEN)?;
+    if !dto.entry.to_ascii_lowercase().ends_with(".dll") {
+        return Err(ModError::ManifestValidation(format!(
+            "native entry '{}' must have a .dll extension",
+            dto.entry
+        )));
+    }
+    if dto.abi != crate::native_host::SD_U2A_HOST_VERSION {
+        return Err(ModError::ManifestValidation(format!(
+            "unsupported native host ABI version {}; expected {}",
+            dto.abi,
+            crate::native_host::SD_U2A_HOST_VERSION
+        )));
+    }
+    let resolved_path = assets::resolve_safe_relative_path(directory, &dto.entry, None)?;
+    let expected_sha256 = if let Some(sha) = dto.sha256 {
+        if !assets::is_lowercase_sha256_hex(&sha) {
+            return Err(ModError::ManifestValidation(
+                "native 'sha256' must be a 64-character lowercase hex digest".into(),
+            ));
+        }
+        let actual = hex::encode(assets::sha256_file(&resolved_path)?);
+        if actual != sha {
+            return Err(ModError::AssetValidation(format!(
+                "native DLL '{}' SHA-256 mismatch: expected {sha}, got {actual}",
+                dto.entry
+            )));
+        }
+        Some(sha)
+    } else {
+        None
+    };
+    Ok(NativeModConfig {
+        entry: dto.entry,
+        abi: dto.abi,
+        expected_sha256,
+        resolved_path,
     })
 }
 

@@ -1,0 +1,600 @@
+/**
+ * Generic EAWebKit declarative DOM patch applicator (strict ES5).
+ * Receives JSON packets from Simoder-Base via the verified native EAWebKit bridge:
+ * - {"op":"observe"} -> probes view readiness and current logical phase/locale without mutating DOM.
+ * - {"op":"sync","revision":N,"patches":[...]} -> reconciles declarative patches into view slots and drains click/toggle events.
+ */
+(function (packetText) {
+    "use strict";
+    try {
+        var packet = JSON.parse(packetText);
+        if (!window || !window.document) {
+            return JSON.stringify({ ok: false, error: "DOM document unavailable" });
+        }
+        var doc = window.document;
+        var sim = window.simcity || null;
+        var client = window.Client || null;
+        var uiMgr = (window.scrui && window.scrui.gUIManager) ? window.scrui.gUIManager : null;
+
+        var detectLocale = function () {
+            if (uiMgr && uiMgr.mLocaleManager && typeof uiMgr.mLocaleManager.mLocaleCode === "string" && uiMgr.mLocaleManager.mLocaleCode.length > 0) {
+                return uiMgr.mLocaleManager.mLocaleCode;
+            }
+            return "en-us";
+        };
+
+        var detectPhase = function () {
+            if (typeof window.__simoderMockPhase === "string" && window.__simoderMockPhase.length > 0) {
+                return window.__simoderMockPhase;
+            }
+            if (sim && sim.gUpdater && typeof (client && client.RequestUpdaterData) === "function") {
+                return "launcher.menu";
+            }
+            if (sim && sim.gCurtainUIHandler && sim.gCurtainUIHandler.mMoviePlaying === true) {
+                return "intro";
+            }
+            if (client && typeof client.RequestGameData === "function") {
+                try {
+                    var fin = client.RequestGameData("isLoadingFinalized");
+                    if (typeof fin === "string") { fin = JSON.parse(fin); }
+                    if (fin && fin.json !== undefined) { fin = fin.json; }
+                    if (fin === true) {
+                        var boxId = client.RequestGameData("activeBoxId");
+                        if (typeof boxId === "string") { boxId = JSON.parse(boxId); }
+                        if (boxId && boxId.json !== undefined) { boxId = boxId.json; }
+                        if (boxId !== undefined && boxId !== null && String(boxId) !== "0") {
+                            return "ingame.options";
+                        }
+                        return "main.menu";
+                    }
+                } catch (_err) {
+                    /* ignore transient query error before preload finishes */
+                }
+            }
+            if (sim && sim.cLauncher3D) {
+                return sim.cLauncher3D.mPreloadDone === true ? "main.menu" : "loading";
+            }
+            if (doc.body) {
+                return "main.menu";
+            }
+            return "cold";
+        };
+
+        var phase = detectPhase();
+        var activeViews = [];
+        if (phase === "launcher.menu" || phase === "main.menu" || phase === "ingame.options") {
+            activeViews.push(phase);
+        }
+        var observation = {
+            phase: phase,
+            activeViews: activeViews,
+            locale: detectLocale()
+        };
+
+        if (packet.op === "observe") {
+            return JSON.stringify({
+                ok: !!doc.body,
+                observation: observation,
+                events: []
+            });
+        }
+
+        if (!doc.body) {
+            return JSON.stringify({ ok: false, error: "document.body unavailable" });
+        }
+
+        if (!window.__simoderUiHost) {
+            window.__simoderUiHost = {
+                revision: -1,
+                lastPhase: "",
+                events: [],
+                activeModalClose: null,
+                escBound: false
+            };
+        }
+        var host = window.__simoderUiHost;
+
+        if (!host.escBound && doc.addEventListener) {
+            host.escBound = true;
+            doc.addEventListener("keydown", function (e) {
+                var code = e ? (e.keyCode || e.which) : 0;
+                if (code === 27 && host.activeModalClose) {
+                    pushEvent(host.activeModalClose.patchId, host.activeModalClose.action, "modal_escape_close", null);
+                }
+            }, false);
+        }
+
+        var pushEvent = function (patchId, action, targetId, value) {
+            if (!action || host.events.length >= 64) { return; }
+            host.events.push({
+                patchId: String(patchId),
+                action: String(action),
+                targetId: targetId ? String(targetId) : null,
+                value: value !== undefined && value !== null ? String(value) : null
+            });
+        };
+
+        var ensureStyles = function () {
+            if (doc.getElementById("simoder-ui-styles")) { return; }
+            var style = doc.createElement("style");
+            style.id = "simoder-ui-styles";
+            style.textContent =
+                ".simoder-slot-launcher{position:fixed;left:336px;bottom:8px;z-index:99980;font-family:Arial,Helvetica,sans-serif;}" +
+                ".simoder-slot-hub{position:fixed;left:44px;bottom:84px;z-index:99980;font-family:Arial,Helvetica,sans-serif;}" +
+                ".simoder-slot-ingame{position:fixed;left:24px;bottom:24px;z-index:99980;font-family:Arial,Helvetica,sans-serif;}" +
+                ".simoder-modal-slot{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99990;background:rgba(16,28,42,0.58);font-family:Arial,Helvetica,sans-serif;overflow:hidden;}" +
+                ".simoder-modal{position:fixed;top:36px;bottom:36px;left:50%;margin-left:-330px;width:660px;max-width:92%;text-align:left;background:#edf2f7;background-image:-webkit-linear-gradient(top,#f8fbfe 0%,#e5edf5 100%);border:2px solid #9db1c4;border-radius:4px;color:#1d2e3d;box-shadow:0 10px 30px rgba(8,18,30,0.55);overflow:hidden;box-sizing:border-box;}" +
+                ".simoder-modal-header{position:absolute;top:0;left:0;right:0;height:42px;line-height:42px;background:#3c5268;background-image:-webkit-linear-gradient(top,#516a82 0%,#334659 100%);color:#ffffff;padding:0 44px 0 16px;font-size:15px;font-weight:bold;letter-spacing:0.4px;border-bottom:2px solid #2ca7e6;text-shadow:0 1px 1px rgba(0,0,0,0.45);box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
+                ".simoder-modal-close{position:absolute;right:8px;top:7px;width:26px;height:26px;line-height:24px;text-align:center;background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.35);border-radius:3px;color:#ffffff;font-size:16px;font-weight:bold;cursor:pointer;padding:0;}" +
+                ".simoder-modal-close:hover{background:#d9483b;border-color:#a82b20;}" +
+                ".simoder-modal-body{position:absolute;top:42px;bottom:52px;left:0;right:0;overflow-y:auto;padding:12px 16px;box-sizing:border-box;}" +
+                ".simoder-modal-body-nofooter{bottom:0;}" +
+                ".simoder-modal-footer{position:absolute;bottom:0;left:0;right:0;height:52px;padding:10px 16px;box-sizing:border-box;background:#dfe8f2;background-image:-webkit-linear-gradient(top,#e8eff7 0%,#d5e0ec 100%);border-top:1px solid #b8c8d8;text-align:right;}" +
+                ".simoder-modal-footer .simoder-row{margin:0;}" +
+                ".simoder-modal-footer .simoder-row>*{margin-right:0;margin-left:8px;}" +
+                ".simoder-panel{background:#ffffff;border:1px solid #c3d1df;border-radius:3px;padding:10px 12px;margin:8px 0;box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 1px 2px rgba(25,45,68,0.08);}" +
+                ".simoder-panel-scroll{max-height:210px;overflow-y:auto;background:#f7fafd;}" +
+                ".simoder-row{margin:6px 0;}" +
+                ".simoder-row>*{display:inline-block;vertical-align:middle;margin-right:8px;}" +
+                ".simoder-text{color:#233547;font-size:12px;line-height:1.45;}" +
+                ".simoder-text-muted{color:#556b80;font-size:11px;word-break:break-all;}" +
+                ".simoder-text-title{color:#1c3144;font-size:13px;font-weight:bold;margin-bottom:3px;}" +
+                ".simoder-btn{background:#dce5ef;background-image:-webkit-linear-gradient(top,#fbfdff 0%,#e2eaf3 50%,#cad7e5 100%);color:#1c2f42;border:1px solid #8ea3b8;border-radius:3px;padding:5px 13px;font-size:12px;font-weight:bold;cursor:pointer;display:inline-block;vertical-align:middle;text-shadow:0 1px 0 rgba(255,255,255,0.85);box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 1px 1px rgba(0,0,0,0.12);}" +
+                ".simoder-btn:hover{background:#e9f4fd;background-image:-webkit-linear-gradient(top,#ffffff 0%,#e5f2fc 50%,#cbe2f6 100%);border-color:#2ca7e6;}" +
+                ".simoder-btn>span{display:inline-block;vertical-align:middle;}" +
+                ".simoder-slot-launcher .simoder-btn{padding:3px 10px;font-size:11px;line-height:16px;}" +
+                ".simoder-slot-hub .simoder-btn{display:block;width:100%;padding:12px 18px;font-size:14px;text-transform:uppercase;letter-spacing:0.6px;text-align:left;background-color:transparent;background-image:url('Graphics/Common/Buttons/Button_HUB_Main_Normal.png'),-webkit-linear-gradient(top,#f8fbfe 0%,#e1eaf3 50%,#ccd9e7 100%);background-size:100% 100%;border:none;box-shadow:none;}" +
+                ".simoder-slot-hub .simoder-btn:hover{background-image:url('Graphics/Common/Buttons/Button_HUB_Main_Highlighted.png'),-webkit-linear-gradient(top,#ffffff 0%,#e7f3fc 50%,#cee5f8 100%);border:none;}" +
+                ".simoder-btn-primary{background:#3aa526;background-image:-webkit-linear-gradient(top,#63d149 0%,#39a323 55%,#2b8918 100%);border-color:#237213;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.35),0 1px 1px rgba(0,0,0,0.15);}" +
+                ".simoder-btn-primary:hover{background:#46b831;background-image:-webkit-linear-gradient(top,#72dd58 0%,#42b32b 55%,#33991e 100%);border-color:#1c5f0f;}" +
+                ".simoder-btn-danger{background:#c93d32;background-image:-webkit-linear-gradient(top,#e35d52 0%,#c7382d 55%,#a6281e 100%);border-color:#841e16;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.28),0 1px 1px rgba(0,0,0,0.15);}" +
+                ".simoder-btn-danger:hover{background:#d8493d;background-image:-webkit-linear-gradient(top,#ed6d62 0%,#d34338 55%,#b32f24 100%);border-color:#6f1811;}" +
+                ".simoder-btn-warning{border-color:#d9821e;box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 0 0 1px rgba(217,130,30,0.35);}" +
+                ".simoder-modal .simoder-btn-warning{background:#df7e18;background-image:-webkit-linear-gradient(top,#f6a33e 0%,#e07e19 55%,#c2630b 100%);border-color:#984d08;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.32),0 1px 1px rgba(0,0,0,0.15);}" +
+                ".simoder-modal .simoder-btn-warning:hover{background:#e88b26;background-image:-webkit-linear-gradient(top,#fab155 0%,#ea8c27 55%,#d16e11 100%);border-color:#804006;}" +
+                ".simoder-btn:disabled{opacity:0.45;cursor:default;}" +
+                ".simoder-badge{background:#d94235;color:#ffffff;border-radius:9px;padding:1px 6px;margin-left:6px;font-size:10px;font-weight:bold;line-height:13px;}" +
+                ".simoder-badge-ok{background:#2d9620;}" +
+                ".simoder-badge-muted{background:#5f7489;}" +
+                ".simoder-divider{border:0;border-top:1px solid #d0dce8;margin:8px 0;}" +
+                ".simoder-field{margin:6px 0;}" +
+                ".simoder-field-label{display:block;font-size:11px;font-weight:bold;color:#30465b;margin-bottom:3px;}" +
+                ".simoder-input,.simoder-select{width:100%;box-sizing:border-box;padding:5px 8px;font-size:12px;color:#1d2e3d;background:#ffffff;border:1px solid #9ab0c4;border-radius:3px;box-shadow:inset 0 1px 2px rgba(15,30,45,0.08);}" +
+                ".simoder-input:focus,.simoder-select:focus{outline:none;border-color:#2ca7e6;}" +
+                ".simoder-slider{width:100%;vertical-align:middle;cursor:pointer;}" +
+                ".simoder-checkbox-wrap{display:inline-block;font-size:12px;color:#1d2e3d;cursor:pointer;margin:4px 0;}" +
+                ".simoder-checkbox-wrap input{vertical-align:middle;margin-right:6px;}" +
+                ".simoder-tabs{margin:4px 0;}" +
+                ".simoder-tab-bar{border-bottom:2px solid #9db2c6;margin-bottom:8px;padding-bottom:2px;}" +
+                ".simoder-tab-btn{background:#dde6f0;color:#2e4357;border:1px solid #a8bacb;border-bottom:none;border-radius:3px 3px 0 0;padding:6px 12px;margin-right:4px;font-size:12px;font-weight:bold;cursor:pointer;}" +
+                ".simoder-tab-btn-active{background:#ffffff;color:#16293b;border-color:#2ca7e6;border-top:2px solid #2ca7e6;}" +
+                ".simoder-progress-track{width:100%;height:14px;background:#d3dde7;border:1px solid #9cb0c4;border-radius:3px;overflow:hidden;box-sizing:border-box;}" +
+                ".simoder-progress-fill{height:100%;background:#48bf34;background-image:-webkit-linear-gradient(top,#72df5c 0%,#369f22 100%);}";
+            (doc.head || doc.body).appendChild(style);
+        };
+
+        var slotClassFor = function (viewName, slotName) {
+            if (slotName === "modal.overlay") { return "simoder-modal-slot"; }
+            if (viewName === "launcher.menu") { return "simoder-slot-launcher"; }
+            if (viewName === "main.menu") { return "simoder-slot-hub"; }
+            return "simoder-slot-ingame";
+        };
+
+        var isSimoderNode = function (el) {
+            var cur = el;
+            while (cur && cur.getAttribute) {
+                if (cur.getAttribute("data-simoder-slot") || (cur.id && cur.id.indexOf("simoder-") === 0)) {
+                    return true;
+                }
+                cur = cur.parentNode;
+            }
+            return false;
+        };
+
+        var findLauncherFooterAnchor = function () {
+            if (!doc.getElementsByTagName) { return null; }
+            var viewH = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
+            var viewW = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
+            var tags = ["a", "button", "div", "span"];
+            var bestRect = null;
+            var t, i, els, el, rect, txt, lower;
+            for (t = 0; t < tags.length; t += 1) {
+                els = doc.getElementsByTagName(tags[t]);
+                for (i = 0; i < els.length; i += 1) {
+                    el = els[i];
+                    if (isSimoderNode(el) || typeof el.getBoundingClientRect !== "function") { continue; }
+                    rect = el.getBoundingClientRect();
+                    if (!rect || rect.width < 40 || rect.width > 260 || rect.height < 10 || rect.height > 44) { continue; }
+                    if (rect.top < viewH * 0.84 || rect.left < viewW * 0.14 || rect.right > viewW * 0.55) { continue; }
+                    txt = el.textContent ? String(el.textContent).replace(/^\s+|\s+$/g, "") : "";
+                    if (txt.length === 0 || txt.length > 48 || txt.indexOf("2013") !== -1) { continue; }
+                    lower = txt.toLowerCase();
+                    if (lower.indexOf("update") !== -1 || lower.indexOf("aktualiz") !== -1 || el.tagName === "A") {
+                        return { rect: rect, viewW: viewW, viewH: viewH };
+                    }
+                    if (!bestRect || rect.top > bestRect.top) {
+                        bestRect = rect;
+                    }
+                }
+            }
+            return bestRect ? { rect: bestRect, viewW: viewW, viewH: viewH } : null;
+        };
+
+        var findMainMenuHubColumn = function () {
+            if (!doc.getElementsByTagName) { return null; }
+            var viewH = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
+            var viewW = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
+            var all = doc.getElementsByTagName("*");
+            var bestRect = null;
+            var i, el, bg, src, rect;
+            for (i = 0; i < all.length; i += 1) {
+                el = all[i];
+                if (isSimoderNode(el) || typeof el.getBoundingClientRect !== "function") { continue; }
+                bg = (el.style && el.style.backgroundImage) ? String(el.style.backgroundImage) : "";
+                if (!bg && typeof window.getComputedStyle === "function") {
+                    try { bg = String(window.getComputedStyle(el, null).backgroundImage || ""); } catch (_e) {}
+                }
+                src = el.src ? String(el.src) : "";
+                if (bg.indexOf("Button_HUB_Main") === -1 && src.indexOf("Button_HUB_Main") === -1) {
+                    continue;
+                }
+                rect = el.getBoundingClientRect();
+                if (!rect || rect.width < 180 || rect.height < 36 || rect.bottom > viewH - 56 || rect.left > viewW * 0.5) {
+                    continue;
+                }
+                if (!bestRect || rect.bottom > bestRect.bottom) {
+                    bestRect = rect;
+                }
+            }
+            return bestRect ? { rect: bestRect, viewW: viewW, viewH: viewH } : null;
+        };
+
+        var positionSlotContainer = function (container, viewName, slotName) {
+            if (!container || !container.style || slotName !== "menu.actions") { return; }
+            if (viewName === "launcher.menu") {
+                var anchor = findLauncherFooterAnchor();
+                if (anchor) {
+                    var targetLeft = Math.round(anchor.rect.right + 18);
+                    var maxRight = Math.round(anchor.viewW - 265);
+                    if (targetLeft > maxRight) { targetLeft = maxRight; }
+                    if (targetLeft < 180) { targetLeft = 180; }
+                    container.style.left = targetLeft + "px";
+                    container.style.right = "auto";
+                    container.style.top = Math.round(anchor.rect.top + (anchor.rect.height - 24) / 2) + "px";
+                    container.style.bottom = "auto";
+                }
+            } else if (viewName === "main.menu") {
+                var hub = findMainMenuHubColumn();
+                if (hub) {
+                    container.style.left = Math.round(hub.rect.left) + "px";
+                    container.style.right = "auto";
+                    container.style.top = Math.round(hub.rect.bottom + 8) + "px";
+                    container.style.bottom = "auto";
+                    container.style.width = Math.round(hub.rect.width) + "px";
+                }
+            }
+        };
+
+        var ensureSlotContainer = function (viewName, slotName) {
+            var slotDomId = "simoder-slot-" + viewName.replace(/[^a-zA-Z0-9_-]/g, "_") + "-" + slotName.replace(/[^a-zA-Z0-9_-]/g, "_");
+            var existing = doc.getElementById(slotDomId);
+            if (existing) {
+                positionSlotContainer(existing, viewName, slotName);
+                return existing;
+            }
+            var container = doc.createElement("div");
+            container.id = slotDomId;
+            container.setAttribute("data-simoder-slot", slotName);
+            container.setAttribute("data-simoder-view", viewName);
+            container.className = slotClassFor(viewName, slotName);
+            if (slotName === "modal.overlay") {
+                container.onclick = function (e) {
+                    var tgt = e ? (e.target || e.srcElement) : null;
+                    if (tgt === container && host.activeModalClose) {
+                        pushEvent(host.activeModalClose.patchId, host.activeModalClose.action, "modal_backdrop_close", null);
+                    }
+                };
+            }
+            doc.body.appendChild(container);
+            positionSlotContainer(container, viewName, slotName);
+            return container;
+        };
+
+        var makeFieldWrapper = function (labelText) {
+            var wrap = doc.createElement("div");
+            wrap.className = "simoder-field";
+            if (labelText) {
+                var lblEl = doc.createElement("div");
+                lblEl.className = "simoder-field-label";
+                lblEl.textContent = labelText;
+                wrap.appendChild(lblEl);
+            }
+            return wrap;
+        };
+
+        var renderNode = function (patchId, node) {
+            var el;
+            var childHost = null;
+            var footerHost = null;
+            var skipDefaultChildren = false;
+            var kind = node.kind || "panel";
+            if (kind === "button" || kind === "toggle") {
+                el = doc.createElement("button");
+                el.type = "button";
+                el.className = "simoder-btn";
+                if (node.tone === "primary") { el.className += " simoder-btn-primary"; }
+                else if (node.tone === "danger") { el.className += " simoder-btn-danger"; }
+                else if (node.tone === "warning") { el.className += " simoder-btn-warning"; }
+                if (node.disabled === true) { el.disabled = true; }
+                var lblSpan = doc.createElement("span");
+                var lbl = node.label || "";
+                if (kind === "toggle") {
+                    lbl = lbl + (node.checked ? " [ON]" : " [OFF]");
+                }
+                lblSpan.textContent = lbl;
+                el.appendChild(lblSpan);
+                if (node.badge) {
+                    var b = doc.createElement("span");
+                    b.className = "simoder-badge";
+                    b.textContent = String(node.badge);
+                    el.appendChild(b);
+                }
+                (function (pId, act, tId, chk) {
+                    el.onclick = function () {
+                        pushEvent(pId, act || "click", tId, kind === "toggle" ? String(!chk) : null);
+                    };
+                }(patchId, node.action, node.id, !!node.checked));
+            } else if (kind === "input") {
+                el = makeFieldWrapper(node.label);
+                var inp = doc.createElement("input");
+                inp.type = "text"; inp.className = "simoder-input"; inp.value = node.value || "";
+                if (node.placeholder) { inp.placeholder = node.placeholder; }
+                if (node.disabled === true) { inp.disabled = true; }
+                (function (pId, act, tId, c) {
+                    c.onchange = function () { pushEvent(pId, act || "change", tId, c.value); };
+                    c.onkeydown = function (e) { if ((e ? (e.keyCode || e.which) : 0) === 13) pushEvent(pId, act || "change", tId, c.value); };
+                }(patchId, node.action, node.id, inp));
+                el.appendChild(inp);
+            } else if (kind === "select") {
+                el = makeFieldWrapper(node.label);
+                var sel = doc.createElement("select");
+                sel.className = "simoder-select";
+                if (node.disabled === true) { sel.disabled = true; }
+                var opts = node.options || [], oi, optEl;
+                for (oi = 0; oi < opts.length; oi += 1) {
+                    optEl = doc.createElement("option");
+                    optEl.value = opts[oi].value || "";
+                    optEl.textContent = opts[oi].label || opts[oi].value || "";
+                    if (node.value !== undefined && node.value !== null && String(opts[oi].value) === String(node.value)) optEl.selected = true;
+                    sel.appendChild(optEl);
+                }
+                if (node.value !== undefined && node.value !== null) sel.value = String(node.value);
+                (function (pId, act, tId, c) { c.onchange = function () { pushEvent(pId, act || "change", tId, c.value); }; }(patchId, node.action, node.id, sel));
+                el.appendChild(sel);
+            } else if (kind === "slider") {
+                var sMin = (typeof node.min === "number") ? node.min : 0, sMax = (typeof node.max === "number") ? node.max : 100;
+                var sVal = (node.value !== undefined && node.value !== null) ? String(node.value) : String(sMin);
+                el = makeFieldWrapper((node.label ? node.label + ": " : "") + sVal);
+                var rng = doc.createElement("input");
+                rng.type = "range"; rng.className = "simoder-slider"; rng.min = String(sMin); rng.max = String(sMax);
+                rng.step = String((typeof node.step === "number" && node.step > 0) ? node.step : 1);
+                rng.value = sVal;
+                if (node.disabled === true) rng.disabled = true;
+                (function (pId, act, tId, c, lEl, bLbl) {
+                    c.onchange = function () {
+                        if (lEl) lEl.textContent = (bLbl ? bLbl + ": " : "") + c.value;
+                        pushEvent(pId, act || "change", tId, c.value);
+                    };
+                }(patchId, node.action, node.id, rng, node.label ? el.firstChild : null, node.label));
+                el.appendChild(rng);
+            } else if (kind === "checkbox") {
+                el = doc.createElement("label"); el.className = "simoder-checkbox-wrap";
+                var cb = doc.createElement("input");
+                cb.type = "checkbox"; cb.checked = node.checked === true;
+                if (node.disabled === true) cb.disabled = true;
+                (function (pId, act, tId, c) { c.onchange = function () { pushEvent(pId, act || "change", tId, String(!!c.checked)); }; }(patchId, node.action, node.id, cb));
+                el.appendChild(cb);
+                var cbTxt = doc.createElement("span"); cbTxt.textContent = node.label || ""; el.appendChild(cbTxt);
+            } else if (kind === "progress") {
+                var pMin = (typeof node.min === "number") ? node.min : 0;
+                var pMax = (typeof node.max === "number" && node.max > pMin) ? node.max : (pMin + 100);
+                var pCur = Number(node.value !== undefined && node.value !== null ? node.value : pMin);
+                if (isNaN(pCur)) pCur = pMin;
+                var pct = Math.max(0, Math.min(100, Math.round(((pCur - pMin) * 100) / (pMax - pMin))));
+                el = makeFieldWrapper((node.label ? node.label + " (" + pct + "%)" : pct + "%"));
+                var track = doc.createElement("div"); track.className = "simoder-progress-track";
+                var fill = doc.createElement("div"); fill.className = "simoder-progress-fill";
+                if (fill.style) fill.style.width = pct + "%";
+                track.appendChild(fill); el.appendChild(track);
+            } else if (kind === "tabs") {
+                skipDefaultChildren = true;
+                el = doc.createElement("div"); el.className = "simoder-tabs";
+                var tabBar = doc.createElement("div"); tabBar.className = "simoder-tab-bar";
+                var tabBody = doc.createElement("div"); tabBody.className = "simoder-tab-body";
+                var tabNodes = node.children || [], activeId = node.value || (tabNodes[0] && tabNodes[0].id) || "";
+                var activeTabNode = tabNodes[0] || null, ti, tn, tBtn, tbSpan;
+                for (ti = 0; ti < tabNodes.length; ti += 1) { if (tabNodes[ti] && tabNodes[ti].id === activeId) activeTabNode = tabNodes[ti]; }
+                for (ti = 0; ti < tabNodes.length; ti += 1) {
+                    tn = tabNodes[ti]; if (!tn) continue;
+                    tBtn = doc.createElement("button"); tBtn.type = "button";
+                    tBtn.className = "simoder-tab-btn" + (tn === activeTabNode ? " simoder-tab-btn-active" : "");
+                    tbSpan = doc.createElement("span"); tbSpan.textContent = tn.label || tn.id || ("Tab " + (ti + 1)); tBtn.appendChild(tbSpan);
+                    if (tn.badge) { var tb = doc.createElement("span"); tb.className = "simoder-badge"; tb.textContent = String(tn.badge); tBtn.appendChild(tb); }
+                    (function (pId, act, tid) { tBtn.onclick = function () { pushEvent(pId, act || "switch_tab", tid, tid); }; }(patchId, node.action || tn.action, tn.id || String(ti)));
+                    tabBar.appendChild(tBtn);
+                }
+                el.appendChild(tabBar);
+                if (activeTabNode && activeTabNode.children) {
+                    for (ti = 0; ti < activeTabNode.children.length; ti += 1) tabBody.appendChild(renderNode(patchId, activeTabNode.children[ti]));
+                }
+                el.appendChild(tabBody);
+            } else if (kind === "divider") {
+                el = doc.createElement("hr");
+                el.className = "simoder-divider";
+            } else if (kind === "badge") {
+                el = doc.createElement("span");
+                el.className = "simoder-badge";
+                if (node.tone === "primary") { el.className += " simoder-badge-ok"; }
+                else if (node.tone === "muted") { el.className += " simoder-badge-muted"; }
+                el.textContent = node.label || node.text || "";
+            } else if (kind === "text") {
+                el = doc.createElement("div");
+                el.className = "simoder-text";
+                if (node.tone === "muted") { el.className = "simoder-text-muted"; }
+                else if (node.tone === "title") { el.className = "simoder-text-title"; }
+                el.textContent = node.text || node.label || "";
+            } else {
+                el = doc.createElement("div");
+                if (kind === "modal") {
+                    el.className = "simoder-modal";
+                    var vw = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
+                    if (vw > 0 && vw < 720 && el.style) {
+                        el.style.width = "auto";
+                        el.style.left = "20px";
+                        el.style.right = "20px";
+                        el.style.marginLeft = "0";
+                    }
+                    if (node.label || node.action) {
+                        var hdrBar = doc.createElement("div");
+                        hdrBar.className = "simoder-modal-header";
+                        hdrBar.textContent = node.label || "";
+                        if (node.action) {
+                            var closeBtn = doc.createElement("button");
+                            closeBtn.type = "button";
+                            closeBtn.className = "simoder-modal-close";
+                            closeBtn.textContent = "x";
+                            (function (pId, act) {
+                                closeBtn.onclick = function () {
+                                    pushEvent(pId, act, "modal_header_close", null);
+                                };
+                            }(patchId, node.action));
+                            hdrBar.appendChild(closeBtn);
+                        }
+                        el.appendChild(hdrBar);
+                    }
+                    childHost = doc.createElement("div");
+                    childHost.className = "simoder-modal-body";
+                    el.appendChild(childHost);
+                } else {
+                    el.className = kind === "row" ? "simoder-row" : (node.tone === "scroll" ? "simoder-panel simoder-panel-scroll" : "simoder-panel");
+                    if (node.label) {
+                        var hdr = doc.createElement("div");
+                        hdr.className = "simoder-text-title";
+                        hdr.textContent = node.label;
+                        el.appendChild(hdr);
+                    }
+                }
+                if (node.text) {
+                    var bodyTxt = doc.createElement("div");
+                    bodyTxt.className = "simoder-text";
+                    bodyTxt.textContent = node.text;
+                    (childHost || el).appendChild(bodyTxt);
+                }
+            }
+            if (node.id) {
+                el.setAttribute("data-simoder-target", String(node.id));
+            }
+            var children = skipDefaultChildren ? [] : (node.children || []);
+            var idx, chNode, renderedChild;
+            for (idx = 0; idx < children.length; idx += 1) {
+                chNode = children[idx];
+                renderedChild = renderNode(patchId, chNode);
+                if (kind === "modal" && chNode && chNode.tone === "footer") {
+                    if (!footerHost) {
+                        footerHost = doc.createElement("div");
+                        footerHost.className = "simoder-modal-footer";
+                        el.appendChild(footerHost);
+                    }
+                    footerHost.appendChild(renderedChild);
+                } else {
+                    (childHost || el).appendChild(renderedChild);
+                }
+            }
+            if (kind === "modal" && childHost && !footerHost) {
+                childHost.className += " simoder-modal-body-nofooter";
+            }
+            return el;
+        };
+
+        var needsReconcile = host.revision !== packet.revision || host.lastPhase !== phase;
+        var patches = packet.patches || [];
+        var activeForPhase = [];
+        var i;
+        for (i = 0; i < patches.length; i += 1) {
+            if (patches[i].view === phase || patches[i].view === "*") {
+                activeForPhase.push(patches[i]);
+            }
+        }
+
+        if (!needsReconcile && activeForPhase.length > 0) {
+            var firstCheckId = "simoder-patch-" + activeForPhase[0].patchId;
+            if (!doc.getElementById(firstCheckId)) {
+                needsReconcile = true;
+            } else {
+                var actionsSlot = doc.getElementById("simoder-slot-" + phase.replace(/[^a-zA-Z0-9_-]/g, "_") + "-menu_actions");
+                if (actionsSlot) {
+                    positionSlotContainer(actionsSlot, phase, "menu.actions");
+                }
+            }
+        }
+
+        if (needsReconcile) {
+            ensureStyles();
+            host.activeModalClose = null;
+            // Remove any existing Simoder slot wrappers whose view no longer matches `phase`,
+            // and rebuild active slot wrappers cleanly for deterministic composition order.
+            var allNodes = doc.querySelectorAll ? doc.querySelectorAll("[data-simoder-slot]") : [];
+            for (i = 0; i < allNodes.length; i += 1) {
+                if (allNodes[i].parentNode) {
+                    allNodes[i].parentNode.removeChild(allNodes[i]);
+                }
+            }
+            for (i = 0; i < activeForPhase.length; i += 1) {
+                var p = activeForPhase[i];
+                if (p.slot === "modal.overlay" && p.node && p.node.action) {
+                    host.activeModalClose = { patchId: p.patchId, action: p.node.action };
+                }
+                var container = ensureSlotContainer(phase, p.slot || "menu.actions");
+                var wrapper = renderNode(p.patchId, p.node);
+                wrapper.id = "simoder-patch-" + p.patchId;
+                wrapper.setAttribute("data-simoder-patch", p.patchId);
+                wrapper.setAttribute("data-simoder-owner", p.ownerModId);
+                wrapper.setAttribute("data-simoder-gen", String(p.ownerGeneration));
+
+                if (p.op === "prepend" && container.firstChild) {
+                    container.insertBefore(wrapper, container.firstChild);
+                } else if (p.op === "insert_before" && p.target && container.querySelector) {
+                    var beforeRef = container.querySelector("[data-simoder-target='" + String(p.target) + "']");
+                    if (beforeRef && beforeRef.parentNode === container) {
+                        container.insertBefore(wrapper, beforeRef);
+                    } else {
+                        container.appendChild(wrapper);
+                    }
+                } else if (p.op === "insert_after" && p.target && container.querySelector) {
+                    var afterRef = container.querySelector("[data-simoder-target='" + String(p.target) + "']");
+                    if (afterRef && afterRef.parentNode === container) {
+                        container.insertBefore(wrapper, afterRef.nextSibling);
+                    } else {
+                        container.appendChild(wrapper);
+                    }
+                } else {
+                    container.appendChild(wrapper);
+                }
+            }
+            host.revision = packet.revision;
+            host.lastPhase = phase;
+        }
+
+        var drained = host.events.splice(0, host.events.length);
+        return JSON.stringify({
+            ok: true,
+            observation: observation,
+            events: drained
+        });
+    } catch (err) {
+        return JSON.stringify({
+            ok: false,
+            error: String(err && err.message ? err.message : err)
+        });
+    }
+})

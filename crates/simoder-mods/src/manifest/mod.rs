@@ -98,15 +98,22 @@ pub(super) struct MetadataDto {
 }
 
 impl MetadataDto {
-    pub(super) fn into_manifest(self) -> Result<ModManifest, ModError> {
+    pub(super) fn into_manifest(self, allow_reserved_base: bool) -> Result<ModManifest, ModError> {
         check_bounded_non_empty(&self.id, "metadata.id", config::MAX_MOD_ID_LEN)?;
         if !is_valid_mod_id(&self.id) {
             return Err(ModError::InvalidModId(self.id));
         }
-        if self.id == config::RESERVED_BASE_MOD_ID {
+        if !allow_reserved_base && self.id == config::RESERVED_BASE_MOD_ID {
             return Err(ModError::ManifestValidation(format!(
                 "reserved mod ID '{}' cannot be claimed by third-party mods",
                 config::RESERVED_BASE_MOD_ID
+            )));
+        }
+        if allow_reserved_base && self.id != config::RESERVED_BASE_MOD_ID {
+            return Err(ModError::ManifestValidation(format!(
+                "base mod manifest must declare reserved ID '{}', got '{}'",
+                config::RESERVED_BASE_MOD_ID,
+                self.id
             )));
         }
         check_bounded_non_empty(&self.name, "metadata.name", config::MAX_FIELD_LEN)?;
@@ -155,7 +162,15 @@ pub(super) fn check_bounded(value: &str, field: &str, max_len: usize) -> Result<
 /// symlinks/reparse points, missing or corrupted assets, vanilla copies disguised as new assets, and
 /// inconsistent symbol/property definitions.
 pub fn load_mod_definition(directory: &Path) -> Result<ModDefinition, ModError> {
-    let (definition, _) = load_mod_definition_with_bytes(directory)?;
+    let (definition, _) = load_mod_definition_with_bytes(directory, false)?;
+    Ok(definition)
+}
+
+/// Load and strictly validate the mandatory bootstrap base mod manifest (`simoder.base`).
+///
+/// Mirrors [`load_mod_definition`] while permitting only [`config::RESERVED_BASE_MOD_ID`].
+pub fn load_base_mod_definition(directory: &Path) -> Result<ModDefinition, ModError> {
+    let (definition, _) = load_mod_definition_with_bytes(directory, true)?;
     Ok(definition)
 }
 
@@ -205,7 +220,10 @@ fn read_checked_manifest_bytes(directory: &Path) -> Result<Vec<u8>, ModError> {
     Ok(bytes)
 }
 
-fn load_mod_definition_with_bytes(directory: &Path) -> Result<(ModDefinition, Vec<u8>), ModError> {
+fn load_mod_definition_with_bytes(
+    directory: &Path,
+    allow_reserved_base: bool,
+) -> Result<(ModDefinition, Vec<u8>), ModError> {
     let manifest_bytes = read_checked_manifest_bytes(directory)?;
     for retired in config::RETIRED_MANIFEST_FILES {
         if directory.join(retired).try_exists()? {
@@ -227,9 +245,15 @@ fn load_mod_definition_with_bytes(directory: &Path) -> Result<(ModDefinition, Ve
         || probe.schema_version == Some(config::RAW_RESOURCES_SCHEMA_VERSION);
 
     let definition = if is_raw {
+        if allow_reserved_base {
+            return Err(ModError::ManifestValidation(format!(
+                "reserved base mod '{}' cannot use raw-resources manifest",
+                config::RESERVED_BASE_MOD_ID
+            )));
+        }
         raw::parse(directory, raw_toml)?
     } else {
-        authoring::parse(directory, raw_toml)?
+        authoring::parse(directory, raw_toml, allow_reserved_base)?
     };
     Ok((definition, manifest_bytes))
 }
@@ -278,6 +302,19 @@ fn fingerprint_with_manifest_bytes(
         hasher.update(rel.as_bytes());
         hasher.update(digest.as_bytes());
     }
+    if let Some(scripts) = definition.scripts() {
+        hasher.update(b"scripts\0");
+        hasher.update(scripts.language.as_bytes());
+        hasher.update(scripts.entry.as_bytes());
+    }
+    if let Some(native) = definition.native() {
+        hasher.update(b"native\0");
+        hasher.update(native.entry.as_bytes());
+        hasher.update(native.abi.to_le_bytes());
+        if let Some(sha) = &native.expected_sha256 {
+            hasher.update(sha.as_bytes());
+        }
+    }
 
     ModFingerprint(hasher.finalize().into())
 }
@@ -289,7 +326,7 @@ pub fn load_stable_candidate(
     for _ in 0..config::CANDIDATE_STABILITY_ATTEMPTS {
         let before_bytes = read_checked_manifest_bytes(directory)?;
         let before_hash = assets::sha256_bytes(&before_bytes);
-        let (definition, parsed_bytes) = load_mod_definition_with_bytes(directory)?;
+        let (definition, parsed_bytes) = load_mod_definition_with_bytes(directory, false)?;
         if before_hash != assets::sha256_bytes(&parsed_bytes) {
             continue;
         }
@@ -312,6 +349,17 @@ pub fn load_stable_candidate(
             if digest != expected {
                 payloads_stable = false;
                 break;
+            }
+        }
+        if payloads_stable && let Some(scripts) = definition.scripts() {
+            assets::reject_reparse_or_symlink(&scripts.resolved_path)?;
+        }
+        if payloads_stable && let Some(native) = definition.native() {
+            assets::reject_reparse_or_symlink(&native.resolved_path)?;
+            if let Some(expected) = &native.expected_sha256
+                && hex::encode(assets::sha256_file(&native.resolved_path)?) != *expected
+            {
+                payloads_stable = false;
             }
         }
         if !payloads_stable {

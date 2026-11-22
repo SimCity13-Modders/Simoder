@@ -525,8 +525,38 @@ pub struct BinaryResourceDefinition {
     pub resolved_path: PathBuf,
 }
 
+/// Validated `[scripts]` entry configuration declared in a `mod.toml` manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptModConfig {
+    /// Script runtime language (`"luau"` or `"js"`).
+    pub language: String,
+    /// Normalized relative POSIX path to the entrypoint script inside the mod directory.
+    pub entry: String,
+    /// Optional per-VM memory cap override in MiB.
+    pub memory_mib: Option<u32>,
+    /// Optional per-tick execution budget override in milliseconds.
+    pub budget_ms: Option<u32>,
+    /// Verified safe non-symlink absolute path to `entry`.
+    #[serde(skip)]
+    pub resolved_path: PathBuf,
+}
+
+/// Validated `[native]` DLL configuration declared in a `mod.toml` manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModConfig {
+    /// Normalized relative POSIX path to the `.dll` module inside the mod directory.
+    pub entry: String,
+    /// Declared host ABI contract version (must match ABI `2`).
+    pub abi: u32,
+    /// Optional lowercase 64-character SHA-256 hex digest pinned in the manifest.
+    pub expected_sha256: Option<String>,
+    /// Verified safe non-symlink absolute path to `entry`.
+    #[serde(skip)]
+    pub resolved_path: PathBuf,
+}
+
 /// Schema 2 authoring payload containing declarative property patches, newly authored assets,
-/// unbundled vanilla references, and custom 5-slot material bundles.
+/// unbundled vanilla references, custom 5-slot material bundles, and optional script/native entries.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AuthoringModData {
     /// Validated Schema 2 property patch blocks (`[[patches]]`).
@@ -537,6 +567,10 @@ pub struct AuthoringModData {
     pub vanilla_references: Vec<VanillaReferenceDefinition>,
     /// Validated Schema 2 material bundles (`[[assets.materials]]`).
     pub materials: Vec<MaterialBundleDefinition>,
+    /// Validated optional `[scripts]` runtime entrypoint.
+    pub scripts: Option<ScriptModConfig>,
+    /// Validated optional `[native]` `.dll` module entrypoint.
+    pub native: Option<NativeModConfig>,
 }
 
 /// Schema 3 raw binary DBPF resource payload gated by [`RuntimeCapability`].
@@ -605,6 +639,70 @@ impl ModDefinition {
     pub fn materials(&self) -> &[MaterialBundleDefinition] {
         self.authoring().map_or(&[], |data| &data.materials)
     }
+
+    /// Return the optional validated `[scripts]` configuration when declared in `mod.toml`.
+    pub fn scripts(&self) -> Option<&ScriptModConfig> {
+        self.authoring().and_then(|data| data.scripts.as_ref())
+    }
+
+    /// Return the optional validated `[native]` DLL configuration when declared in `mod.toml`.
+    pub fn native(&self) -> Option<&NativeModConfig> {
+        self.authoring().and_then(|data| data.native.as_ref())
+    }
+}
+
+/// Runtime trust and admission status for a discovered native `.dll` mod (`UI` / `Mods` panel).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    DeserializeFromStr,
+    EnumString,
+    IntoStaticStr,
+    VariantArray,
+)]
+#[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeModStatus {
+    /// Discovered valid PE32 `.dll` awaiting explicit user trust confirmation in the in-game `Mods` UI.
+    PendingApproval,
+    /// Explicitly approved by the user for this SHA-256 and admitted via `ABI v2`.
+    Active,
+    /// Explicitly declined or revoked by the user in `native_trust.toon` or the in-game `Mods` UI.
+    Denied,
+    /// Validation, staging, PE32 parsing, or `ABI v2` admission failed with a diagnostic.
+    Failed,
+}
+
+impl NativeModStatus {
+    /// Return the canonical kebab-case status string.
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
+/// UI snapshot record describing a discovered `[native]` `.dll` mod for `Simoder-Base` / in-game approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeModUiRecord {
+    /// Canonical mod identifier (`metadata.id`).
+    pub mod_id: String,
+    /// Human-readable display name (`metadata.name`).
+    pub name: String,
+    /// Semantic mod version string (`metadata.version`).
+    pub version: String,
+    /// Normalized relative `.dll` entry declared under `[native]`.
+    pub entry: String,
+    /// Lowercase 64-character SHA-256 hex digest of the `.dll` bytes on disk.
+    pub sha256: String,
+    /// Current trust and admission status ([`NativeModStatus`]).
+    pub status: NativeModStatus,
+    /// Optional human-readable diagnostic or failure detail.
+    pub diagnostic: Option<String>,
 }
 
 /// Read-only UI snapshot summarizing discovery, lifecycle, revision, and diagnostics for one mod.

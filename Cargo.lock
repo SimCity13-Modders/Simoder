@@ -1481,7 +1481,10 @@ name = "simoder-d3d9"
 version = "0.2.0"
 dependencies = [
  "goblin",
+ "mlua",
  "parking_lot",
+ "rquickjs",
+ "serde",
  "serde_json",
  "simoder-core",
  "simoder-crash",
@@ -1491,6 +1494,7 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror 2.0.21",
+ "walkdir",
 ]
 
 [[package]]
@@ -1993,3 +1997,19 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "dbpf"
+version = "0.10.0"
+
+[[patch.unused]]
+name = "rw4"
+version = "0.10.0"
+
+[[patch.unused]]
+name = "sc-format"
+version = "0.10.0"
+
+[[patch.unused]]
+name = "sc-properties"
+version = "0.10.0"
