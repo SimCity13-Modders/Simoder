@@ -118,61 +118,66 @@
                 ".simoder-slot-launcher{position:fixed;left:336px;bottom:8px;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;}" +
                 ".simoder-slot-hub{position:fixed;left:44px;bottom:84px;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
                 ".simoder-slot-region{position:fixed;z-index:99982;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
-                ".simoder-region-tile-btn{position:absolute;right:6px;bottom:6px;z-index:25;padding:3px 9px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:0.3px;border-radius:11px;border:1px solid #8ea3b8;background:#eef3f8;background-image:-webkit-linear-gradient(top,#ffffff 0%,#e5edf5 55%,#cad7e5 100%);color:#1c2f42;cursor:pointer;box-shadow:0 2px 5px rgba(8,18,30,0.55);}" +
+                ".simoder-region-tile-btn{position:absolute;right:6px;bottom:6px;z-index:25;padding:3px 9px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:0.3px;border-radius:11px;border:1px solid #8ea3b8;background:#eef3f8;background-image:-webkit-gradient(linear,left top,left bottom,from(#ffffff),color-stop(0.55,#e5edf5),to(#cad7e5));color:#1c2f42;cursor:pointer;box-shadow:0 2px 5px rgba(8,18,30,0.55);}" +
                 ".simoder-region-tile-btn:hover{border-color:#2ca7e6;background:#ffffff;}" +
                 ".simoder-slot-ingame{position:fixed;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
                 ".simoder-modal-slot{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99990;background:rgba(16,28,42,0.58);font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;overflow:hidden;}" +
-                ".simoder-modal{position:fixed;top:36px;bottom:36px;left:50%;margin-left:-330px;width:660px;max-width:92%;text-align:left;background:#edf2f7;background-image:-webkit-linear-gradient(top,#f8fbfe 0%,#e5edf5 100%);border:2px solid #9db1c4;border-radius:4px;color:#1d2e3d;box-shadow:0 10px 30px rgba(8,18,30,0.55);overflow:hidden;box-sizing:border-box;}" +
-                ".simoder-modal-header{position:absolute;top:0;left:0;right:0;height:42px;line-height:42px;background:#3c5268;background-image:-webkit-linear-gradient(top,#516a82 0%,#334659 100%);color:#ffffff;padding:0 44px 0 16px;font-size:15px;font-weight:bold;letter-spacing:0.4px;border-bottom:2px solid #2ca7e6;text-shadow:0 1px 1px rgba(0,0,0,0.45);box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
-                ".simoder-modal-close{position:absolute;right:8px;top:7px;width:26px;height:26px;line-height:24px;text-align:center;background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.35);border-radius:3px;color:#ffffff;font-size:16px;font-weight:bold;cursor:pointer;padding:0;}" +
+                ".simoder-modal{position:fixed;top:36px;bottom:36px;left:50%;margin-left:-330px;width:660px;max-width:92%;text-align:left;background:#edf2f7;background-image:-webkit-gradient(linear,left top,left bottom,from(#f8fbfe),to(#e5edf5));border:2px solid #9db1c4;-webkit-border-image:none;-webkit-border-radius:4px;border-radius:4px;color:#1d2e3d;box-shadow:0 10px 30px rgba(8,18,30,0.55);overflow:hidden;box-sizing:border-box;}" +
+                ".simoder-modal-header{position:absolute;top:0;left:0;right:0;height:42px;line-height:42px;background:#3c5268;background-image:-webkit-gradient(linear,left top,left bottom,from(#516a82),to(#334659));color:#ffffff;padding:0 44px 0 16px;font-size:15px;font-weight:bold;letter-spacing:0.4px;border-bottom:2px solid #2ca7e6;-webkit-border-image:none;-webkit-border-radius:0;border-radius:0;text-shadow:0 1px 1px rgba(0,0,0,0.45);box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
+                ".simoder-modal-header .simoder-modal-title{position:static;display:inline;width:auto;height:auto;text-align:left;color:#ffffff;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:42px;}" +
+                ".simoder-modal-close{-webkit-appearance:none;position:absolute;right:8px;top:7px;width:26px;height:26px;line-height:24px;text-align:center;background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.35);-webkit-border-image:none;-webkit-border-radius:3px;border-radius:3px;color:#ffffff;font-size:16px;font-weight:bold;cursor:pointer;padding:0;outline:none;}" +
                 ".simoder-modal-close:hover{background:#d9483b;border-color:#a82b20;}" +
                 ".simoder-modal-body{position:absolute;top:42px;bottom:52px;left:0;right:0;overflow-y:auto;padding:12px 16px;box-sizing:border-box;}" +
                 ".simoder-modal-body-nofooter{bottom:0;}" +
-                ".simoder-modal-footer{position:absolute;bottom:0;left:0;right:0;height:52px;padding:10px 16px;box-sizing:border-box;background:#dfe8f2;background-image:-webkit-linear-gradient(top,#e8eff7 0%,#d5e0ec 100%);border-top:1px solid #b8c8d8;text-align:right;}" +
+                ".simoder-modal-footer{position:absolute;bottom:0;left:0;right:0;height:52px;padding:10px 16px;box-sizing:border-box;background:#dfe8f2;background-image:-webkit-gradient(linear,left top,left bottom,from(#e8eff7),to(#d5e0ec));border-top:1px solid #b8c8d8;-webkit-border-image:none;-webkit-border-radius:0;border-radius:0;text-align:right;}" +
                 ".simoder-modal-footer .simoder-row{margin:0;}" +
                 ".simoder-modal-footer .simoder-row>*{margin-right:0;margin-left:8px;}" +
-                ".simoder-panel{background:#ffffff;border:1px solid #c3d1df;border-radius:3px;padding:10px 12px;margin:8px 0;box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 1px 2px rgba(25,45,68,0.08);}" +
+                ".simoder-panel{position:static;background:#ffffff;border:1px solid #c3d1df;-webkit-border-image:none;-webkit-border-radius:3px;border-radius:3px;padding:10px 12px;margin:8px 0;box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 1px 2px rgba(25,45,68,0.08);}" +
                 ".simoder-panel-scroll{max-height:210px;overflow-y:auto;background:#f7fafd;}" +
                 ".simoder-row{margin:6px 0;}" +
                 ".simoder-row>*{display:inline-block;vertical-align:middle;margin-right:8px;}" +
-                ".simoder-text{color:#233547;font-size:12px;line-height:1.45;}" +
-                ".simoder-text-muted{color:#556b80;font-size:11px;word-break:break-all;}" +
-                ".simoder-text-title{color:#1c3144;font-size:13px;font-weight:bold;margin-bottom:3px;}" +
-                ".simoder-btn{background:#dce5ef;background-image:-webkit-linear-gradient(top,#fbfdff 0%,#e2eaf3 50%,#cad7e5 100%);color:#1c2f42;border:1px solid #8ea3b8;border-radius:3px;padding:5px 13px;font-size:12px;font-weight:bold;cursor:pointer;display:inline-block;vertical-align:middle;text-shadow:0 1px 0 rgba(255,255,255,0.85);box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 1px 1px rgba(0,0,0,0.12);}" +
-                ".simoder-btn:hover{background:#e9f4fd;background-image:-webkit-linear-gradient(top,#ffffff 0%,#e5f2fc 50%,#cbe2f6 100%);border-color:#2ca7e6;}" +
-                ".simoder-btn>span{display:inline-block;vertical-align:middle;}" +
+                ".simoder-text{position:static;width:auto;height:auto;color:#233547;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.45;text-align:left;}" +
+                ".simoder-text-muted{position:static;width:auto;height:auto;color:#556b80;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;word-break:break-all;text-align:left;}" +
+                ".simoder-text-title{position:static;width:auto;height:auto;color:#1c3144;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:13px;font-weight:bold;margin-bottom:3px;text-align:left;}" +
+                ".simoder-text-title.Header_12_Center_Upper{position:static;width:auto;height:auto;text-align:left;color:#1c3144;}" +
+                ".simoder-btn,.simoder-btn.cButton{-webkit-appearance:none;position:relative;display:inline-block;width:auto;height:auto;vertical-align:middle;background:#dce5ef;background-image:-webkit-gradient(linear,left top,left bottom,from(#fbfdff),color-stop(0.5,#e2eaf3),to(#cad7e5));color:#1c2f42;border:1px solid #8ea3b8;-webkit-border-image:none;-webkit-border-radius:3px;border-radius:3px;padding:5px 13px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;cursor:pointer;outline:none;text-shadow:0 1px 0 rgba(255,255,255,0.85);box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 1px 1px rgba(0,0,0,0.12);}" +
+                ".simoder-btn:hover,.simoder-btn.cButtonRollover{background:#e9f4fd;background-image:-webkit-gradient(linear,left top,left bottom,from(#ffffff),color-stop(0.5,#e5f2fc),to(#cbe2f6));border-color:#2ca7e6;}" +
+                ".simoder-btn.cButtonDown{background:#c5d5e6;background-image:-webkit-gradient(linear,left top,left bottom,from(#cad8e6),to(#e7eff7));}" +
+                ".simoder-btn>span,.simoder-btn-label{position:static;display:inline-block;width:auto;height:auto;vertical-align:middle;}" +
+                ".simoder-btn .simoder-btn-label,.simoder-tab-btn .simoder-btn-label{color:inherit !important;background:transparent;border:0;text-shadow:none;}" +
                 ".simoder-slot-launcher .simoder-btn{padding:3px 10px;font-size:11px;line-height:16px;}" +
-                ".simoder-slot-hub .simoder-btn{display:block;width:100%;height:100%;padding:0 16px;font-size:16px;font-weight:bold;line-height:1;text-transform:uppercase;letter-spacing:0.6px;text-align:center;color:#243b53;border:1px solid #a8b7c6;border-radius:999px;background:#eef3f8;background-image:-webkit-linear-gradient(top,#ffffff 0%,#f5f8fb 48%,#d4dee8 100%);text-shadow:0 1px 0 rgba(255,255,255,0.92);box-shadow:inset 0 1px 0 rgba(255,255,255,0.95),0 2px 5px rgba(10,22,36,0.42);box-sizing:border-box;}" +
-                ".simoder-slot-hub .simoder-btn:hover{background:#f5faff;background-image:-webkit-linear-gradient(top,#ffffff 0%,#ebf4fd 48%,#c6dcf2 100%);border-color:#2ca7e6;}" +
+                ".simoder-slot-hub .simoder-btn{display:block;width:100%;height:100%;padding:0 16px;font-size:16px;font-weight:bold;line-height:1;text-transform:uppercase;letter-spacing:0.6px;text-align:center;color:#243b53;border:1px solid #a8b7c6;border-radius:999px;background:#eef3f8;background-image:-webkit-gradient(linear,left top,left bottom,from(#ffffff),color-stop(0.48,#f5f8fb),to(#d4dee8));text-shadow:0 1px 0 rgba(255,255,255,0.92);box-shadow:inset 0 1px 0 rgba(255,255,255,0.95),0 2px 5px rgba(10,22,36,0.42);box-sizing:border-box;}" +
+                ".simoder-slot-hub .simoder-btn:hover{background:#f5faff;background-image:-webkit-gradient(linear,left top,left bottom,from(#ffffff),color-stop(0.48,#ebf4fd),to(#c6dcf2));border-color:#2ca7e6;}" +
                 ".simoder-slot-hub .simoder-btn-vanilla{background:transparent!important;background-image:none!important;border:0!important;box-shadow:none!important;padding:0!important;margin:0!important;border-radius:0!important;overflow:visible!important;position:relative!important;}" +
                 ".simoder-slot-hub .simoder-btn-vanilla>.simoder-badge{position:absolute;top:2px;right:12px;z-index:2;}" +
                 ".simoder-slot-region .simoder-btn{padding:5px 12px;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:0.4px;border-radius:14px;box-shadow:0 2px 8px rgba(8,18,30,0.45);}" +
                 ".simoder-slot-ingame .simoder-btn{display:block;width:100%;height:100%;padding:0 14px;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;text-align:center;border-radius:14px;box-sizing:border-box;}" +
-                ".simoder-btn-primary{background:#3aa526;background-image:-webkit-linear-gradient(top,#63d149 0%,#39a323 55%,#2b8918 100%);border-color:#237213;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.35),0 1px 1px rgba(0,0,0,0.15);}" +
-                ".simoder-btn-primary:hover{background:#46b831;background-image:-webkit-linear-gradient(top,#72dd58 0%,#42b32b 55%,#33991e 100%);border-color:#1c5f0f;}" +
-                ".simoder-btn-danger{background:#c93d32;background-image:-webkit-linear-gradient(top,#e35d52 0%,#c7382d 55%,#a6281e 100%);border-color:#841e16;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.28),0 1px 1px rgba(0,0,0,0.15);}" +
-                ".simoder-btn-danger:hover{background:#d8493d;background-image:-webkit-linear-gradient(top,#ed6d62 0%,#d34338 55%,#b32f24 100%);border-color:#6f1811;}" +
-                ".simoder-btn-warning{border-color:#d9821e;box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 0 0 1px rgba(217,130,30,0.35);}" +
-                ".simoder-modal .simoder-btn-warning{background:#df7e18;background-image:-webkit-linear-gradient(top,#f6a33e 0%,#e07e19 55%,#c2630b 100%);border-color:#984d08;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.32),0 1px 1px rgba(0,0,0,0.15);}" +
-                ".simoder-modal .simoder-btn-warning:hover{background:#e88b26;background-image:-webkit-linear-gradient(top,#fab155 0%,#ea8c27 55%,#d16e11 100%);border-color:#804006;}" +
+                ".simoder-btn-primary,.simoder-btn-primary.cButton{background:#3aa526;background-image:-webkit-gradient(linear,left top,left bottom,from(#63d149),color-stop(0.55,#39a323),to(#2b8918));border-color:#237213;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.35),0 1px 1px rgba(0,0,0,0.15);}" +
+                ".simoder-btn-primary:hover,.simoder-btn-primary.cButtonRollover{background:#46b831;background-image:-webkit-gradient(linear,left top,left bottom,from(#72dd58),color-stop(0.55,#42b32b),to(#33991e));border-color:#1c5f0f;}" +
+                ".simoder-btn-danger,.simoder-btn-danger.cButton{background:#c93d32;background-image:-webkit-gradient(linear,left top,left bottom,from(#e35d52),color-stop(0.55,#c7382d),to(#a6281e));border-color:#841e16;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.28),0 1px 1px rgba(0,0,0,0.15);}" +
+                ".simoder-btn-danger:hover,.simoder-btn-danger.cButtonRollover{background:#d8493d;background-image:-webkit-gradient(linear,left top,left bottom,from(#ed6d62),color-stop(0.55,#d34338),to(#b32f24));border-color:#6f1811;}" +
+                ".simoder-btn-warning,.simoder-btn-warning.cButton{border-color:#d9821e;box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 0 0 1px rgba(217,130,30,0.35);}" +
+                ".simoder-modal .simoder-btn-warning,.simoder-modal .simoder-btn-warning.cButton{background:#df7e18;background-image:-webkit-gradient(linear,left top,left bottom,from(#f6a33e),color-stop(0.55,#e07e19),to(#c2630b));border-color:#984d08;color:#ffffff;text-shadow:0 -1px 0 rgba(0,0,0,0.3);box-shadow:inset 0 1px 0 rgba(255,255,255,0.32),0 1px 1px rgba(0,0,0,0.15);}" +
+                ".simoder-modal .simoder-btn-warning:hover,.simoder-modal .simoder-btn-warning.cButtonRollover{background:#e88b26;background-image:-webkit-gradient(linear,left top,left bottom,from(#fab155),color-stop(0.55,#ea8c27),to(#d16e11));border-color:#804006;}" +
                 ".simoder-btn:disabled{opacity:0.45;cursor:default;}" +
                 ".simoder-badge{background:#d94235;color:#ffffff;border-radius:9px;padding:1px 6px;margin-left:6px;font-size:10px;font-weight:bold;line-height:13px;}" +
                 ".simoder-badge-ok{background:#2d9620;}" +
                 ".simoder-badge-muted{background:#5f7489;}" +
-                ".simoder-divider{border:0;border-top:1px solid #d0dce8;margin:8px 0;}" +
+                ".simoder-divider{position:static;width:100%;height:1px;border:0;border-top:1px solid #d0dce8;margin:8px 0;}" +
                 ".simoder-field{margin:6px 0;}" +
-                ".simoder-field-label{display:block;font-size:11px;font-weight:bold;color:#30465b;margin-bottom:3px;}" +
-                ".simoder-input,.simoder-select{width:100%;box-sizing:border-box;padding:5px 8px;font-size:12px;color:#1d2e3d;background:#ffffff;border:1px solid #9ab0c4;border-radius:3px;box-shadow:inset 0 1px 2px rgba(15,30,45,0.08);}" +
+                ".simoder-field-label{position:static;display:block;width:auto;height:auto;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;color:#30465b;margin-bottom:3px;text-align:left;}" +
+                ".simoder-input,.simoder-select{position:static;width:100%;box-sizing:border-box;padding:5px 8px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;color:#1d2e3d;background:#ffffff;border:1px solid #9ab0c4;border-radius:3px;box-shadow:inset 0 1px 2px rgba(15,30,45,0.08);}" +
                 ".simoder-input:focus,.simoder-select:focus{outline:none;border-color:#2ca7e6;}" +
                 ".simoder-slider{width:100%;vertical-align:middle;cursor:pointer;}" +
-                ".simoder-checkbox-wrap{display:inline-block;font-size:12px;color:#1d2e3d;cursor:pointer;margin:4px 0;}" +
+                ".simoder-checkbox-wrap{display:inline-block;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;color:#1d2e3d;cursor:pointer;margin:4px 0;}" +
                 ".simoder-checkbox-wrap input{vertical-align:middle;margin-right:6px;}" +
                 ".simoder-tabs{margin:4px 0;}" +
-                ".simoder-tab-bar{border-bottom:2px solid #9db2c6;margin-bottom:8px;padding-bottom:2px;}" +
-                ".simoder-tab-btn{background:#dde6f0;color:#2e4357;border:1px solid #a8bacb;border-bottom:none;border-radius:3px 3px 0 0;padding:6px 12px;margin-right:4px;font-size:12px;font-weight:bold;cursor:pointer;}" +
-                ".simoder-tab-btn-active{background:#ffffff;color:#16293b;border-color:#2ca7e6;border-top:2px solid #2ca7e6;}" +
-                ".simoder-progress-track{width:100%;height:14px;background:#d3dde7;border:1px solid #9cb0c4;border-radius:3px;overflow:hidden;box-sizing:border-box;}" +
-                ".simoder-progress-fill{height:100%;background:#48bf34;background-image:-webkit-linear-gradient(top,#72df5c 0%,#369f22 100%);}";
+                ".simoder-tab-bar{position:static;width:auto;height:auto;background:transparent;border:0;-webkit-border-image:none;-webkit-border-radius:0;border-radius:0;border-bottom:2px solid #8ea3b8;margin-bottom:10px;padding:0 2px;}" +
+                ".simoder-tab-btn{-webkit-appearance:none;position:relative;display:inline-block;vertical-align:bottom;width:auto;height:30px;line-height:28px;box-sizing:border-box;background:#d6e1ec;background-image:-webkit-gradient(linear,left top,left bottom,from(#e7eff7),to(#cbd7e5));color:#22364a;border:1px solid #96abc0;border-bottom:0;-webkit-border-image:none;-webkit-border-top-left-radius:4px;-webkit-border-top-right-radius:4px;-webkit-border-bottom-left-radius:0;-webkit-border-bottom-right-radius:0;border-radius:4px 4px 0 0;padding:0 14px;margin:0 4px 0 0;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;cursor:pointer;outline:none;}" +
+                ".simoder-tab-btn:hover{background:#e9f2fb;color:#132536;border-color:#5ea8d6;}" +
+                ".simoder-tab-btn-active{height:30px;line-height:27px;background:#ffffff;background-image:none;color:#132536;border:1px solid #2ca7e6;border-top:2px solid #2ca7e6;border-bottom:2px solid #ffffff;-webkit-border-image:none;-webkit-border-top-left-radius:4px;-webkit-border-top-right-radius:4px;-webkit-border-bottom-left-radius:0;-webkit-border-bottom-right-radius:0;border-radius:4px 4px 0 0;margin-bottom:-2px;}" +
+                ".simoder-progress-track{position:static;width:100%;height:14px;background:#d3dde7;border:1px solid #9cb0c4;border-radius:3px;overflow:hidden;box-sizing:border-box;}" +
+                ".simoder-progress-fill{height:100%;background:#48bf34;background-image:-webkit-gradient(linear,left top,left bottom,from(#72df5c),to(#369f22));}";
             var existingStyle = doc.getElementById("simoder-ui-styles");
             if (existingStyle) {
                 if (existingStyle.textContent !== cssText) {
@@ -187,7 +192,7 @@
         };
 
         var slotClassFor = function (viewName, slotName) {
-            if (slotName === "modal.overlay") { return "simoder-modal-slot"; }
+            if (slotName === "modal.overlay") { return "simoder-modal-slot Progress_Back"; }
             if (slotName === "region.actions") { return "simoder-slot-region"; }
             if (viewName === "launcher.menu") { return "simoder-slot-launcher"; }
             if (viewName === "main.menu") { return "simoder-slot-hub"; }
@@ -1155,11 +1160,78 @@
             wrap.className = "simoder-field";
             if (labelText) {
                 var lblEl = doc.createElement("div");
-                lblEl.className = "simoder-field-label";
+                lblEl.className = "simoder-field-label Body_12_Left";
                 lblEl.textContent = labelText;
                 wrap.appendChild(lblEl);
             }
             return wrap;
+        };
+
+        var appendSafeClassName = function (el, rawClassName) {
+            if (!el || typeof rawClassName !== "string" || !rawClassName) { return; }
+            var safe = rawClassName.replace(/[^A-Za-z0-9 _-]/g, "").slice(0, 256).replace(/^\s+|\s+$/g, "");
+            if (safe) {
+                el.className = (el.className ? el.className + " " : "") + safe;
+            }
+        };
+
+        var getNativeUiAudioIds = function () {
+            if (host.nativeAudioIds) { return host.nativeAudioIds; }
+            var ids = { hover: null, down: null };
+            var mgr = window.gUIManager || uiMgr;
+            if (mgr && typeof mgr.FindControlByID === "function") {
+                var probe = mgr.FindControlByID(212665064) || mgr.FindControlByID(237051648);
+                if (probe) {
+                    ids.hover = probe.mAudioMouseOnID || null;
+                    ids.down = probe.mAudioMouseDownID || null;
+                }
+            }
+            host.nativeAudioIds = ids;
+            return ids;
+        };
+
+        var playNativeUiSound = function (kind) {
+            if (!window.scrui || typeof window.scrui.Play2DSound !== "function") { return; }
+            var ids = getNativeUiAudioIds();
+            var soundId = kind === "down" ? ids.down : ids.hover;
+            if (soundId) {
+                try { window.scrui.Play2DSound(soundId); } catch (_e) {}
+            }
+        };
+
+        var attachVanillaInteractiveFeedback = function (el, toggleStateClasses) {
+            if (!el) { return; }
+            var swapBtnState = function (cls) {
+                if (!toggleStateClasses) { return; }
+                var cur = String(el.className || "").replace(/\bcButton(Normal|Rollover|Down|Disabled)\b/g, cls);
+                if (cur.indexOf(cls) === -1) { cur += " " + cls; }
+                el.className = cur;
+            };
+            el.onmouseover = function () {
+                if (el.disabled) { return; }
+                if (!el.__simoderHover) {
+                    el.__simoderHover = true;
+                    playNativeUiSound("hover");
+                }
+                swapBtnState("cButtonRollover");
+            };
+            el.onmouseout = function (e) {
+                var rel = e ? (e.relatedTarget || e.toElement) : null;
+                if (rel && el.contains && (rel === el || el.contains(rel))) { return; }
+                el.__simoderHover = false;
+                el.__simoderDown = false;
+                swapBtnState("cButtonNormal");
+            };
+            el.onmousedown = function () {
+                if (el.disabled) { return; }
+                el.__simoderDown = true;
+                playNativeUiSound("down");
+                swapBtnState("cButtonDown");
+            };
+            el.onmouseup = function () {
+                el.__simoderDown = false;
+                swapBtnState(el.__simoderHover ? "cButtonRollover" : "cButtonNormal");
+            };
         };
 
         var renderNode = function (patchId, node) {
@@ -1171,12 +1243,13 @@
             if (kind === "button" || kind === "toggle") {
                 el = doc.createElement("button");
                 el.type = "button";
-                el.className = "simoder-btn";
+                el.className = "simoder-btn cButton cButtonNormal";
                 if (node.tone === "primary") { el.className += " simoder-btn-primary"; }
                 else if (node.tone === "danger") { el.className += " simoder-btn-danger"; }
                 else if (node.tone === "warning") { el.className += " simoder-btn-warning"; }
                 if (node.disabled === true) { el.disabled = true; }
                 var lblSpan = doc.createElement("span");
+                lblSpan.className = "Head_11_CR_Vmid_UC simoder-btn-label";
                 var lbl = node.label || "";
                 if (kind === "toggle") {
                     lbl = lbl + (node.checked ? " [ON]" : " [OFF]");
@@ -1189,6 +1262,7 @@
                     b.textContent = String(node.badge);
                     el.appendChild(b);
                 }
+                attachVanillaInteractiveFeedback(el, true);
                 (function (pId, act, tId, chk) {
                     el.onclick = function () {
                         var payload = kind === "toggle" ? String(!chk) : null;
@@ -1201,7 +1275,7 @@
             } else if (kind === "input") {
                 el = makeFieldWrapper(node.label);
                 var inp = doc.createElement("input");
-                inp.type = "text"; inp.className = "simoder-input"; inp.value = node.value || "";
+                inp.type = "text"; inp.className = "simoder-input Browse_Tile_Recessed_SharpCorners Body_12_Left"; inp.value = node.value || "";
                 if (node.placeholder) { inp.placeholder = node.placeholder; }
                 if (node.disabled === true) { inp.disabled = true; }
                 (function (pId, act, tId, c) {
@@ -1212,7 +1286,7 @@
             } else if (kind === "select") {
                 el = makeFieldWrapper(node.label);
                 var sel = doc.createElement("select");
-                sel.className = "simoder-select";
+                sel.className = "simoder-select Browse_Tile_Recessed_SharpCorners Body_12_Left";
                 if (node.disabled === true) { sel.disabled = true; }
                 var opts = node.options || [], oi, optEl;
                 for (oi = 0; oi < opts.length; oi += 1) {
@@ -1223,7 +1297,7 @@
                     sel.appendChild(optEl);
                 }
                 if (node.value !== undefined && node.value !== null) sel.value = String(node.value);
-                (function (pId, act, tId, c) { c.onchange = function () { pushEvent(pId, act || "change", tId, c.value); }; }(patchId, node.action, node.id, sel));
+                (function (pId, act, tId, c) { c.onchange = function () { playNativeUiSound("down"); pushEvent(pId, act || "change", tId, c.value); }; }(patchId, node.action, node.id, sel));
                 el.appendChild(sel);
             } else if (kind === "slider") {
                 var sMin = (typeof node.min === "number") ? node.min : 0, sMax = (typeof node.max === "number") ? node.max : 100;
@@ -1242,13 +1316,13 @@
                 }(patchId, node.action, node.id, rng, node.label ? el.firstChild : null, node.label));
                 el.appendChild(rng);
             } else if (kind === "checkbox") {
-                el = doc.createElement("label"); el.className = "simoder-checkbox-wrap";
+                el = doc.createElement("label"); el.className = "simoder-checkbox-wrap Body_12_Left";
                 var cb = doc.createElement("input");
                 cb.type = "checkbox"; cb.checked = node.checked === true;
                 if (node.disabled === true) cb.disabled = true;
-                (function (pId, act, tId, c) { c.onchange = function () { pushEvent(pId, act || "change", tId, String(!!c.checked)); }; }(patchId, node.action, node.id, cb));
+                (function (pId, act, tId, c) { c.onchange = function () { playNativeUiSound("down"); pushEvent(pId, act || "change", tId, String(!!c.checked)); }; }(patchId, node.action, node.id, cb));
                 el.appendChild(cb);
-                var cbTxt = doc.createElement("span"); cbTxt.textContent = node.label || ""; el.appendChild(cbTxt);
+                var cbTxt = doc.createElement("span"); cbTxt.className = "Body_12_Left"; cbTxt.textContent = node.label || ""; el.appendChild(cbTxt);
             } else if (kind === "progress") {
                 var pMin = (typeof node.min === "number") ? node.min : 0;
                 var pMax = (typeof node.max === "number" && node.max > pMin) ? node.max : (pMin + 100);
@@ -1256,7 +1330,7 @@
                 if (isNaN(pCur)) pCur = pMin;
                 var pct = Math.max(0, Math.min(100, Math.round(((pCur - pMin) * 100) / (pMax - pMin))));
                 el = makeFieldWrapper((node.label ? node.label + " (" + pct + "%)" : pct + "%"));
-                var track = doc.createElement("div"); track.className = "simoder-progress-track";
+                var track = doc.createElement("div"); track.className = "simoder-progress-track Browse_Tile_Recessed_SharpCorners";
                 var fill = doc.createElement("div"); fill.className = "simoder-progress-fill";
                 if (fill.style) fill.style.width = pct + "%";
                 track.appendChild(fill); el.appendChild(track);
@@ -1272,8 +1346,9 @@
                     tn = tabNodes[ti]; if (!tn) continue;
                     tBtn = doc.createElement("button"); tBtn.type = "button";
                     tBtn.className = "simoder-tab-btn" + (tn === activeTabNode ? " simoder-tab-btn-active" : "");
-                    tbSpan = doc.createElement("span"); tbSpan.textContent = tn.label || tn.id || ("Tab " + (ti + 1)); tBtn.appendChild(tbSpan);
+                    tbSpan = doc.createElement("span"); tbSpan.className = "Head_11_CR_Vmid_UC simoder-btn-label"; tbSpan.textContent = tn.label || tn.id || ("Tab " + (ti + 1)); tBtn.appendChild(tbSpan);
                     if (tn.badge) { var tb = doc.createElement("span"); tb.className = "simoder-badge"; tb.textContent = String(tn.badge); tBtn.appendChild(tb); }
+                    attachVanillaInteractiveFeedback(tBtn, false);
                     (function (pId, act, tid) { tBtn.onclick = function () { pushEvent(pId, act || "switch_tab", tid, tid); }; }(patchId, node.action || tn.action, tn.id || String(ti)));
                     tabBar.appendChild(tBtn);
                 }
@@ -1283,8 +1358,8 @@
                 }
                 el.appendChild(tabBody);
             } else if (kind === "divider") {
-                el = doc.createElement("hr");
-                el.className = "simoder-divider";
+                el = doc.createElement("div");
+                el.className = "simoder-divider HUD_Palette_Divider";
             } else if (kind === "badge") {
                 el = doc.createElement("span");
                 el.className = "simoder-badge";
@@ -1293,30 +1368,39 @@
                 el.textContent = node.label || node.text || "";
             } else if (kind === "text") {
                 el = doc.createElement("div");
-                el.className = "simoder-text";
-                if (node.tone === "muted") { el.className = "simoder-text-muted"; }
-                else if (node.tone === "title") { el.className = "simoder-text-title"; }
+                el.className = "simoder-text Body_12_Left";
+                if (node.tone === "muted") { el.className = "simoder-text-muted Body_12_Left"; }
+                else if (node.tone === "title") { el.className = "simoder-text-title Header_12_Center_Upper"; }
                 el.textContent = node.text || node.label || "";
             } else {
                 el = doc.createElement("div");
                 if (kind === "modal") {
-                    el.className = "simoder-modal Panel_Background";
+                    el.className = "simoder-modal Panel_flatFill_Bottom Panel_Background";
                     var vw = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
-                    if (vw > 0 && vw < 720 && el.style) {
-                        el.style.width = "auto";
-                        el.style.left = "20px";
-                        el.style.right = "20px";
-                        el.style.marginLeft = "0";
+                    var vh = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
+                    if (el.style) {
+                        if (vw > 0 && vw < 720) {
+                            el.style.width = "auto";
+                            el.style.left = "20px";
+                            el.style.right = "20px";
+                            el.style.marginLeft = "0";
+                        }
+                        if (vh > 0) {
+                            var modalH = Math.min(720, Math.max(420, vh - 80));
+                            el.style.height = modalH + "px";
+                            el.style.top = Math.round((vh - modalH) / 2) + "px";
+                            el.style.bottom = "auto";
+                        }
                     }
                     if (node.label || node.action) {
                         var hdrBar = doc.createElement("div");
-                        hdrBar.className = "simoder-modal-header Panel_Header FE_Header_BG";
-                        hdrBar.textContent = node.label || "";
+                        hdrBar.className = "simoder-modal-header FE_Header_BG Panel_Header";
                         if (node.action) {
                             var closeBtn = doc.createElement("button");
                             closeBtn.type = "button";
-                            closeBtn.className = "simoder-modal-close";
+                            closeBtn.className = "simoder-modal-close cButton cButtonNormal";
                             closeBtn.textContent = "x";
+                            attachVanillaInteractiveFeedback(closeBtn, true);
                             (function (pId, act) {
                                 closeBtn.onclick = function () {
                                     pushEvent(pId, act, "modal_header_close", null);
@@ -1324,23 +1408,35 @@
                             }(patchId, node.action));
                             hdrBar.appendChild(closeBtn);
                         }
+                        var titleSpan = doc.createElement("span");
+                        titleSpan.className = "simoder-modal-title Header_20_Center_Upper";
+                        titleSpan.textContent = node.label || "";
+                        hdrBar.appendChild(titleSpan);
                         el.appendChild(hdrBar);
                     }
                     childHost = doc.createElement("div");
                     childHost.className = "simoder-modal-body";
                     el.appendChild(childHost);
                 } else {
-                    el.className = kind === "row" ? "simoder-row" : (node.tone === "scroll" ? "simoder-panel simoder-panel-scroll Browse_Tile_Recessed_SharpCorners" : "simoder-panel Browse_Tile_Recessed_SharpCorners");
+                    if (kind === "row") {
+                        el.className = "simoder-row";
+                    } else if (node.tone === "scroll") {
+                        el.className = "simoder-panel simoder-panel-scroll Browse_Tile_Recessed_SharpCorners";
+                    } else if (node.tone === "muted" || node.tone === "warning") {
+                        el.className = "simoder-panel Rollover_Recessed";
+                    } else {
+                        el.className = "simoder-panel Browse_Tile_Recessed_SharpCorners";
+                    }
                     if (node.label) {
                         var hdr = doc.createElement("div");
-                        hdr.className = "simoder-text-title";
+                        hdr.className = "simoder-text-title Header_12_Center_Upper";
                         hdr.textContent = node.label;
                         el.appendChild(hdr);
                     }
                 }
                 if (node.text) {
                     var bodyTxt = doc.createElement("div");
-                    bodyTxt.className = "simoder-text";
+                    bodyTxt.className = "simoder-text Body_12_Left";
                     bodyTxt.textContent = node.text;
                     (childHost || el).appendChild(bodyTxt);
                 }
@@ -1348,6 +1444,7 @@
             if (node.id) {
                 el.setAttribute("data-simoder-target", String(node.id));
             }
+            appendSafeClassName(el, node.className);
             var children = skipDefaultChildren ? [] : (node.children || []);
             var idx, chNode, renderedChild;
             for (idx = 0; idx < children.length; idx += 1) {
@@ -1356,7 +1453,7 @@
                 if (kind === "modal" && chNode && chNode.tone === "footer") {
                     if (!footerHost) {
                         footerHost = doc.createElement("div");
-                        footerHost.className = "simoder-modal-footer";
+                        footerHost.className = "simoder-modal-footer Panel_flatFill_Bottom";
                         el.appendChild(footerHost);
                     }
                     footerHost.appendChild(renderedChild);

@@ -15,6 +15,7 @@ const MAX_UI_NODE_DEPTH: usize = 12;
 const MAX_UI_NODES_PER_PATCH: usize = 256;
 const MAX_UI_TEXT_LEN: usize = 4096;
 const MAX_UI_SELECT_OPTIONS: usize = 128;
+const MAX_UI_CLASS_NAME_LEN: usize = 256;
 
 /// Placement operation specifying how a [`UiPatchDescriptor`] composes into a `(view, slot)` container.
 #[derive(
@@ -165,6 +166,9 @@ pub struct UiNode {
     /// Optional positive integer step increment for [`UiNodeKind::Slider`].
     #[serde(default)]
     pub step: Option<i64>,
+    /// Optional space-separated native or utility CSS class names (`[A-Za-z0-9 _-]`, max 256 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
     /// Selectable entries for [`UiNodeKind::Select`].
     #[serde(default)]
     pub options: Vec<UiSelectOption>,
@@ -484,6 +488,21 @@ fn validate_node_tree(root: &UiNode) -> Result<(), ModError> {
                 return Err(ModError::ManifestValidation(format!(
                     "UI node text field exceeds {MAX_UI_TEXT_LEN} bytes"
                 )));
+            }
+        }
+        if let Some(cls) = &node.class_name {
+            if cls.len() > MAX_UI_CLASS_NAME_LEN {
+                return Err(ModError::ManifestValidation(format!(
+                    "UI node className exceeds {MAX_UI_CLASS_NAME_LEN} bytes"
+                )));
+            }
+            if !cls
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'-' | b'_'))
+            {
+                return Err(ModError::ManifestValidation(
+                    "UI node className contains disallowed characters".into(),
+                ));
             }
         }
         if node.options.len() > MAX_UI_SELECT_OPTIONS {

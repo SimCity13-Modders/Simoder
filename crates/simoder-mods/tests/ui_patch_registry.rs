@@ -246,6 +246,7 @@ fn ui_patch_registry_validates_extended_input_select_slider_tabs_and_progress_pr
                             value: Some("75".into()),
                             min: Some(0),
                             max: Some(100),
+                            class_name: Some("Panel_Background Browse_Tile_Recessed_SharpCorners".into()),
                             ..Default::default()
                         },
                     ],
@@ -256,4 +257,42 @@ fn ui_patch_registry_validates_extended_input_select_slider_tabs_and_progress_pr
         })
         .unwrap();
     assert_eq!(rev, 1);
+
+    // Reject unsafe characters or oversized className.
+    assert!(matches!(
+        registry.register_patch(UiPatchDescriptor {
+            patch_id: "bad-class-chars".into(),
+            owner_mod_id: "dawid.tools".into(),
+            owner_generation: 1,
+            view: "main.menu".into(),
+            slot: "menu.actions".into(),
+            op: UiPatchOp::Append,
+            target: None,
+            priority: 1,
+            node: UiNode {
+                kind: UiNodeKind::Panel,
+                class_name: Some("Panel_Background;color:red".into()),
+                ..Default::default()
+            },
+        }),
+        Err(ModError::ManifestValidation(_))
+    ));
+    assert!(matches!(
+        registry.register_patch(UiPatchDescriptor {
+            patch_id: "bad-class-len".into(),
+            owner_mod_id: "dawid.tools".into(),
+            owner_generation: 1,
+            view: "main.menu".into(),
+            slot: "menu.actions".into(),
+            op: UiPatchOp::Append,
+            target: None,
+            priority: 1,
+            node: UiNode {
+                kind: UiNodeKind::Panel,
+                class_name: Some("a".repeat(257)),
+                ..Default::default()
+            },
+        }),
+        Err(ModError::ManifestValidation(_))
+    ));
 }
