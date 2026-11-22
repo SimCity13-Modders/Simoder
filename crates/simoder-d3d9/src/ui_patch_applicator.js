@@ -115,11 +115,13 @@
 
         var ensureStyles = function () {
             var cssText =
-                ".simoder-slot-launcher{position:fixed;left:336px;bottom:8px;z-index:99980;font-family:Arial,Helvetica,sans-serif;}" +
-                ".simoder-slot-hub{position:fixed;left:44px;bottom:84px;z-index:99980;font-family:Arial,Helvetica,sans-serif;display:none;}" +
-                ".simoder-slot-region{position:fixed;z-index:99982;font-family:Arial,Helvetica,sans-serif;display:none;}" +
-                ".simoder-slot-ingame{position:fixed;z-index:99980;font-family:Arial,Helvetica,sans-serif;display:none;}" +
-                ".simoder-modal-slot{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99990;background:rgba(16,28,42,0.58);font-family:Arial,Helvetica,sans-serif;overflow:hidden;}" +
+                ".simoder-slot-launcher{position:fixed;left:336px;bottom:8px;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;}" +
+                ".simoder-slot-hub{position:fixed;left:44px;bottom:84px;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
+                ".simoder-slot-region{position:fixed;z-index:99982;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
+                ".simoder-region-tile-btn{position:absolute;right:6px;bottom:6px;z-index:25;padding:3px 9px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:0.3px;border-radius:11px;border:1px solid #8ea3b8;background:#eef3f8;background-image:-webkit-linear-gradient(top,#ffffff 0%,#e5edf5 55%,#cad7e5 100%);color:#1c2f42;cursor:pointer;box-shadow:0 2px 5px rgba(8,18,30,0.55);}" +
+                ".simoder-region-tile-btn:hover{border-color:#2ca7e6;background:#ffffff;}" +
+                ".simoder-slot-ingame{position:fixed;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
+                ".simoder-modal-slot{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99990;background:rgba(16,28,42,0.58);font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;overflow:hidden;}" +
                 ".simoder-modal{position:fixed;top:36px;bottom:36px;left:50%;margin-left:-330px;width:660px;max-width:92%;text-align:left;background:#edf2f7;background-image:-webkit-linear-gradient(top,#f8fbfe 0%,#e5edf5 100%);border:2px solid #9db1c4;border-radius:4px;color:#1d2e3d;box-shadow:0 10px 30px rgba(8,18,30,0.55);overflow:hidden;box-sizing:border-box;}" +
                 ".simoder-modal-header{position:absolute;top:0;left:0;right:0;height:42px;line-height:42px;background:#3c5268;background-image:-webkit-linear-gradient(top,#516a82 0%,#334659 100%);color:#ffffff;padding:0 44px 0 16px;font-size:15px;font-weight:bold;letter-spacing:0.4px;border-bottom:2px solid #2ca7e6;text-shadow:0 1px 1px rgba(0,0,0,0.45);box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
                 ".simoder-modal-close{position:absolute;right:8px;top:7px;width:26px;height:26px;line-height:24px;text-align:center;background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.35);border-radius:3px;color:#ffffff;font-size:16px;font-weight:bold;cursor:pointer;padding:0;}" +
@@ -403,13 +405,14 @@
             }
         };
 
-        var mountVanillaHubButton = function (container, hub) {
-            if (!container || !hub || !hub.playCtrl || !hub.playCtrl.mRootElement || !hub.playCtrl.mRootElement.parentNode || !container.querySelector) {
-                return false;
+        var removeVanillaEscButton = function () {
+            var existing = doc.getElementById("simoder-esc-vanilla-mods");
+            if (existing && existing.parentNode) {
+                existing.parentNode.removeChild(existing);
             }
-            var btn = container.querySelector(".simoder-btn");
-            if (!btn) { return false; }
+        };
 
+        var extractTriggerLabelAndBadge = function (btn, defaultLabel) {
             var labelText = "";
             var badgeText = "";
             var ci, ch;
@@ -421,83 +424,56 @@
                     labelText += String(ch.textContent);
                 }
             }
-            labelText = labelText.replace(/^\s+|\s+$/g, "") || "MODS";
+            labelText = labelText.replace(/^\s+|\s+$/g, "") || defaultLabel;
+            return { label: labelText, badge: badgeText };
+        };
 
-            var parentEl = hub.playCtrl.mRootElement.parentNode;
-            var clone = doc.getElementById("simoder-hub-vanilla-mods");
-            if (!clone || clone.parentNode !== parentEl || clone.getAttribute("data-simoder-vanilla-label") !== labelText || clone.getAttribute("data-simoder-vanilla-badge") !== badgeText) {
-                removeVanillaHubButton();
-                clone = hub.playCtrl.mRootElement.cloneNode(true);
-                var stripIds = function (node) {
-                    if (!node || node.nodeType !== 1) { return; }
-                    if (node.removeAttribute) { node.removeAttribute("id"); }
-                    var k;
-                    for (k = 0; k < node.childNodes.length; k += 1) {
-                        stripIds(node.childNodes[k]);
-                    }
-                };
-                stripIds(clone);
-                clone.id = "simoder-hub-vanilla-mods";
-                clone.setAttribute("data-simoder-slot", "hub.vanilla.clone");
-                clone.setAttribute("data-simoder-vanilla-label", labelText);
-                clone.setAttribute("data-simoder-vanilla-badge", badgeText);
-
-                var replacedLabel = false;
-                var replaceText = function (node) {
-                    if (!node) { return; }
-                    if (node.nodeType === 3) {
-                        var trimmed = String(node.nodeValue || "").replace(/^\s+|\s+$/g, "");
-                        if (trimmed.length > 0) {
-                            node.nodeValue = replacedLabel ? "" : labelText;
-                            replacedLabel = true;
-                        }
-                        return;
-                    }
-                    var k;
-                    for (k = 0; k < node.childNodes.length; k += 1) {
-                        replaceText(node.childNodes[k]);
-                    }
-                };
-                replaceText(clone);
-
-                if (badgeText) {
-                    var badgeEl = doc.createElement("span");
-                    badgeEl.className = "simoder-badge";
-                    badgeEl.textContent = badgeText;
-                    if (badgeEl.style) {
-                        badgeEl.style.position = "absolute";
-                        badgeEl.style.top = "2px";
-                        badgeEl.style.right = "12px";
-                        badgeEl.style.zIndex = "5";
-                    }
-                    clone.appendChild(badgeEl);
+        var populateVanillaCloneContent = function (clone, labelText, badgeText) {
+            var stripIds = function (node) {
+                if (!node || node.nodeType !== 1) { return; }
+                if (node.removeAttribute) { node.removeAttribute("id"); }
+                var k;
+                for (k = 0; k < node.childNodes.length; k += 1) {
+                    stripIds(node.childNodes[k]);
                 }
+            };
+            stripIds(clone);
 
-                parentEl.appendChild(clone);
-            }
-
-            if (clone.style) {
-                var playStyle = hub.playCtrl.mRootElement.style || {};
-                var baseTop = parseFloat(playStyle.top);
-                if (isNaN(baseTop)) { baseTop = Number(hub.playCtrl.mTop || 0); }
-                clone.style.position = "absolute";
-                clone.style.left = playStyle.left || (Math.round(hub.playCtrl.mLeft || 0) + "px");
-                clone.style.top = Math.round(baseTop + hub.localPitch) + "px";
-                clone.style.right = "auto";
-                clone.style.bottom = "auto";
-                clone.style.width = playStyle.width || (Math.round(hub.playCtrl.mWidth || 0) + "px");
-                clone.style.height = playStyle.height || (Math.round(hub.playCtrl.mHeight || 0) + "px");
-                clone.style.cursor = "pointer";
-                clone.style.pointerEvents = "auto";
-                clone.style.visibility = "visible";
-                clone.style.opacity = "1";
-                if (!clone.style.display || clone.style.display === "none") {
-                    clone.style.display = "inline";
+            var replacedLabel = false;
+            var replaceText = function (node) {
+                if (!node) { return; }
+                if (node.nodeType === 3) {
+                    var trimmed = String(node.nodeValue || "").replace(/^\s+|\s+$/g, "");
+                    if (trimmed.length > 0) {
+                        node.nodeValue = replacedLabel ? "" : labelText;
+                        replacedLabel = true;
+                    }
+                    return;
                 }
-            }
+                var k;
+                for (k = 0; k < node.childNodes.length; k += 1) {
+                    replaceText(node.childNodes[k]);
+                }
+            };
+            replaceText(clone);
 
-            var dType = hub.playCtrl.mDrawableType;
-            var styles = hub.playCtrl.mStyleList;
+            if (badgeText) {
+                var badgeEl = doc.createElement("span");
+                badgeEl.className = "simoder-badge";
+                badgeEl.textContent = badgeText;
+                if (badgeEl.style) {
+                    badgeEl.style.position = "absolute";
+                    badgeEl.style.top = "2px";
+                    badgeEl.style.right = "12px";
+                    badgeEl.style.zIndex = "5";
+                }
+                clone.appendChild(badgeEl);
+            }
+        };
+
+        var bindVanillaButtonClone = function (clone, templateCtrl, triggerBtn) {
+            var dType = templateCtrl.mDrawableType;
+            var styles = templateCtrl.mStyleList;
             var stateClasses = ["cButtonNormal", "cButtonRollover", "cButtonDown", "cButtonDisabled"];
             var applyState = function (stateIndex) {
                 var stCls = stateClasses[stateIndex] || "cButtonNormal";
@@ -546,7 +522,7 @@
             clone.onmouseover = function () {
                 if (!clone.__simoderHover) {
                     clone.__simoderHover = true;
-                    playUiSound(hub.playCtrl.mAudioMouseOnID);
+                    playUiSound(templateCtrl.mAudioMouseOnID);
                 }
                 applyState(clone.__simoderDown ? 2 : 1);
             };
@@ -561,7 +537,7 @@
             };
             clone.onmousedown = function () {
                 clone.__simoderDown = true;
-                playUiSound(hub.playCtrl.mAudioMouseDownID);
+                playUiSound(templateCtrl.mAudioMouseDownID);
                 applyState(2);
             };
             clone.onmouseup = function () {
@@ -569,13 +545,75 @@
                 applyState(clone.__simoderHover ? 1 : 0);
             };
             clone.onclick = function () {
-                if (btn && typeof btn.onclick === "function") {
-                    btn.onclick();
+                if (triggerBtn && typeof triggerBtn.onclick === "function") {
+                    triggerBtn.onclick();
                 }
             };
+        };
+
+        var mountVanillaHubButton = function (container, hub) {
+            if (!container || !hub || !hub.playCtrl || !hub.playCtrl.mRootElement || !hub.playCtrl.mRootElement.parentNode || !container.querySelector) {
+                return false;
+            }
+            var btn = container.querySelector(".simoder-btn");
+            if (!btn) { return false; }
+
+            var lblInfo = extractTriggerLabelAndBadge(btn, "MODS");
+            var labelText = lblInfo.label;
+            var badgeText = lblInfo.badge;
+
+            var parentEl = hub.playCtrl.mRootElement.parentNode;
+            var clone = doc.getElementById("simoder-hub-vanilla-mods");
+            if (!clone || clone.parentNode !== parentEl || clone.getAttribute("data-simoder-vanilla-label") !== labelText || clone.getAttribute("data-simoder-vanilla-badge") !== badgeText) {
+                removeVanillaHubButton();
+                clone = hub.playCtrl.mRootElement.cloneNode(true);
+                populateVanillaCloneContent(clone, labelText, badgeText);
+                clone.id = "simoder-hub-vanilla-mods";
+                clone.setAttribute("data-simoder-slot", "hub.vanilla.clone");
+                clone.setAttribute("data-simoder-vanilla-label", labelText);
+                clone.setAttribute("data-simoder-vanilla-badge", badgeText);
+                parentEl.appendChild(clone);
+            }
+
+            if (clone.style) {
+                var playStyle = hub.playCtrl.mRootElement.style || {};
+                var baseTop = parseFloat(playStyle.top);
+                if (isNaN(baseTop)) { baseTop = Number(hub.playCtrl.mTop || 0); }
+                clone.style.position = "absolute";
+                clone.style.left = playStyle.left || (Math.round(hub.playCtrl.mLeft || 0) + "px");
+                clone.style.top = Math.round(baseTop + hub.localPitch) + "px";
+                clone.style.right = "auto";
+                clone.style.bottom = "auto";
+                clone.style.width = playStyle.width || (Math.round(hub.playCtrl.mWidth || 0) + "px");
+                clone.style.height = playStyle.height || (Math.round(hub.playCtrl.mHeight || 0) + "px");
+                clone.style.cursor = "pointer";
+                clone.style.pointerEvents = "auto";
+                clone.style.visibility = "visible";
+                clone.style.opacity = "1";
+                if (!clone.style.display || clone.style.display === "none") {
+                    clone.style.display = "inline";
+                }
+            }
+
+            bindVanillaButtonClone(clone, hub.playCtrl, btn);
 
             container.style.display = "none";
             return true;
+        };
+
+        var resolveMyGamesTab = function (myGames, propName, tabKey) {
+            if (!myGames) { return null; }
+            if (myGames[propName]) { return myGames[propName]; }
+            if (typeof myGames.GetTab === "function") {
+                try {
+                    var t = myGames.GetTab(tabKey);
+                    if (t) { return t; }
+                } catch (_e) {}
+            }
+            if (myGames.mTabs && myGames.mTabs[tabKey]) {
+                return myGames.mTabs[tabKey];
+            }
+            return null;
         };
 
         var findActiveRegionPreview = function () {
@@ -584,7 +622,11 @@
             var viewW = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
             var myGames = sim.gMyGamesUIHandler || (sim.cLauncher3D && sim.cLauncher3D.mPanels && sim.cLauncher3D.mPanels.MY_GAMES_PANEL && sim.cLauncher3D.mPanels.MY_GAMES_PANEL.uiHandler);
             if (!myGames) { return null; }
-            var tabs = [myGames.mContinueTab, myGames.mCreateTab];
+            var mgr = window.gUIManager || uiMgr;
+            var tabs = [
+                resolveMyGamesTab(myGames, "mContinueTab", "CONTINUE_TAB"),
+                resolveMyGamesTab(myGames, "mCreateTab", "CREATE_TAB")
+            ];
             var i, tab, mapCtrl, reg, rootEl, rect;
             for (i = 0; i < tabs.length; i += 1) {
                 tab = tabs[i];
@@ -592,7 +634,17 @@
                 mapCtrl = tab.mOverviewMap;
                 reg = mapCtrl.mRegionData;
                 if (!reg.id) { continue; }
+                if (i === 0 && mgr && typeof mgr.FindControlByID === "function") {
+                    var mapWin = mgr.FindControlByID(237389748);
+                    if (mapWin && typeof mapWin.GetAbsoluteVisibility === "function" && !mapWin.GetAbsoluteVisibility()) {
+                        continue;
+                    }
+                }
                 rootEl = mapCtrl.mRootElement || (mapCtrl.mRootLayout && mapCtrl.mRootLayout.mRootElement) || (mapCtrl.mParentControl && mapCtrl.mParentControl.mRootElement);
+                if (!rootEl && i === 0 && mgr && typeof mgr.FindControlByID === "function") {
+                    var regMapCtrl = mgr.FindControlByID(237586561);
+                    rootEl = regMapCtrl ? regMapCtrl.mRootElement : null;
+                }
                 if (!rootEl || typeof rootEl.getBoundingClientRect !== "function") { continue; }
                 rect = rootEl.getBoundingClientRect();
                 if (!rect || rect.width < 180 || rect.height < 120 || rect.right > viewW + 4 || rect.bottom > viewH + 4 || rect.left < 0 || rect.top < 0) {
@@ -610,41 +662,357 @@
             return null;
         };
 
+        var clearRegionTileButtons = function () {
+            if (!doc.querySelectorAll) { return; }
+            var stale = doc.querySelectorAll("[data-simoder-slot='region.tile.btn']");
+            var i;
+            for (i = 0; i < stale.length; i += 1) {
+                if (stale[i].parentNode) {
+                    stale[i].parentNode.removeChild(stale[i]);
+                }
+            }
+        };
+
+        var syncRegionTileButtons = function (container) {
+            if (!sim || !container || !container.querySelector) {
+                clearRegionTileButtons();
+                return;
+            }
+            var mgr = window.gUIManager || uiMgr;
+            var gridWin = (mgr && typeof mgr.FindControlByID === "function") ? mgr.FindControlByID(237389708) : null;
+            var gridVisible = gridWin && (typeof gridWin.GetAbsoluteVisibility === "function" ? !!gridWin.GetAbsoluteVisibility() : gridWin.mIsVisible === true);
+            var myGames = sim.gMyGamesUIHandler || (sim.cLauncher3D && sim.cLauncher3D.mPanels && sim.cLauncher3D.mPanels.MY_GAMES_PANEL && sim.cLauncher3D.mPanels.MY_GAMES_PANEL.uiHandler);
+            var contTab = resolveMyGamesTab(myGames, "mContinueTab", "CONTINUE_TAB");
+            var cacheRegs = (sim.cLauncher3D && sim.cLauncher3D.mDataCache && sim.cLauncher3D.mDataCache.mUserRegions && sim.cLauncher3D.mDataCache.mUserRegions.regions) ? sim.cLauncher3D.mDataCache.mUserRegions.regions : null;
+            if (!gridVisible || !contTab || !contTab.mRegionList || !cacheRegs || !cacheRegs.length) {
+                clearRegionTileButtons();
+                return;
+            }
+
+            var triggerBtn = container.querySelector(".simoder-btn");
+            var wrapper = container.querySelector("[data-simoder-patch]");
+            var patchId = wrapper ? wrapper.getAttribute("data-simoder-patch") : "simoder.base.mods-trigger-region";
+            var labelText = (triggerBtn && triggerBtn.textContent) ? String(triggerBtn.textContent).replace(/^\s+|\s+$/g, "") : "Mods";
+            if (!labelText) { labelText = "Mods"; }
+
+            var mountedIds = {};
+            var idx, tile, reg, imgCtrl, hostEl, btnId, tileBtn, ctxPayload;
+            for (idx = 0; idx < cacheRegs.length && idx < contTab.mRegionList.length; idx += 1) {
+                tile = contTab.mRegionList[idx];
+                reg = cacheRegs[idx];
+                if (!tile || !reg || !reg.id || typeof tile.FindControlByID !== "function") { continue; }
+                imgCtrl = tile.FindControlByID(236791249);
+                hostEl = (imgCtrl && imgCtrl.mRootElement) ? imgCtrl.mRootElement : tile.mRootElement;
+                if (!hostEl) { continue; }
+                btnId = "simoder-region-tile-btn-" + String(reg.id);
+                mountedIds[btnId] = true;
+                tileBtn = doc.getElementById(btnId);
+                if (!tileBtn || tileBtn.parentNode !== hostEl) {
+                    if (tileBtn && tileBtn.parentNode) { tileBtn.parentNode.removeChild(tileBtn); }
+                    tileBtn = doc.createElement("button");
+                    tileBtn.type = "button";
+                    tileBtn.id = btnId;
+                    tileBtn.className = "simoder-region-tile-btn";
+                    tileBtn.setAttribute("data-simoder-slot", "region.tile.btn");
+                    hostEl.appendChild(tileBtn);
+                }
+                if (tileBtn.textContent !== labelText) {
+                    tileBtn.textContent = labelText;
+                }
+                ctxPayload = JSON.stringify({
+                    regionId: String(reg.id),
+                    regionName: String(reg.name || ""),
+                    sandbox: !!(reg.sandbox === true || reg.sandbox === "true")
+                });
+                (function (pId, payloadStr, btnRef) {
+                    var stopEv = function (e) {
+                        if (e && e.stopPropagation) { e.stopPropagation(); }
+                        if (e && e.preventDefault) { e.preventDefault(); }
+                        if (e) { e.cancelBubble = true; }
+                    };
+                    btnRef.onmousedown = stopEv;
+                    btnRef.onmouseup = stopEv;
+                    btnRef.onclick = function (e) {
+                        stopEv(e);
+                        pushEvent(pId, "open_region_mods", "mods_region_tile_btn", payloadStr);
+                    };
+                }(patchId, ctxPayload, tileBtn));
+            }
+            if (doc.querySelectorAll) {
+                var allTileBtns = doc.querySelectorAll("[data-simoder-slot='region.tile.btn']");
+                for (idx = 0; idx < allTileBtns.length; idx += 1) {
+                    if (!mountedIds[allTileBtns[idx].id] && allTileBtns[idx].parentNode) {
+                        allTileBtns[idx].parentNode.removeChild(allTileBtns[idx]);
+                    }
+                }
+            }
+        };
+
         var findInGameEscapeMenu = function () {
             if (!sim) { return null; }
             var mgr = window.gUIManager || uiMgr;
             if (!mgr || typeof mgr.FindControlByID !== "function") { return null; }
             var menuCtrl = mgr.FindControlByID(sim.kWinIDMainMenu || 185362957);
-            if (!menuCtrl || menuCtrl.mIsVisible !== true || !menuCtrl.mRootElement) { return null; }
-            if (typeof sim.IsOptionMenuVisible === "function" && !sim.IsOptionMenuVisible()) { return null; }
-            var menuEl = menuCtrl.mRootElement;
-            if (typeof menuEl.getBoundingClientRect !== "function") { return null; }
-            var menuRect = menuEl.getBoundingClientRect();
-            if (!menuRect || menuRect.width < 120 || menuRect.height < 80) { return null; }
-            var viewH = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
-            var all = menuEl.getElementsByTagName ? menuEl.getElementsByTagName("*") : [];
-            var bestRect = null;
-            var i, el, r;
-            for (i = 0; i < all.length; i += 1) {
-                el = all[i];
-                if (isSimoderNode(el) || typeof el.getBoundingClientRect !== "function") { continue; }
-                r = el.getBoundingClientRect();
-                if (!r || r.width < 100 || r.width > menuRect.width - 8 || r.height < 22 || r.height > 64 || r.bottom > viewH) {
-                    continue;
+            var isCtrlVisible = function (ctrl) {
+                if (!ctrl) { return false; }
+                if (typeof ctrl.GetAbsoluteVisibility === "function") {
+                    return !!ctrl.GetAbsoluteVisibility();
                 }
-                if (el.tagName === "BUTTON" || (el.style && el.style.cursor === "pointer") || (el.className && String(el.className).indexOf("button") !== -1) || (el.textContent && String(el.textContent).replace(/^\s+|\s+$/g, "").length > 0 && r.width >= menuRect.width * 0.55)) {
-                    if (!bestRect || r.bottom > bestRect.bottom) {
-                        bestRect = r;
+                return ctrl.mIsVisible === true;
+            };
+            if (!isCtrlVisible(menuCtrl) || !menuCtrl.mRootElement) { return null; }
+            if (typeof sim.IsOptionMenuVisible === "function" && !sim.IsOptionMenuVisible()) { return null; }
+
+            var getCtrlAbsPos = function (ctrl) {
+                if (!ctrl) { return [0, 0]; }
+                if (typeof ctrl.GetAbsolutePosition === "function") {
+                    try {
+                        var p = ctrl.GetAbsolutePosition();
+                        if (p && p.length >= 2 && isFinite(p[0]) && isFinite(p[1])) {
+                            return [p[0], p[1]];
+                        }
+                    } catch (_e) {}
+                }
+                return [Number(ctrl.mLeft || 0), Number(ctrl.mTop || 0)];
+            };
+
+            var containsCtrl = function (root, target) {
+                var cur = target;
+                while (cur) {
+                    if (cur === root) { return true; }
+                    cur = cur.mParentControl;
+                }
+                return false;
+            };
+
+            var hasPanelStyle = function (ctrl) {
+                if (!ctrl) { return false; }
+                var cls = (ctrl.mRootElement && ctrl.mRootElement.className) ? String(ctrl.mRootElement.className) : "";
+                if (cls.indexOf("Panel_flatFill_Bottom") !== -1) { return true; }
+                if (ctrl.mStyleList && ctrl.mStyleList.length) {
+                    var si;
+                    for (si = 0; si < ctrl.mStyleList.length; si += 1) {
+                        if (ctrl.mStyleList[si] && String(ctrl.mStyleList[si]).indexOf("Panel_flatFill_Bottom") !== -1) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            var panelCtrl = null;
+            var mc = menuCtrl.mChildren || [];
+            var i;
+            for (i = 0; i < mc.length; i += 1) {
+                if (isCtrlVisible(mc[i]) && mc[i].mRootElement && hasPanelStyle(mc[i]) &&
+                    typeof mc[i].mWidth === "number" && typeof mc[i].mHeight === "number" &&
+                    mc[i].mWidth >= 200 && mc[i].mWidth <= 800 && mc[i].mHeight >= 120) {
+                    panelCtrl = mc[i];
+                    break;
+                }
+            }
+            if (!panelCtrl) { return null; }
+
+            var buttons = [];
+            var collectButtons = function (ctrl) {
+                if (!ctrl || !isCtrlVisible(ctrl)) { return; }
+                if (ctrl.mRootElement && !isSimoderNode(ctrl.mRootElement)) {
+                    var cls = ctrl.mRootElement.className ? String(ctrl.mRootElement.className) : "";
+                    if (cls.indexOf("cButton") !== -1 &&
+                        typeof ctrl.mWidth === "number" && typeof ctrl.mHeight === "number" &&
+                        ctrl.mWidth >= 120 && ctrl.mHeight >= 20 && ctrl.mHeight <= 64) {
+                        buttons.push({ ctrl: ctrl, pos: getCtrlAbsPos(ctrl) });
+                    }
+                }
+                if (ctrl.mChildren && ctrl.mChildren.length) {
+                    var ci;
+                    for (ci = 0; ci < ctrl.mChildren.length; ci += 1) {
+                        collectButtons(ctrl.mChildren[ci]);
+                    }
+                }
+            };
+            collectButtons(panelCtrl);
+            if (!buttons.length) { return null; }
+
+            var settingsCtrl = mgr.FindControlByID(212665064);
+            if (!settingsCtrl || !isCtrlVisible(settingsCtrl) || !settingsCtrl.mRootElement || !containsCtrl(panelCtrl, settingsCtrl)) {
+                var topmost = buttons[0];
+                for (i = 1; i < buttons.length; i += 1) {
+                    if (buttons[i].pos[1] < topmost.pos[1]) {
+                        topmost = buttons[i];
+                    }
+                }
+                settingsCtrl = topmost.ctrl;
+            }
+
+            var topGroupCtrl = settingsCtrl.mParentControl || panelCtrl;
+            var settingsPos = getCtrlAbsPos(settingsCtrl);
+            var nextBelowY = null;
+            for (i = 0; i < buttons.length; i += 1) {
+                if (buttons[i].ctrl === settingsCtrl) { continue; }
+                if (topGroupCtrl !== panelCtrl && !containsCtrl(topGroupCtrl, buttons[i].ctrl)) { continue; }
+                if (Math.abs(buttons[i].pos[0] - settingsPos[0]) <= 8 && buttons[i].pos[1] > settingsPos[1] + 4) {
+                    if (nextBelowY === null || buttons[i].pos[1] < nextBelowY) {
+                        nextBelowY = buttons[i].pos[1];
                     }
                 }
             }
-            if (!bestRect) { return null; }
-            return { menuEl: menuEl, menuRect: menuRect, btnRect: bestRect, viewH: viewH };
+            var pitch = Math.round(settingsCtrl.mHeight + 6);
+            if (nextBelowY !== null) {
+                var diff = Math.round(nextBelowY - settingsPos[1]);
+                if (diff >= 28 && diff <= 64) {
+                    pitch = diff;
+                }
+            }
+
+            return {
+                panelCtrl: panelCtrl,
+                topGroupCtrl: topGroupCtrl,
+                templateBtn: settingsCtrl,
+                pitch: pitch,
+                width: settingsCtrl.mWidth,
+                height: settingsCtrl.mHeight
+            };
+        };
+
+        var mountVanillaEscButton = function (container, esc) {
+            if (!container || !esc || !esc.panelCtrl || !esc.panelCtrl.mRootElement || !esc.templateBtn || !esc.templateBtn.mRootElement || !container.querySelector) {
+                removeVanillaEscButton();
+                if (container && container.style) { container.style.display = "none"; }
+                return false;
+            }
+            var btn = container.querySelector(".simoder-btn");
+            if (!btn) {
+                removeVanillaEscButton();
+                container.style.display = "none";
+                return false;
+            }
+
+            var setCtrlTop = function (ctrl, targetTop) {
+                if (!ctrl) { return; }
+                var curTop = Number(ctrl.mTop || 0);
+                if (Math.abs(curTop - targetTop) <= 0.5) { return; }
+                if (typeof ctrl.SetPosition === "function") {
+                    ctrl.SetPosition(ctrl.mLeft, targetTop, ctrl.mWidth, ctrl.mHeight);
+                } else if (typeof ctrl.SetTop === "function") {
+                    ctrl.SetTop(targetTop);
+                }
+            };
+
+            if (typeof esc.templateBtn.__simoderOrigTop !== "number") {
+                esc.templateBtn.__simoderOrigTop = Number(esc.templateBtn.mTop || 0);
+            }
+            var settingsOrigTop = esc.templateBtn.__simoderOrigTop;
+            var mountHostCtrl = esc.panelCtrl;
+            var cloneLeft = Math.round((Number(esc.templateBtn.mLeft || 0)) * 10) / 10;
+            var cloneTop = Math.round((settingsOrigTop + esc.pitch) * 10) / 10;
+
+            if (esc.topGroupCtrl && esc.topGroupCtrl !== esc.panelCtrl && esc.topGroupCtrl.mRootElement) {
+                mountHostCtrl = esc.topGroupCtrl;
+                if (typeof esc.topGroupCtrl.__simoderOrigTop !== "number") {
+                    esc.topGroupCtrl.__simoderOrigTop = Number(esc.topGroupCtrl.mTop || 0);
+                }
+                if (typeof esc.topGroupCtrl.__simoderOrigHeight !== "number") {
+                    esc.topGroupCtrl.__simoderOrigHeight = Number(esc.topGroupCtrl.mHeight || 0);
+                }
+                var topGroupOrigTop = esc.topGroupCtrl.__simoderOrigTop;
+                var topGroupOrigHeight = esc.topGroupCtrl.__simoderOrigHeight;
+
+                var gKids = esc.topGroupCtrl.mChildren || [];
+                var gi, gCh, gOrigTop;
+                for (gi = 0; gi < gKids.length; gi += 1) {
+                    gCh = gKids[gi];
+                    if (!gCh || gCh === esc.templateBtn || (gCh.mRootElement && isSimoderNode(gCh.mRootElement))) { continue; }
+                    if (typeof gCh.__simoderOrigTop !== "number") {
+                        gCh.__simoderOrigTop = Number(gCh.mTop || 0);
+                    }
+                    gOrigTop = gCh.__simoderOrigTop;
+                    if (gOrigTop > settingsOrigTop + 1) {
+                        setCtrlTop(gCh, gOrigTop + esc.pitch);
+                    }
+                }
+
+                var targetTopGroupHeight = Math.round(topGroupOrigHeight + esc.pitch);
+                if (typeof esc.topGroupCtrl.SetHeight === "function" && typeof esc.topGroupCtrl.mHeight === "number" &&
+                    Math.abs(esc.topGroupCtrl.mHeight - targetTopGroupHeight) > 1) {
+                    esc.topGroupCtrl.SetHeight(targetTopGroupHeight);
+                }
+
+                var thresholdY = topGroupOrigTop + topGroupOrigHeight - 4;
+                var pKids = esc.panelCtrl.mChildren || [];
+                var maxPanelBottom = topGroupOrigTop + targetTopGroupHeight;
+                var pi, pCh, pOrigTop, pTargetTop, pBottom;
+                for (pi = 0; pi < pKids.length; pi += 1) {
+                    pCh = pKids[pi];
+                    if (!pCh || pCh === esc.topGroupCtrl || (pCh.mRootElement && isSimoderNode(pCh.mRootElement))) { continue; }
+                    if (typeof pCh.__simoderOrigTop !== "number") {
+                        pCh.__simoderOrigTop = Number(pCh.mTop || 0);
+                    }
+                    pOrigTop = pCh.__simoderOrigTop;
+                    pTargetTop = pOrigTop >= thresholdY ? (pOrigTop + esc.pitch) : pOrigTop;
+                    if (pOrigTop >= thresholdY) {
+                        setCtrlTop(pCh, pTargetTop);
+                    }
+                    if (pCh.mIsVisible !== false && typeof pCh.mHeight === "number") {
+                        pBottom = pTargetTop + pCh.mHeight;
+                        if (pBottom > maxPanelBottom) {
+                            maxPanelBottom = pBottom;
+                        }
+                    }
+                }
+
+                var targetPanelHeight = Math.round(maxPanelBottom);
+                if (typeof esc.panelCtrl.SetHeight === "function" && typeof esc.panelCtrl.mHeight === "number" &&
+                    Math.abs(esc.panelCtrl.mHeight - targetPanelHeight) > 1) {
+                    esc.panelCtrl.SetHeight(targetPanelHeight);
+                }
+            }
+
+            var lblInfo = extractTriggerLabelAndBadge(btn, "Mods");
+            var labelText = lblInfo.label;
+            var badgeText = lblInfo.badge;
+            var parentEl = mountHostCtrl.mRootElement;
+            var clone = doc.getElementById("simoder-esc-vanilla-mods");
+            if (!clone || clone.parentNode !== parentEl ||
+                clone.getAttribute("data-simoder-vanilla-label") !== labelText ||
+                clone.getAttribute("data-simoder-vanilla-badge") !== badgeText) {
+                removeVanillaEscButton();
+                clone = esc.templateBtn.mRootElement.cloneNode(true);
+                populateVanillaCloneContent(clone, labelText, badgeText);
+                clone.id = "simoder-esc-vanilla-mods";
+                clone.setAttribute("data-simoder-slot", "esc.vanilla.clone");
+                clone.setAttribute("data-simoder-vanilla-label", labelText);
+                clone.setAttribute("data-simoder-vanilla-badge", badgeText);
+                parentEl.appendChild(clone);
+            }
+
+            if (clone.style) {
+                clone.style.position = "absolute";
+                clone.style.left = cloneLeft + "px";
+                clone.style.top = cloneTop + "px";
+                clone.style.right = "auto";
+                clone.style.bottom = "auto";
+                clone.style.width = Math.round(esc.width) + "px";
+                clone.style.height = Math.round(esc.height) + "px";
+                clone.style.cursor = "pointer";
+                clone.style.pointerEvents = "auto";
+                clone.style.visibility = "visible";
+                clone.style.opacity = "1";
+                clone.style.zIndex = "10";
+                if (!clone.style.display || clone.style.display === "none") {
+                    clone.style.display = "inline";
+                }
+            }
+
+            bindVanillaButtonClone(clone, esc.templateBtn, btn);
+            container.style.display = "none";
+            return true;
         };
 
         var positionSlotContainer = function (container, viewName, slotName) {
             if (!container || !container.style) { return; }
             if (slotName === "region.actions") {
+                syncRegionTileButtons(container);
                 var preview = findActiveRegionPreview();
                 if (!preview) {
                     container.style.display = "none";
@@ -750,22 +1118,10 @@
                 var esc = findInGameEscapeMenu();
                 if (!esc) {
                     container.style.display = "none";
+                    removeVanillaEscButton();
                     return;
                 }
-                var escGap = 8;
-                if (esc.menuEl.style && esc.menuEl.getAttribute("data-simoder-esc-expanded") !== "1") {
-                    if (esc.btnRect.bottom + escGap + esc.btnRect.height > esc.menuRect.bottom - 6) {
-                        esc.menuEl.style.height = Math.round(esc.menuRect.height + esc.btnRect.height + escGap) + "px";
-                        esc.menuEl.setAttribute("data-simoder-esc-expanded", "1");
-                    }
-                }
-                container.style.display = "block";
-                container.style.left = Math.round(esc.btnRect.left) + "px";
-                container.style.right = "auto";
-                container.style.top = Math.round(esc.btnRect.bottom + escGap) + "px";
-                container.style.bottom = "auto";
-                container.style.width = Math.round(esc.btnRect.width) + "px";
-                container.style.height = Math.round(esc.btnRect.height) + "px";
+                mountVanillaEscButton(container, esc);
             }
         };
 
@@ -944,7 +1300,7 @@
             } else {
                 el = doc.createElement("div");
                 if (kind === "modal") {
-                    el.className = "simoder-modal";
+                    el.className = "simoder-modal Panel_Background";
                     var vw = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
                     if (vw > 0 && vw < 720 && el.style) {
                         el.style.width = "auto";
@@ -954,7 +1310,7 @@
                     }
                     if (node.label || node.action) {
                         var hdrBar = doc.createElement("div");
-                        hdrBar.className = "simoder-modal-header";
+                        hdrBar.className = "simoder-modal-header Panel_Header FE_Header_BG";
                         hdrBar.textContent = node.label || "";
                         if (node.action) {
                             var closeBtn = doc.createElement("button");
@@ -974,7 +1330,7 @@
                     childHost.className = "simoder-modal-body";
                     el.appendChild(childHost);
                 } else {
-                    el.className = kind === "row" ? "simoder-row" : (node.tone === "scroll" ? "simoder-panel simoder-panel-scroll" : "simoder-panel");
+                    el.className = kind === "row" ? "simoder-row" : (node.tone === "scroll" ? "simoder-panel simoder-panel-scroll Browse_Tile_Recessed_SharpCorners" : "simoder-panel Browse_Tile_Recessed_SharpCorners");
                     if (node.label) {
                         var hdr = doc.createElement("div");
                         hdr.className = "simoder-text-title";
@@ -1085,6 +1441,10 @@
                 }
                 if (phase === "main.menu" && (p.slot || "menu.actions") === "menu.actions") {
                     mountVanillaHubButton(container, findMainMenuHubColumn());
+                } else if (phase === "main.menu" && p.slot === "region.actions") {
+                    syncRegionTileButtons(container);
+                } else if (phase === "ingame.options" && (p.slot || "menu.actions") === "menu.actions") {
+                    mountVanillaEscButton(container, findInGameEscapeMenu());
                 }
             }
             host.revision = packet.revision;
