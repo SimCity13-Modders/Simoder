@@ -41,8 +41,8 @@ use crate::win32_native::{
     shutdown_admitted_native_owners,
 };
 use crate::win32_window_dispatch::{
-    bind_game_window, configure_ui_tick, find_primary_game_window, is_window_dispatch_drained,
-    set_modal_overlay_active, shutdown_window_dispatch,
+    bind_game_window, configure_ui_tick, current_bound_window, find_primary_game_window,
+    is_window_dispatch_drained, set_modal_overlay_active, shutdown_window_dispatch,
 };
 
 type HModule = *mut c_void;
@@ -456,11 +456,9 @@ fn run_bootstrap_worker() {
                     );
                 } else {
                     configure_ui_tick(on_ui_sync_tick);
-                    for _ in 0..160 {
-                        if LOADER_STOPPING.load(Ordering::Acquire) {
-                            break;
-                        }
+                    while !LOADER_STOPPING.load(Ordering::Acquire) {
                         if let Some(hwnd) = find_primary_game_window()
+                            && hwnd != current_bound_window()
                             && bind_game_window(hwnd)
                         {
                             emit_log(
@@ -469,7 +467,6 @@ fn run_bootstrap_worker() {
                                 "simoder.ui",
                                 &format!("Attached UI sync dispatcher to game HWND 0x{hwnd:X}"),
                             );
-                            break;
                         }
                         std::thread::sleep(Duration::from_millis(250));
                     }

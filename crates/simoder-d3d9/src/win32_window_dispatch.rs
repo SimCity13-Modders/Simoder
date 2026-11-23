@@ -17,7 +17,6 @@ type Handle = *mut c_void;
 type Hwnd = *mut c_void;
 
 const GWLP_WNDPROC: i32 = -4;
-const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
 const WM_NCDESTROY: u32 = 0x0082;
 const WM_NCHITTEST: u32 = 0x0084;
@@ -206,12 +205,8 @@ unsafe extern "system" fn router_wndproc(
         && unsafe { GetCurrentThreadId() } == CURRENT_TID.load(Ordering::Acquire);
 
     if attached {
-        if msg == WM_CLOSE || msg == WM_DESTROY || msg == WM_NCDESTROY {
-            DISPATCH_CLOSED.store(true, Ordering::Release);
-            // SAFETY: Kills our timer on lifecycle close.
-            unsafe {
-                let _ = KillTimer(hwnd, SIMODER_UI_TIMER_ID);
-            }
+        if msg == WM_DESTROY || msg == WM_NCDESTROY {
+            detach_bound_window(hwnd_val);
         } else if msg == WM_APP_SIMODER_SYNC || (msg == WM_TIMER && wparam == SIMODER_UI_TIMER_ID) {
             drain_pending_js_evals(hwnd_val);
             if let Some(cb) = *callback_slot().lock() {
@@ -311,6 +306,37 @@ pub fn find_primary_game_window() -> Option<usize> {
     (search.best_hwnd != 0).then_some(search.best_hwnd)
 }
 
+/// Return the currently bound primary game window `HWND`, or `0` when none is bound.
+pub fn current_bound_window() -> usize {
+    CURRENT_HWND.load(Ordering::Acquire)
+}
+
+fn detach_bound_window(hwnd_val: usize) {
+    if hwnd_val == 0 {
+        return;
+    }
+    if CURRENT_HWND
+        .compare_exchange(hwnd_val, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    CURRENT_TID.store(0, Ordering::Release);
+    let orig = ORIGINAL_WNDPROC.swap(0, Ordering::AcqRel);
+    let hwnd = hwnd_val as Hwnd;
+    // SAFETY: Detaches only if our `router_wndproc` remains topmost.
+    unsafe {
+        let _ = KillTimer(hwnd, SIMODER_UI_TIMER_ID);
+        let _ = RemovePropW(hwnd, prop_name().as_ptr());
+        if IsWindow(hwnd) != 0 {
+            let router_ptr: WndProcFn = router_wndproc;
+            if get_wnd_long(hwnd, GWLP_WNDPROC) == ((router_ptr as usize) as isize) && orig != 0 {
+                let _ = set_wnd_long(hwnd, GWLP_WNDPROC, orig);
+            }
+        }
+    }
+}
+
 /// Safely subclass `hwnd_val` once, stamp chain marker property, and start a 250ms UI sync timer.
 pub fn bind_game_window(hwnd_val: usize) -> bool {
     if hwnd_val == 0 || DISPATCH_CLOSED.load(Ordering::Acquire) {
@@ -319,6 +345,9 @@ pub fn bind_game_window(hwnd_val: usize) -> bool {
     let existing = CURRENT_HWND.load(Ordering::Acquire);
     if existing == hwnd_val {
         return true;
+    }
+    if existing != 0 {
+        detach_bound_window(existing);
     }
     let hwnd = hwnd_val as Hwnd;
     // SAFETY: Verify valid in-process window before subclassing.
