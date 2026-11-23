@@ -166,8 +166,9 @@
                 ".simoder-divider{position:static;width:100%;height:1px;border:0;border-top:1px solid #d0dce8;margin:8px 0;}" +
                 ".simoder-field{margin:6px 0;}" +
                 ".simoder-field-label{position:static;display:block;width:auto;height:auto;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;color:#30465b;margin-bottom:3px;text-align:left;}" +
-                ".simoder-input,.simoder-select{position:static;width:100%;box-sizing:border-box;padding:5px 8px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;color:#1d2e3d;background:#ffffff;border:1px solid #9ab0c4;border-radius:3px;box-shadow:inset 0 1px 2px rgba(15,30,45,0.08);}" +
-                ".simoder-input:focus,.simoder-select:focus{outline:none;border-color:#2ca7e6;}" +
+                ".simoder-input,.simoder-select{-webkit-appearance:none;position:static;width:100%;box-sizing:border-box;padding:5px 8px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;color:#1d2e3d;background:#ffffff;border:1px solid #9ab0c4;border-radius:3px;box-shadow:inset 0 1px 2px rgba(15,30,45,0.08);-webkit-user-select:text !important;user-select:text !important;pointer-events:auto !important;cursor:text;}" +
+                ".simoder-select{cursor:pointer;}" +
+                ".simoder-input:focus,.simoder-select:focus{outline:none;border-color:#2ca7e6;box-shadow:0 0 0 2px rgba(44,167,230,0.28);}" +
                 ".simoder-slider{width:100%;vertical-align:middle;cursor:pointer;}" +
                 ".simoder-checkbox-wrap{display:inline-block;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;color:#1d2e3d;cursor:pointer;margin:4px 0;}" +
                 ".simoder-checkbox-wrap input{vertical-align:middle;margin-right:6px;}" +
@@ -177,7 +178,27 @@
                 ".simoder-tab-btn:hover{background:#e9f2fb;color:#132536;border-color:#5ea8d6;}" +
                 ".simoder-tab-btn-active{height:30px;line-height:27px;background:#ffffff;background-image:none;color:#132536;border:1px solid #2ca7e6;border-top:2px solid #2ca7e6;border-bottom:2px solid #ffffff;-webkit-border-image:none;-webkit-border-top-left-radius:4px;-webkit-border-top-right-radius:4px;-webkit-border-bottom-left-radius:0;-webkit-border-bottom-right-radius:0;border-radius:4px 4px 0 0;margin-bottom:-2px;}" +
                 ".simoder-progress-track{position:static;width:100%;height:14px;background:#d3dde7;border:1px solid #9cb0c4;border-radius:3px;overflow:hidden;box-sizing:border-box;}" +
-                ".simoder-progress-fill{height:100%;background:#48bf34;background-image:-webkit-gradient(linear,left top,left bottom,from(#72df5c),to(#369f22));}";
+                ".simoder-progress-fill{height:100%;background:#48bf34;background-image:-webkit-gradient(linear,left top,left bottom,from(#72df5c),to(#369f22));}" +
+                ".block{display:block;}.inline-block{display:inline-block;}.hidden{display:none;}" +
+                ".text-left{text-align:left;}.text-center{text-align:center;}.text-right{text-align:right;}" +
+                ".font-bold{font-weight:bold;}.font-normal{font-weight:normal;}.uppercase{text-transform:uppercase;}" +
+                ".text-xs{font-size:11px;}.text-sm{font-size:12px;}.text-base{font-size:14px;}" +
+                ".truncate{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
+                ".w-full{width:100%;box-sizing:border-box;}.w-half{width:50%;box-sizing:border-box;}" +
+                ".rounded-none{-webkit-border-radius:0;border-radius:0;}" +
+                ".rounded-sm{-webkit-border-radius:2px;border-radius:2px;}" +
+                ".rounded-md{-webkit-border-radius:4px;border-radius:4px;}" +
+                ".rounded-full{-webkit-border-radius:999px;border-radius:999px;}" +
+                ".opacity-50{opacity:0.5;}.opacity-75{opacity:0.75;}.opacity-100{opacity:1;}" +
+                ".p-0{padding:0;}.p-1{padding:4px;}.p-2{padding:8px;}.p-3{padding:12px;}.p-4{padding:16px;}" +
+                ".px-0{padding-left:0;padding-right:0;}.px-1{padding-left:4px;padding-right:4px;}.px-2{padding-left:8px;padding-right:8px;}.px-3{padding-left:12px;padding-right:12px;}.px-4{padding-left:16px;padding-right:16px;}" +
+                ".py-0{padding-top:0;padding-bottom:0;}.py-1{padding-top:4px;padding-bottom:4px;}.py-2{padding-top:8px;padding-bottom:8px;}.py-3{padding-top:12px;padding-bottom:12px;}.py-4{padding-top:16px;padding-bottom:16px;}" +
+                ".m-0{margin:0;}.m-1{margin:4px;}.m-2{margin:8px;}.m-3{margin:12px;}.m-4{margin:16px;}" +
+                ".mt-0{margin-top:0;}.mt-1{margin-top:4px;}.mt-2{margin-top:8px;}.mt-3{margin-top:12px;}.mt-4{margin-top:16px;}" +
+                ".mb-0{margin-bottom:0;}.mb-1{margin-bottom:4px;}.mb-2{margin-bottom:8px;}.mb-3{margin-bottom:12px;}.mb-4{margin-bottom:16px;}" +
+                ".ml-0{margin-left:0;}.ml-1{margin-left:4px;}.ml-2{margin-left:8px;}.ml-3{margin-left:12px;}.ml-4{margin-left:16px;}" +
+                ".mr-0{margin-right:0;}.mr-1{margin-right:4px;}.mr-2{margin-right:8px;}.mr-3{margin-right:12px;}.mr-4{margin-right:16px;}" +
+                ".gap-1>*{margin-right:4px;}.gap-2>*{margin-right:8px;}.gap-3>*{margin-right:12px;}.gap-4>*{margin-right:16px;}";
             var existingStyle = doc.getElementById("simoder-ui-styles");
             if (existingStyle) {
                 if (existingStyle.textContent !== cssText) {
@@ -1276,11 +1297,61 @@
                 el = makeFieldWrapper(node.label);
                 var inp = doc.createElement("input");
                 inp.type = "text"; inp.className = "simoder-input Browse_Tile_Recessed_SharpCorners Body_12_Left"; inp.value = node.value || "";
+                inp.tabIndex = 0; inp.readOnly = false;
                 if (node.placeholder) { inp.placeholder = node.placeholder; }
                 if (node.disabled === true) { inp.disabled = true; }
                 (function (pId, act, tId, c) {
-                    c.onchange = function () { pushEvent(pId, act || "change", tId, c.value); };
-                    c.onkeydown = function (e) { if ((e ? (e.keyCode || e.which) : 0) === 13) pushEvent(pId, act || "change", tId, c.value); };
+                    var stopEv = function (e) {
+                        if (e && e.stopPropagation) { e.stopPropagation(); }
+                        if (e) { e.cancelBubble = true; }
+                    };
+                    var commitVal = function () {
+                        if (c.__simoderInputTimer && typeof window.clearTimeout === "function") {
+                            window.clearTimeout(c.__simoderInputTimer);
+                            c.__simoderInputTimer = null;
+                        }
+                        pushEvent(pId, act || "change", tId, c.value);
+                    };
+                    c.onmousedown = function (e) {
+                        stopEv(e);
+                        try { c.focus(); } catch (_e) {}
+                        if (typeof window.setTimeout === "function") {
+                            window.setTimeout(function () { try { c.focus(); } catch (_e) {} }, 0);
+                        }
+                    };
+                    c.onmouseup = stopEv;
+                    c.onselectstart = stopEv;
+                    c.onclick = function (e) {
+                        stopEv(e);
+                        try { c.focus(); } catch (_e) {}
+                    };
+                    c.oninput = function () {
+                        if (typeof window.setTimeout === "function") {
+                            if (c.__simoderInputTimer && typeof window.clearTimeout === "function") {
+                                window.clearTimeout(c.__simoderInputTimer);
+                            }
+                            c.__simoderInputTimer = window.setTimeout(function () {
+                                c.__simoderInputTimer = null;
+                                pushEvent(pId, act || "change", tId, c.value);
+                            }, 300);
+                        } else {
+                            commitVal();
+                        }
+                    };
+                    c.onchange = commitVal;
+                    c.onkeydown = function (e) {
+                        var code = e ? (e.keyCode || e.which) : 0;
+                        if (code !== 27) { stopEv(e); }
+                        if (code === 13) { commitVal(); }
+                    };
+                    c.onkeypress = function (e) {
+                        var code = e ? (e.keyCode || e.which) : 0;
+                        if (code !== 27) { stopEv(e); }
+                    };
+                    c.onkeyup = function (e) {
+                        var code = e ? (e.keyCode || e.which) : 0;
+                        if (code !== 27) { stopEv(e); }
+                    };
                 }(patchId, node.action, node.id, inp));
                 el.appendChild(inp);
             } else if (kind === "select") {
@@ -1376,6 +1447,10 @@
                 el = doc.createElement("div");
                 if (kind === "modal") {
                     el.className = "simoder-modal Panel_flatFill_Bottom Panel_Background";
+                    el.onmousedown = function (e) {
+                        if (e && e.stopPropagation) { e.stopPropagation(); }
+                        if (e) { e.cancelBubble = true; }
+                    };
                     var vw = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
                     var vh = window.innerHeight || (doc.documentElement && doc.documentElement.clientHeight) || 720;
                     if (el.style) {
@@ -1496,6 +1571,22 @@
 
         if (needsReconcile) {
             ensureStyles();
+            var focusRestore = null;
+            var activeEl = doc.activeElement || null;
+            if (activeEl && activeEl.tagName === "INPUT" && (!activeEl.type || String(activeEl.type).toLowerCase() === "text")) {
+                var curTarget = activeEl;
+                while (curTarget && curTarget.getAttribute && !curTarget.getAttribute("data-simoder-target")) {
+                    curTarget = curTarget.parentNode;
+                }
+                if (curTarget && curTarget.getAttribute && curTarget.getAttribute("data-simoder-target")) {
+                    focusRestore = {
+                        target: String(curTarget.getAttribute("data-simoder-target")),
+                        value: String(activeEl.value),
+                        start: activeEl.selectionStart,
+                        end: activeEl.selectionEnd
+                    };
+                }
+            }
             host.activeModalClose = null;
             // Remove any existing Simoder slot wrappers whose view no longer matches `phase`,
             // and rebuild active slot wrappers cleanly for deterministic composition order.
@@ -1547,6 +1638,27 @@
             host.revision = packet.revision;
             host.reloadGen = reqReloadGen;
             host.lastPhase = phase;
+            if (focusRestore && doc.querySelector) {
+                var restoredWrap = doc.querySelector("[data-simoder-target='" + focusRestore.target.replace(/'/g, "") + "']");
+                var restoredInp = restoredWrap && restoredWrap.querySelector ? restoredWrap.querySelector("input") : null;
+                if (restoredInp && typeof restoredInp.focus === "function") {
+                    try {
+                        // The Luau re-render carries a stale (debounced) query; keep what the user actually typed.
+                        if (typeof focusRestore.value === "string" && restoredInp.value !== focusRestore.value) {
+                            restoredInp.value = focusRestore.value;
+                        }
+                        restoredInp.focus();
+                        if (typeof focusRestore.start === "number" && typeof restoredInp.setSelectionRange === "function") {
+                            var rStart = focusRestore.start;
+                            var rEnd = typeof focusRestore.end === "number" ? focusRestore.end : rStart;
+                            var valLen = (typeof restoredInp.value === "string") ? restoredInp.value.length : 0;
+                            if (rStart > valLen) { rStart = valLen; }
+                            if (rEnd > valLen) { rEnd = valLen; }
+                            restoredInp.setSelectionRange(rStart, rEnd);
+                        }
+                    } catch (_e) {}
+                }
+            }
         }
 
         var drained = host.events.splice(0, host.events.length);

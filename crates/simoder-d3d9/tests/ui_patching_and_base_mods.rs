@@ -720,3 +720,175 @@ fn base_hot_reload_swaps_scripts_and_applicator_and_rejects_broken_edits() {
     host.tick_ui()
         .expect("previous working Luau VM must remain functional after failed hot reload");
 }
+
+#[test]
+fn jsx_runtime_emits_valid_ui_nodes_with_tailwind_and_native_classes_and_renders_in_applicator() {
+    let jsx_src = std::fs::read_to_string(simoder_base_dir().join("ui/jsx-runtime.js"))
+        .expect("Simoder-Base/ui/jsx-runtime.js must exist");
+    let stripped = jsx_src.replace("\nexport ", "\n").replace("export ", "");
+
+    let rt = Runtime::new().unwrap();
+    let ctx = Context::full(&rt).unwrap();
+    let node_json: String = ctx.with(|ctx| {
+        let script = format!(
+            r#"
+            const __jsxRt = (function () {{
+                {stripped}
+                return {{ jsx, jsxs, Fragment, Modal, Tabs, Tab, Panel, PrimaryButton, Text, NativeClasses }};
+            }})();
+            const {{ jsx, jsxs, Fragment, Modal, Tabs, Tab, Panel, PrimaryButton, Text, NativeClasses }} = __jsxRt;
+
+            function DemoBody(props) {{
+                return jsxs(Fragment, {{
+                    children: [
+                        jsx(Text, {{ className: "text-sm font-bold mb-2", children: props.heading }}),
+                        jsx(Panel, {{
+                            id: "demo_panel",
+                            className: "p-2 mb-2 " + NativeClasses.RecessedTile,
+                            children: jsx(Text, {{ text: "Vanilla & Tailwind" }}),
+                        }}),
+                    ],
+                }});
+            }}
+
+            const tree = jsx(Modal, {{
+                id: "demo_modal",
+                title: "TSX Demo",
+                closeAction: "close_demo",
+                className: NativeClasses.PanelBackground,
+                footer: [jsx(PrimaryButton, {{ id: "ok_btn", label: "OK", action: "confirm_demo", className: "px-3" }})],
+                children: jsx(Tabs, {{
+                    id: "demo_tabs",
+                    activeTab: "main",
+                    action: "switch_tab",
+                    children: jsx(Tab, {{
+                        id: "main",
+                        label: "Main",
+                        children: jsx(DemoBody, {{ heading: "Hello JSX" }}),
+                    }}),
+                }}),
+            }});
+
+            JSON.stringify(tree);
+            "#
+        );
+        ctx.eval::<String, _>(script.as_str())
+            .expect("JSX runtime script must evaluate cleanly")
+    });
+
+    let node: simoder_mods::UiNode =
+        serde_json::from_str(&node_json).expect("JSX output must deserialize into UiNode");
+    let mut registry = simoder_mods::UiPatchRegistry::new();
+    registry
+        .register_patch(simoder_mods::UiPatchDescriptor {
+            patch_id: "jsx.demo.modal".into(),
+            owner_mod_id: "jsx.demo".into(),
+            owner_generation: 1,
+            view: "launcher.menu".into(),
+            slot: "modal.overlay".into(),
+            op: simoder_mods::UiPatchOp::Append,
+            target: None,
+            priority: 10,
+            node,
+        })
+        .expect("JSX UiNode must pass simoder-mods validation");
+    let (rev, composed, conflicts) = registry.composed_patches_for_view("launcher.menu");
+    assert!(conflicts.is_empty());
+    let sync_pkt = build_sync_packet(rev, &composed).unwrap();
+
+    let dom_rt = Runtime::new().unwrap();
+    let dom_ctx = Context::full(&dom_rt).unwrap();
+    dom_ctx.with(|ctx| {
+        let dom_shim = r#"
+            var __nodesById = {};
+            function makeEl(tag) {
+                var el = {
+                    tagName: String(tag).toUpperCase(),
+                    _id: '',
+                    className: '',
+                    textContent: '',
+                    style: {},
+                    attrs: {},
+                    children: [],
+                    childNodes: [],
+                    parentNode: null,
+                    setAttribute: function (k, v) { this.attrs[k] = String(v); },
+                    getAttribute: function (k) { return this.attrs[k] !== undefined ? this.attrs[k] : null; },
+                    appendChild: function (c) { c.parentNode = this; this.children.push(c); this.childNodes.push(c); return c; },
+                    removeChild: function (c) {
+                        var idx = this.children.indexOf(c);
+                        if (idx !== -1) { this.children.splice(idx, 1); this.childNodes.splice(idx, 1); }
+                        c.parentNode = null;
+                    },
+                    querySelectorAll: function (sel) {
+                        if (sel === '[data-simoder-slot]') {
+                            var res = [];
+                            function walk(n) {
+                                if (n.attrs && n.attrs['data-simoder-slot']) res.push(n);
+                                for (var i = 0; i < n.children.length; i += 1) walk(n.children[i]);
+                            }
+                            walk(this);
+                            return res;
+                        }
+                        return [];
+                    },
+                    querySelector: function () { return null; }
+                };
+                Object.defineProperty(el, 'id', {
+                    get: function () { return this._id; },
+                    set: function (v) { this._id = String(v); if (v) __nodesById[this._id] = this; }
+                });
+                return el;
+            }
+            var doc = {
+                head: makeEl('head'),
+                body: makeEl('body'),
+                documentElement: { clientWidth: 1280, clientHeight: 720 },
+                createElement: function (t) { return makeEl(t); },
+                getElementById: function (id) { return __nodesById[id] || null; },
+                querySelectorAll: function (sel) { return doc.body.querySelectorAll(sel); }
+            };
+            var window = {
+                document: doc,
+                innerWidth: 1280,
+                innerHeight: 720,
+                simcity: { gUpdater: {} },
+                Client: { RequestUpdaterData: function () {} },
+                scrui: { gUIManager: { mLocaleManager: { mLocaleCode: 'en-us' } } }
+            };
+            var document = doc;
+        "#;
+        ctx.eval::<(), _>(dom_shim).unwrap();
+        let invoke_expr = format!("var __simoderApply = {UI_PATCH_APPLICATOR_ES5};");
+        ctx.eval::<(), _>(invoke_expr.as_str()).unwrap();
+        let apply_fn: rquickjs::Function = ctx.globals().get("__simoderApply").unwrap();
+        let raw: String = apply_fn.call((sync_pkt.as_str(),)).unwrap();
+        let reply = parse_sync_reply(&raw).unwrap();
+        assert!(reply.ok);
+
+        ctx.eval::<(), _>(
+            r#"
+            var modal = document.getElementById('simoder-patch-jsx.demo.modal');
+            if (!modal) throw new Error('missing JSX modal');
+            if (modal.className.indexOf('Panel_Background') === -1) throw new Error('missing Panel_Background');
+            var styleTag = document.getElementById('simoder-ui-styles');
+            if (!styleTag || styleTag.textContent.indexOf('.p-2{padding:8px;}') === -1) {
+                throw new Error('missing Tailwind subset CSS in applicator');
+            }
+            function findTarget(n, t) {
+                if (n.attrs && n.attrs['data-simoder-target'] === t) return n;
+                for (var i = 0; i < n.children.length; i += 1) {
+                    var found = findTarget(n.children[i], t);
+                    if (found) return found;
+                }
+                return null;
+            }
+            var panel = findTarget(modal, 'demo_panel');
+            if (!panel || panel.className.indexOf('p-2 mb-2 Browse_Tile_Recessed_SharpCorners') === -1) {
+                throw new Error('missing Tailwind + NativeClasses on JSX panel: ' + (panel ? panel.className : 'null'));
+            }
+            "#,
+        )
+        .expect("rendered JSX DOM must preserve both NativeClasses and Tailwind utility classes");
+    });
+}
