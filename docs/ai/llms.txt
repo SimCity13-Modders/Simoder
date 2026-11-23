@@ -1,0 +1,14 @@
+# Simoder AI engineering
+
+> Version 1.0. Read only relevant entries. Architecture proposals, approved scope and accepted implementation are separate evidence states.
+
+- [Entry point](README.md): routing and current scope.
+- [Policy](policy.md): authority, preservation, approvals.
+- [Lifecycle](lifecycle.md): risk and gates.
+- [Delegation](delegation.md): specialist discovery, REA, shared ownership.
+- [Audit scopes](audit-scopes.md): security/runtime/contracts/data/distribution/knowledge.
+- [Contracts](contracts.md): task/handoff/audit/acceptance/report records.
+- [Repository boundaries](repository-boundaries.md): runtime/fork/tools and Beta targets.
+- [Providers](providers.md): real Codex file shapes and qualification limits.
+- [Controls](controls.md): instructions versus enforcement.
+

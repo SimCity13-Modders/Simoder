@@ -1,0 +1,3 @@
+# Preserve canonical SDK declaration bytes across checkouts.
+/src/mods/native/contract.h -text
+/src/mods/native/abi_v1.h -text

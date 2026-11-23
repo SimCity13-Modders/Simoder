@@ -1,0 +1,8 @@
+# Repository Rules (`Simoder`)
+
+- **Evidence & Working Data**: Put audits, exploratory analyses, experiment reports, screenshots, and raw investigation evidence in `.analysis/`. This directory is ignored and must not be committed.
+- **Documentation**: Keep maintained user guides, architecture contracts, and API reference material in `docs/`.
+- **Rust Code Standards & DoD**: Target Rust `edition = "2024"`, enforce `#![forbid(unsafe_code)]` by default, and document all modules and public items with idiomatic Rustdoc (`//!` and `///` with Markdown and `[`Type`]` intra-doc links). Follow [docs/ai/definition-of-done.md](docs/ai/definition-of-done.md) (`MUST` vs `SHOULD` and the "Good Enough" Stop-Line).
+- **Crate-First & DRY**: Reuse `Simoder-OpenSCP` (`dbpf`, `sc-properties`, `rw4`, `sc-format`) and established workspace crates (`parking_lot`, `slotmap`, `relative-path`, `oxilangtag`, `serde_with`, `mlua`, `rquickjs`, `goblin`, `serde_toon`, `png`, `gltf`, `walkdir`, `strum`, `tempfile`, `anstyle`) over custom boilerplate.
+- **Release Hygiene (`Strictly NO Legacy`)**: Follow [release hygiene](docs/architecture/release-hygiene.md) — the production distribution is one integrated x86 `d3d9.dll` placed beside `SimCity.exe`. Developer programs, example mods, and the optional native MCP DevTool mod (`simoder_mcp.dll`) belong to `Simoder-DevTools` / `Simoder-DevTools-MCP`, never inside `Simoder`.
+- **Git & Gitea Workflow**: Preserve local work during active development. Closing a task in Gitea strictly requires explicit user approval. Upon approval: commit referencing the task (e.g. `Refs #<id>` / `Closes #<id>`), push to remote, and close the Gitea issue with an informative summary comment referencing the commit hash (bidirectional traceability).

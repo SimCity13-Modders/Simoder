@@ -1,0 +1,17 @@
+[package]
+name = "simoder-formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dbpf.workspace = true
+rw4.workspace = true
+sc-format.workspace = true
+sc-properties.workspace = true
+serde.workspace = true
+serde_toon.workspace = true
+simoder-core = { path = "../simoder-core" }
+tempfile.workspace = true
+thiserror.workspace = true
+toml.workspace = true

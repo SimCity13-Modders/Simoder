@@ -1,0 +1,28 @@
+[package]
+name = "simoder-d3d9"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flate2.workspace = true
+goblin.workspace = true
+mlua.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+simoder-core = { path = "../simoder-core" }
+simoder-crash = { path = "../simoder-crash" }
+simoder-formats = { path = "../simoder-formats" }
+simoder-mods = { path = "../simoder-mods" }
+simoder-scripting = { path = "../simoder-scripting" }
+strum.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+rquickjs.workspace = true
+tempfile.workspace = true
