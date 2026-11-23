@@ -21,6 +21,7 @@ sc-format = { git = "https://github.com/FluffyChi-Xing/fluffy-open-scp", rev = "
 rw4 = { git = "https://github.com/FluffyChi-Xing/fluffy-open-scp", rev = "42fd54a9390fa2fa354330cdd1451f5aa3e07538" }
 goblin = { version = "0.9", default-features = false, features = ["pe32", "std", "alloc"] }
 anstyle = "1.0"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 gltf = { version = "1", default-features = false }
 mlua = { version = "0.12", features = ["luau", "vendored", "send", "serde"] }
 oxilangtag = "0.1"

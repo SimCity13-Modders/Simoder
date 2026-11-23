@@ -40,6 +40,35 @@ unsafe extern "system" {
     fn GetLastError() -> u32;
 }
 
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn ShellExecuteW(
+        hwnd: *mut c_void,
+        lpOperation: *const u16,
+        lpFile: *const u16,
+        lpParameters: *const u16,
+        lpDirectory: *const u16,
+        nShowCmd: i32,
+    ) -> *mut c_void;
+}
+
+/// Open an external URL or file path using the default Windows shell handler.
+pub fn open_url_in_browser(url: &str) {
+    let op: Vec<u16> = "open\0".encode_utf16().collect();
+    let file_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: Invokes Windows ShellExecuteW with null parent HWND and SW_SHOWNORMAL (1).
+    unsafe {
+        let _ = ShellExecuteW(
+            null_mut(),
+            op.as_ptr(),
+            file_wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        );
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SdHeaderRaw {

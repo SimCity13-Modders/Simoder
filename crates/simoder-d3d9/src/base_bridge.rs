@@ -405,7 +405,8 @@ fn read_luau_scripts_tree(scripts_dir: &Path) -> Result<BTreeMap<String, String>
 
 fn resolve_module_key(caller: Option<&str>, request: &str) -> Result<String, String> {
     let normalized = request.trim().replace('\\', "/");
-    let stripped = normalized.strip_suffix(".luau").unwrap_or(&normalized);
+    let unaliased = normalized.strip_prefix("@simoder.base/").unwrap_or(&normalized);
+    let stripped = unaliased.strip_suffix(".luau").unwrap_or(unaliased);
 
     let mut parts: Vec<String> = Vec::new();
     if stripped.starts_with("./") || stripped.starts_with("../") {
@@ -728,7 +729,92 @@ fn install_private_host_table(
             .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
+    mods_tbl
+        .set(
+            "extractZip",
+            lua.create_function(|lua, (zip_path, target_dir): (String, String)| {
+                let res = crate::net::extract_zip_archive(Path::new(&zip_path), Path::new(&target_dir));
+                let tbl = lua.create_table()?;
+                match res {
+                    Ok(count) => {
+                        tbl.set("ok", true)?;
+                        tbl.set("count", count)?;
+                    }
+                    Err(err) => {
+                        tbl.set("ok", false)?;
+                        tbl.set("error", err)?;
+                    }
+                }
+                Ok(tbl)
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
     host.set("mods", mods_tbl).map_err(|e| e.to_string())?;
+
+    let net_tbl = lua.create_table().map_err(|e| e.to_string())?;
+    net_tbl
+        .set(
+            "getJson",
+            lua.create_function(|lua, url: String| {
+                let res = crate::net::get_json(&url);
+                let tbl = lua.create_table()?;
+                match res {
+                    Ok(json) => {
+                        tbl.set("ok", true)?;
+                        tbl.set("body", json)?;
+                    }
+                    Err(err) => {
+                        tbl.set("ok", false)?;
+                        tbl.set("error", err)?;
+                    }
+                }
+                Ok(tbl)
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    net_tbl
+        .set(
+            "downloadFile",
+            lua.create_function(|lua, (url, dest_path): (String, String)| {
+                let res = crate::net::download_file(&url, Path::new(&dest_path), |_cur, _tot| {});
+                let tbl = lua.create_table()?;
+                match res {
+                    Ok(()) => {
+                        tbl.set("ok", true)?;
+                    }
+                    Err(err) => {
+                        tbl.set("ok", false)?;
+                        tbl.set("error", err)?;
+                    }
+                }
+                Ok(tbl)
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    host.set("net", net_tbl).map_err(|e| e.to_string())?;
+
+    let sys_tbl = lua.create_table().map_err(|e| e.to_string())?;
+    sys_tbl
+        .set(
+            "openUrl",
+            lua.create_function(|_, url: String| {
+                #[cfg(all(windows, not(test)))]
+                {
+                    crate::win32_native::open_url_in_browser(&url);
+                }
+                #[cfg(any(not(windows), test))]
+                {
+                    let _ = url;
+                }
+                Ok(true)
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    host.set("system", sys_tbl).map_err(|e| e.to_string())?;
 
     lua.globals()
         .set("__simoder_base", host)

@@ -22,6 +22,7 @@ type Handle = *mut c_void;
 type FarProc = *const c_void;
 
 const INVALID_HANDLE_ADDR: usize = !0usize;
+const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_SHARE_READ_WRITE: u32 = 0x0000_0001 | 0x0000_0002;
 const OPEN_EXISTING: u32 = 3;
@@ -86,6 +87,15 @@ unsafe extern "system" {
     fn SetConsoleMode(h_console_handle: Handle, dw_mode: u32) -> i32;
     fn GetLocalTime(lp_system_time: *mut SystemTimeWin32);
     fn GetCurrentThreadId() -> u32;
+    fn AllocConsole() -> i32;
+    fn ReadFile(
+        h_file: Handle,
+        lp_buffer: *mut u8,
+        n_number_of_bytes_to_read: u32,
+        lp_number_of_bytes_read: *mut u32,
+        lp_overlapped: *mut c_void,
+    ) -> i32;
+    fn ExitProcess(u_exit_code: u32) -> !;
 }
 
 struct ConsoleHandle {
@@ -427,5 +437,186 @@ pub fn is_developer_console_active() -> bool {
 pub fn stop_global_logger() {
     if let Some(logger) = global_logger_slot().lock().take() {
         logger.stop();
+    }
+}
+
+/// Prompt the user in an allocated console window to download and bootstrap missing `Simoder-Base`.
+/// If approved (`Y`), downloads the latest release from GitHub and extracts it to `base_dir`.
+/// If denied (`N`), exits the game process cleanly.
+pub fn prompt_and_bootstrap_base(mods_root: &Path) -> Result<(), String> {
+    let base_dir = mods_root.join("simoder.base");
+    if base_dir.exists() && base_dir.join("scripts").join("init.luau").exists() {
+        return Ok(());
+    }
+
+    // Allocate or attach a console window.
+    // SAFETY: Allocates standard console for interactive input.
+    unsafe {
+        AllocConsole();
+        let title = to_wide_null_str("Simoder - Mandatory Base Module Bootstrap");
+        let _ = SetConsoleTitleW(title.as_ptr());
+        let _ = SetConsoleOutputCP(CP_UTF8);
+    }
+
+    let conin_name = to_wide_null_str("CONIN$");
+    let conout_name = to_wide_null_str("CONOUT$");
+
+    // SAFETY: Opening console stdio handles.
+    let h_out = unsafe {
+        CreateFileW(
+            conout_name.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        )
+    };
+    let h_in = unsafe {
+        CreateFileW(
+            conin_name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        )
+    };
+
+    let write_str = |text: &str| {
+        if !h_out.is_null() && (h_out as usize) != INVALID_HANDLE_ADDR {
+            let bytes = text.as_bytes();
+            let mut written: u32 = 0;
+            // SAFETY: Writing prompt bytes to CONOUT$.
+            unsafe {
+                WriteFile(
+                    h_out,
+                    bytes.as_ptr(),
+                    bytes.len() as u32,
+                    &mut written,
+                    null_mut(),
+                );
+            }
+        }
+    };
+
+    let read_line = || -> String {
+        if !h_in.is_null() && (h_in as usize) != INVALID_HANDLE_ADDR {
+            let mut buf = [0u8; 128];
+            let mut read_bytes: u32 = 0;
+            // SAFETY: Reading user input from CONIN$.
+            let ok = unsafe {
+                ReadFile(
+                    h_in,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut read_bytes,
+                    null_mut(),
+                )
+            };
+            if ok != 0 && read_bytes > 0 {
+                return String::from_utf8_lossy(&buf[..read_bytes as usize]).to_string();
+            }
+        }
+        String::new()
+    };
+
+    write_str("\r\n=======================================================\r\n");
+    write_str(" [SIMODER BOOTSTRAP]\r\n");
+    write_str(" Required base module 'simoder.base' is missing.\r\n");
+    write_str(" Simoder cannot run without the base UI and capability engine.\r\n");
+    write_str("=======================================================\r\n\r\n");
+    write_str(" Do you want to download and install official 'Simoder-Base'\r\n");
+    write_str(" from GitHub Releases? [Y/N]: ");
+
+    let answer = read_line().trim().to_uppercase();
+    if answer != "Y" && answer != "YES" {
+        write_str("\r\n [SIMODER BOOTSTRAP] Installation canceled by user. Exiting game...\r\n");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // SAFETY: Exiting process on user cancellation.
+        unsafe {
+            ExitProcess(0);
+        }
+    }
+
+    write_str("\r\n [SIMODER BOOTSTRAP] Querying latest release from GitHub...\r\n");
+
+    let api_url = "https://api.github.com/repos/MiamiCenterPL/Simoder-Base/releases/latest";
+    let release_info = match crate::net::get_json(api_url) {
+        Ok(json) => json,
+        Err(err) => {
+            write_str(&format!(
+                " [SIMODER BOOTSTRAP] Failed querying release: {err}\r\n Fallback to default branch zip...\r\n"
+            ));
+            String::new()
+        }
+    };
+
+    // Parse download URL from release JSON or fallback to main branch zipball.
+    let mut download_url = "https://github.com/MiamiCenterPL/Simoder-Base/archive/refs/heads/main.zip".to_string();
+    if !release_info.is_empty() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&release_info) {
+            if let Some(assets) = parsed.get("assets").and_then(|a| a.as_array()) {
+                for a in assets {
+                    if let Some(url) = a.get("browser_download_url").and_then(|u| u.as_str()) {
+                        if url.ends_with(".zip") {
+                            download_url = url.to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            if download_url.ends_with("main.zip") {
+                if let Some(zip_url) = parsed.get("zipball_url").and_then(|u| u.as_str()) {
+                    download_url = zip_url.to_string();
+                }
+            }
+        }
+    }
+
+    write_str(&format!(" [SIMODER BOOTSTRAP] Downloading from: {}\r\n", download_url));
+
+    let temp_zip = mods_root.join("simoder.base.bootstrap.zip");
+    let dl_res = crate::net::download_file(&download_url, &temp_zip, |downloaded, total| {
+        if let Some(tot) = total {
+            if tot > 0 {
+                let pct = (downloaded * 100) / tot;
+                write_str(&format!("\r [SIMODER BOOTSTRAP] Downloading: {}% ({}/{} bytes)", pct, downloaded, tot));
+            }
+        } else {
+            write_str(&format!("\r [SIMODER BOOTSTRAP] Downloading: {} bytes...", downloaded));
+        }
+    });
+
+    if let Err(e) = dl_res {
+        write_str(&format!("\r\n [SIMODER BOOTSTRAP] ERROR: Download failed: {e}\r\n Exiting game...\r\n"));
+        std::thread::sleep(std::time::Duration::from_millis(3000));
+        // SAFETY: Exiting on download error.
+        unsafe {
+            ExitProcess(1);
+        }
+    }
+
+    write_str("\r\n [SIMODER BOOTSTRAP] Extracting archive to 'mods/simoder.base'...\r\n");
+    let extract_res = crate::net::extract_zip_archive(&temp_zip, &base_dir);
+    let _ = std::fs::remove_file(&temp_zip);
+
+    match extract_res {
+        Ok(count) => {
+            write_str(&format!(" [SIMODER BOOTSTRAP] Successfully extracted {} files.\r\n", count));
+            write_str(" [SIMODER BOOTSTRAP] Base module ready! Launching SimCity...\r\n\r\n");
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            Ok(())
+        }
+        Err(err) => {
+            write_str(&format!(" [SIMODER BOOTSTRAP] ERROR: Extraction failed: {err}\r\n Exiting game...\r\n"));
+            std::thread::sleep(std::time::Duration::from_millis(3000));
+            // SAFETY: Exiting on extraction failure.
+            unsafe {
+                ExitProcess(1);
+            }
+        }
     }
 }

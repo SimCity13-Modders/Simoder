@@ -399,6 +399,10 @@ fn run_bootstrap_worker() {
             }
 
             let mods_root = paths.game_root.join(&config.mods_dir);
+            if config.enabled && !mods_root.join(RESERVED_BASE_MOD_ID).exists() {
+                let _ = crate::win32_console::prompt_and_bootstrap_base(&mods_root);
+            }
+
             if let Err(err) =
                 global_simoder_runtime().initialize_mods_and_base(&mods_root, config.enabled)
             {

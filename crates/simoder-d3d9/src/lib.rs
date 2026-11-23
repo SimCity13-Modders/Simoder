@@ -10,6 +10,7 @@ pub mod base_hot_reload;
 pub mod bootstrap;
 pub mod config;
 pub mod exports;
+pub mod net;
 pub mod pe;
 pub mod proxy_ffi;
 pub mod runtime;

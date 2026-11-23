@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+flate2.workspace = true
 goblin.workspace = true
 mlua.workspace = true
 parking_lot.workspace = true

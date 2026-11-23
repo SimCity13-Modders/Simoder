@@ -1480,6 +1480,7 @@ dependencies = [
 name = "simoder-d3d9"
 version = "0.2.0"
 dependencies = [
+ "flate2",
  "goblin",
  "mlua",
  "parking_lot",

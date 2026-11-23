@@ -892,3 +892,46 @@ fn jsx_runtime_emits_valid_ui_nodes_with_tailwind_and_native_classes_and_renders
         .expect("rendered JSX DOM must preserve both NativeClasses and Tailwind utility classes");
     });
 }
+
+#[test]
+fn base_mods_ui_auto_updater_and_manual_modal_dialog() {
+    let runtime = Arc::new(IntegratedSimoderRuntime::new());
+    let backend: Arc<dyn ModsActionBackend> = Arc::new(RuntimeOnlyModsBackend::new(runtime.clone()));
+    let host = BaseRuntimeHost::start_from_base_dir(&simoder_base_dir(), runtime.clone(), backend)
+        .expect("Simoder-Base DAG should boot cleanly with auto-updater");
+
+    runtime.set_ui_observation(UiViewObservation {
+        phase: "main.menu".into(),
+        active_views: vec!["main.menu".into()],
+        locale: "en-us".into(),
+    });
+    host.tick_ui().expect("initial main menu UI tick should pass");
+
+    // Open Mods modal.
+    runtime.push_ui_events([UiPatchEvent {
+        patch_id: "simoder.base.mods-trigger-main".into(),
+        action: "open_mods".into(),
+        target_id: Some("mods_trigger_btn".into()),
+        value: None,
+    }]);
+    host.tick_ui().expect("tick after open_mods should succeed");
+
+    let (_rev, patches) = runtime.composed_ui_snapshot();
+    let modal_patch = patches.iter().find(|p| p.patch_id == "simoder.base.mods-modal");
+    assert!(modal_patch.is_some(), "mods-modal must be composed on open_mods");
+
+    // Trigger manual modal open.
+    runtime.push_ui_events([UiPatchEvent {
+        patch_id: "simoder.base.mods-modal".into(),
+        action: "open_manual_modal".into(),
+        target_id: Some("manual_update_simoder".into()),
+        value: None,
+    }]);
+    host.tick_ui().expect("tick after open_manual_modal should succeed");
+
+    let (_rev2, patches2) = runtime.composed_ui_snapshot();
+    let modal_patch2 = patches2.iter().find(|p| p.patch_id == "simoder.base.mods-modal");
+    assert!(modal_patch2.is_some());
+    let node_json = serde_json::to_string(&modal_patch2.unwrap().node).unwrap();
+    assert!(node_json.contains("manual_update_modal") || node_json.contains("Manual Update Required"), "manual update dialog must be presented");
+}
