@@ -1,5 +1,8 @@
 # Simoder
 
+[![Download Latest](https://img.shields.io/github/actions/workflow/status/SimCity13-Modders/Simoder/ci.yml?branch=main&label=Download%20Latest&logo=githubactions&logoColor=white)](https://nightly.link/SimCity13-Modders/Simoder/workflows/ci/main/simoder-windows-x86.zip)
+[![GitHub Stars](https://img.shields.io/github/stars/SimCity13-Modders/Simoder?logo=github)](https://github.com/SimCity13-Modders/Simoder/stargazers)
+
 Simoder is an in-game mod manager and runtime for SimCity (2013) and Cities of
 Tomorrow written in Rust (`edition = "2024"`). Its production distribution is one
 integrated 32-bit x86 `d3d9.dll` placed beside `SimCity.exe`. It forwards
