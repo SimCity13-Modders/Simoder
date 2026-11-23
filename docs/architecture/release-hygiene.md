@@ -59,7 +59,7 @@ and the actual distribution candidate. Independent reviewers must assess:
   source cleanup or successful linking alone is insufficient evidence.
 
 Use suitable static analysis, source/call-site inspection and executed tests.
-A source file listed in CMake, a passing build or linker elimination does not
+A source file listed in Cargo, a passing build or linker elimination does not
 prove absence of dead code. Replace tests for retired contracts with regression
 coverage of supported behavior; do not retain legacy implementations solely to
 keep their tests passing or weaken tests to hide regressions.

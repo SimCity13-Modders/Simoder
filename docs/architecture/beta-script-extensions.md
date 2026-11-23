@@ -1,5 +1,9 @@
 # Beta script extensions: hooks, timers, utilities and localization
 
+> **Design proposal.** The document describes a target Beta API and acceptance
+> plan; it does not assert that every listed extension is implemented. Current
+> scripting behavior is documented in [scripting](../scripting.md).
+
 Status: product requirements accepted in the 2026-10-25 Grill-Me conversation,
 including controlled mutable references across isolated mod VMs. Discovery is
 source inspection, not an implemented or runtime-qualified SDK. Exact signatures,
@@ -8,8 +12,7 @@ isolated proof and independent architecture/security audit before implementation
 
 This is a required Beta feature stream alongside the existing U1-U6 migration.
 It does not silently enlarge U4/U5 or reopen accepted U3 implementation scope.
-See [Base architecture](base.md), [current private Base runtime](base-runtime.md),
-[script scheduler](script-scheduler.md) and [copied values](copied-values.md).
+See [Base architecture](base.md) and [script scheduler](script-scheduler.md).
 Method names below specify requested functionality, not shipped declarations.
 
 ## Accepted decision register

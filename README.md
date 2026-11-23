@@ -34,7 +34,7 @@ Close SimCity and copy the built 32-bit `d3d9.dll` (`target/i686-pc-windows-msvc
 
 ## Build & Verification
 
-Simoder targets Rust `edition = "2024"` and compiles for both 64-bit host verification (`x86_64-pc-windows-msvc`) and the 32-bit game runtime target (`i686-pc-windows-msvc`):
+Simoder targets Rust `edition = "2024"` and compiles for both 64-bit host verification (`x86_64-pc-windows-msvc`) and the 32-bit game runtime target (`i686-pc-windows-msvc`). GitHub Actions checks out the pinned [Simoder-Base](https://github.com/SimCity13-Modders/Simoder-Base) source for integration tests. See [CI and releases](docs/releases.md):
 
 ```powershell
 cargo clippy --workspace --all-targets -- -D warnings
@@ -46,6 +46,6 @@ cargo build --release --target i686-pc-windows-msvc -p simoder-d3d9
 
 ## Repository Policy
 
-Examples, authoring CLI tools, and the optional native MCP DevTool mod (`simoder_mcp.dll`) belong to `Simoder-DevTools` and `Simoder-DevTools-MCP`. Audits, exploratory reports, screenshots, and raw investigation evidence belong in ignored `.analysis/`; maintained contracts and guides belong in `docs/`.
+The runtime lives at [SimCity13-Modders/Simoder](https://github.com/SimCity13-Modders/Simoder); its Luau base mod lives at [SimCity13-Modders/Simoder-Base](https://github.com/SimCity13-Modders/Simoder-Base). Optional authoring and developer tools are maintained separately and are not needed to build or install the runtime DLL. Audits, exploratory reports, screenshots, and raw investigation evidence belong in ignored `.analysis/`; maintained contracts and guides belong in `docs/`.
 
 Authored Rust code uses idiomatic Rustdoc (`//!` and `///` with `[`Type`]` intra-doc links) and enforces `#![forbid(unsafe_code)]` across internal modules (see [Definition of Done](docs/ai/definition-of-done.md)). Original source is under the [MIT License](LICENSE); dependencies retain their [own notices](THIRD_PARTY_NOTICES.md).

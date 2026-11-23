@@ -1,9 +1,18 @@
 # Private base runtime
 
+> **Architecture snapshot.** The staged U3 details below record a design and
+> qualification state, not a guarantee that each listed facet is enabled in
+> the current Alpha runtime. See the [current runtime overview](../../README.md)
+> and source for active behavior.
+
 The accepted [Beta script extensions](beta-script-extensions.md) require a future,
 independently reviewed synchronous hook/proxy path. The asynchronous copied-value
 machinery documented below does not already implement that path; its current
 no-synchronous-cross-VM-entry boundary remains unchanged by this requirements update.
+
+Historical U3 manager publication, persistence and shutdown contracts below
+describe staged proposals and qualification evidence. They are not guarantees
+about active production behavior in the current Alpha.
 
 U3e implements private Core machinery and the separately authored Luau services in
 Simoder-Base. It does not promote SDK facets, enable a production authority provider,

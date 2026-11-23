@@ -543,7 +543,7 @@ pub fn prompt_and_bootstrap_base(mods_root: &Path) -> Result<(), String> {
 
     write_str("\r\n [SIMODER BOOTSTRAP] Querying latest release from GitHub...\r\n");
 
-    let api_url = "https://api.github.com/repos/MiamiCenterPL/Simoder-Base/releases/latest";
+    let api_url = "https://api.github.com/repos/SimCity13-Modders/Simoder-Base/releases/latest";
     let release_info = match crate::net::get_json(api_url) {
         Ok(json) => json,
         Err(err) => {
@@ -554,8 +554,8 @@ pub fn prompt_and_bootstrap_base(mods_root: &Path) -> Result<(), String> {
         }
     };
 
-    // Parse download URL from release JSON or fallback to main branch zipball.
-    let mut download_url = "https://github.com/MiamiCenterPL/Simoder-Base/archive/refs/heads/main.zip".to_string();
+    // @summary Use the organization's latest Base release, falling back to its main branch archive.
+    let mut download_url = "https://github.com/SimCity13-Modders/Simoder-Base/archive/refs/heads/main.zip".to_string();
     if !release_info.is_empty()
         && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&release_info)
     {

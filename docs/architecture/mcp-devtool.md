@@ -1,10 +1,14 @@
 # MCP DevTool architecture
 
+> **Accepted design, not current implementation.** The described MCP native
+> mod, transport and managed service lifecycle are not part of the current
+> Simoder Alpha runtime. Current runtime boundaries are in the
+> [architecture overview](../architecture.md).
+
 Status: architecture accepted by the user on 2026-10-15. Implementation and runtime acceptance remain separate. Decision record: [ADR 0001](decisions/0001-mcp-native-devtool.md).
 
-The [U1 internal foundation](runtime-foundation.md) implements generic ownership,
-closed admission and window routing. It does not deploy the native MCP mod or
-qualify the network/authentication and installed-game paths described here.
+The current Alpha does not deploy the native MCP mod or qualify the
+network/authentication and installed-game paths described here.
 
 ## Ownership
 

@@ -9,10 +9,16 @@ use simoder_d3d9::{
 };
 use simoder_mods::{NativeModStatus, NativeModUiRecord, UiPatchEvent, UiViewObservation};
 
+/// @summary Resolve the Simoder-Base source tree used by integration tests.
 fn simoder_base_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join("Simoder-Base")
+    std::env::var_os("SIMODER_BASE_DIR").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../..")
+                .join("Simoder-Base")
+        },
+        PathBuf::from,
+    )
 }
 
 #[test]

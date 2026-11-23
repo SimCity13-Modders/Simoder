@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-21
-- **Tracks:** `MiamiCenter/Simoder#2` (JS Runtime Selection & PoC Qualification), `MiamiCenter/Simoder#10`
+- **Tracks:** historical issue references `MiamiCenter/Simoder#2` (JS Runtime Selection & PoC Qualification) and `MiamiCenter/Simoder#10`.
 
 ## Context
 

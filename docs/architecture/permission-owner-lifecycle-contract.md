@@ -4,7 +4,7 @@ Status: **U3f-g contract and U3f-h isolated implementation accepted; U3f-i close
 lifecycle model awaits independent audit and human acceptance. Production
 permission activation remains closed.**
 This extends the [PROP adapter](prop-adapter-contract.md), [Base design](base.md)
-and [runtime foundation](runtime-foundation.md). Names below are conceptual types
+and the historical U1 runtime foundation. Names below are conceptual types
 and transition requirements, not shipped SDK symbols, wire schemas or new grants.
 Core, Base, SDK and DevTools retain their existing repository responsibilities.
 

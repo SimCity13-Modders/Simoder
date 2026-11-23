@@ -1,14 +1,15 @@
 # Base manager and mod API architecture
 
+> **Design reference.** Active Luau Base source is in the
+> [Simoder-Base repository](https://github.com/SimCity13-Modders/Simoder-Base).
+
 Status: design decisions accepted by the user in the 2026-10-15 base Grill-Me
 conversation. This document records the agreed scope; it does not claim that base,
 its managers, task API or cross-VM transport are implemented or runtime-qualified.
 Method and manager names in examples are illustrative, not shipped SDK symbols.
 
-See [repository ownership](repository-ownership.md), the
-[MCP DevTool architecture](mcp-devtool.md) and the
-[internal runtime foundation](runtime-foundation.md) for adjacent responsibilities.
-An internal primitive is not automatically a public script API.
+See [repository ownership](repository-ownership.md). An internal primitive is
+not automatically a public script API.
 
 ## Layer ownership
 

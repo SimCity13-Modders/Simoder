@@ -1,5 +1,10 @@
 # Native game integration contract
 
+> **Historical planning document.** This contract predates the Rust Alpha
+> runtime. It records a target end-to-end workflow, not implemented or
+> verified behavior. See the [current runtime overview](../README.md) for the
+> active implementation and its verification limits.
+
 MCP developer services remain optional, game-owned service mods. Production
 installation remains one integrated x86 `d3d9.dll`. Game exit ends all service
 descendants; an external stdio client must not own the runtime service lifetime.

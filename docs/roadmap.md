@@ -1,5 +1,11 @@
 # Roadmapa Simodera
 
+> **Uwaga o aktualności:** poniższe statusy są historycznym snapshotem z
+> października 2026 r. Powstały przed migracją runtime do Rusta, publikacją
+> repozytorium w organizacji `SimCity13-Modders` i wydaniem Alpha. Nie opisują
+> aktualnego stanu kodu. Implementację opisują [README](../README.md) i
+> [workflow CI/release](releases.md); plan nadal wymaga ponownego przeglądu.
+
 Aktualizacja zakresu Bety, 25 października 2026 r.:
 [rozszerzenia API skryptowego](architecture/beta-script-extensions.md) są wymaganym
 strumieniem funkcjonalnym. Obejmują PreHook/PostHook, OverrideFunction, GetFunction,
@@ -279,8 +285,7 @@ testu. Zmiany zakresu i terminu pozostają jawnymi decyzjami; audyty i surowe do
 trzymamy w `.analysis/`, a utrzymywany plan w tym dokumencie.
 
 Dokumenty źródłowe: [granice repozytoriów](architecture/repository-ownership.md),
-[architektura base](architecture/base.md), [migracja MCP](architecture/mcp-devtool.md),
-[fundament U1](architecture/runtime-foundation.md),
+[architektura base](architecture/base.md), [historyczny projekt migracji MCP](architecture/mcp-devtool.md),
 [kompatybilność](architecture/compatibility.md).
 
 ## Crash Handler i rozszerzona diagnostyka Bety

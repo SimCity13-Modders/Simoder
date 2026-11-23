@@ -1,16 +1,23 @@
 # U3 Base Luau & TypeScript/JS host profile
 
-Status on 2026-11-21: Pure-Rust host runtime migration (Etap A) and pure-Luau `Simoder-Base` / `Simoder-SDK` / `Simoder-DevTools-Authoring` / `Simoder-DevTools` (Etap B) are complete and verified offline on both `x86_64-pc-windows-msvc` and production `i686-pc-windows-msvc`. All prior C++23, CMake, Python, and .NET 8 legacy trees have been retired under the **Strictly NO Legacy** contract ([release hygiene](release-hygiene.md)).
-This profile covers **Simoder SDK 0.2.0** (`base-luau-alpha-v1`, `base-ts-beta-v1`, `native-abi-v2`, Catalogue Contract `2`). Explicit human whole-U3 sign-off (`MiamiCenter/Simoder#1`) and live U6 game qualification on `SimCity.exe` (`MiamiCenter/Simoder#5`) remain distinct acceptance gates.
+> **Historical qualification snapshot (2026-11-21).** The statements and repository
+> revisions below describe the evidence assembled on that date. They are not
+> a verification report for the current `main` branch, current Alpha artifact,
+> or current organization repositories. See the current [README](../../README.md)
+> and [CI/release workflow](../releases.md).
 
-## Canonical contracts and ownership
+Status on 2026-11-21: Pure-Rust host runtime migration (Etap A) and pure-Luau `Simoder-Base` / `Simoder-SDK` / `Simoder-DevTools-Authoring` / `Simoder-DevTools` (Etap B) were reported complete and verified offline on both `x86_64-pc-windows-msvc` and production `i686-pc-windows-msvc`. All prior C++23, CMake, Python, and .NET 8 legacy trees were reported retired under the **Strictly NO Legacy** contract ([release hygiene](release-hygiene.md)).
+This profile covers **Simoder SDK 0.2.0** (`base-luau-alpha-v1`, `base-ts-beta-v1`, `native-abi-v2`, Catalogue Contract `2`) as recorded on that date. Explicit human whole-U3 sign-off and live U6 game qualification were distinct acceptance gates at review time.
 
-The canonical [SDK Base API](../../../Simoder-SDK/Luau/BASE_API.md) and [Beta Contracts Matrix](../../../Simoder-SDK/CONTRACTS.md) own public declarations for Luau ([`Luau/base.d.luau`](../../../Simoder-SDK/Luau/base.d.luau)) and TypeScript/JavaScript ([`TypeScript/base.d.ts`](../../../Simoder-SDK/TypeScript/base.d.ts)).
-The pure-Luau authored Base mod owns internal semantic services ([service contract](../../../Simoder-Base/docs/SERVICES.md)) and dependency startup ([DAG contract](../../../Simoder-Base/docs/DAG.md)).
+## Historical contracts and ownership
+
+The canonical SDK declarations and Base service/DAG contracts lived in their
+separate repositories. The paths and pins below are historical and do not
+describe current checkouts.
 `Simoder` (`crates/simoder-d3d9`, `simoder-core`, `simoder-formats`, `simoder-mods`, `simoder-scripting`, `simoder-crash`) owns native identity, the single `RuntimeScope` evaluator/task record, copied-value transport, dual `Luau` + `QuickJS` scheduling, and crash/bridge telemetry.
-`Simoder-DevTools` owns offline workspace assembly (`simoder-workspace`) and deterministic USTAR packaging/pin verification (`simoder-base-packager` / `simoder-base-reader`).
-`Simoder-DevTools-Authoring` owns `simoder-build` and the offline `TS -> JS` (QuickJS ES2020) pipeline.
-`Simoder-DevTools-MCP` owns the optional 32-bit native `ABI v2` DevTool mod `simoder_mcp.dll`.
+At profile time, DevTools owned offline workspace assembly and packaging, the
+Authoring repository owned `simoder-build`, and a separate MCP repository owned
+an optional native `simoder_mcp.dll` mod.
 The production runtime remains one integrated x86 `d3d9.dll` beside `SimCity.exe` ([repository ownership](repository-ownership.md)).
 
 ## Supported presentation
@@ -36,12 +43,12 @@ Each native endpoint binds once to its real VM generation and original scope. Ca
 
 | Repository / Artifact | Branch / Target | Exact Revision / SHA-256 Digest & Size |
 | --- | --- | --- |
-| `MiamiCenter/Simoder` | `u4-u5-development` | `88a45df1c7a1248d67c2f0691b4350e301d1e14b` |
-| `MiamiCenter/Simoder-Base` | `u4-u5-development` | `fe10140311a653984c689fa652b2a0a09c7c265a` |
-| `MiamiCenter/Simoder-SDK` | `u4-u5-development` | `cc0394578e7ecc45736e2e8980f095d58879b0d2` |
-| `MiamiCenter/Simoder-DevTools-Authoring` | `main` | `c924801ed8c8afa59da46a9e3937e41c2be78fad` |
-| `MiamiCenter/Simoder-DevTools` | `refactor/repository-cleanup` | `7d6aa1f2dcefc4eefa387b545d16674d15e3a840` |
-| `MiamiCenter/Simoder-DevTools-MCP` | `u4-u5-development` | `860e51882314e9bee068f1e0bcfb12ccc650553c` |
+| Historical Simoder source | `u4-u5-development` | `88a45df1c7a1248d67c2f0691b4350e301d1e14b` |
+| `SimCity13-Modders/Simoder-Base` | `u4-u5-development` | `fe10140311a653984c689fa652b2a0a09c7c265a` |
+| Historical Simoder-SDK source | `u4-u5-development` | `cc0394578e7ecc45736e2e8980f095d58879b0d2` |
+| Historical Simoder-DevTools-Authoring source | `main` | `c924801ed8c8afa59da46a9e3937e41c2be78fad` |
+| Historical Simoder-DevTools source | `refactor/repository-cleanup` | `7d6aa1f2dcefc4eefa387b545d16674d15e3a840` |
+| Historical Simoder-DevTools-MCP source | `u4-u5-development` | `860e51882314e9bee068f1e0bcfb12ccc650553c` |
 | `simoder_d3d9.dll` (production `d3d9.dll`) | `i686-pc-windows-msvc --release` | `1,113,088 B` — `264429d74ae56ea399932d783467659ae2c0dd29fb20902155acfc373a4f9b08` |
 | `simoder_mcp.dll` (optional `ABI v2` DevTool mod) | `i686-pc-windows-msvc --release` | `120,320 B` — `a1456843a914cd3d95d054c3ed47c807051b4983bfa4686b432e3060d7d884c8` |
 
@@ -57,8 +64,8 @@ Each native endpoint binds once to its real VM generation and original scope. Ca
 | `Simoder-DevTools` (`simoder-workspace` offline CLI) | **PASS**: `workspace_tests` (`3/3` PASS on `x64` and `x86`), offline revision/SHA-256 recording, clean-clone determinism, and game-root write refusal. |
 | Declaration IDE analysis (`Luau.Analysis`) | **NOT_RUN**: grammar parsing and runtime VM conformance pass; full IDE analyzer inference remains separate. |
 | Regular-file symbolic links (`Win32 1314`) | **NOT_RUN / SOURCE_ONLY**: non-privileged environments lack `SeCreateSymbolicLinkPrivilege`; ordinary directory/reparse containment is enforced in Rust. |
-| Game lifecycle qualification (`SimCity.exe`) | **PENDING_U6** (`gamePid = 0` at review time): live process/UI/reload/restart/crash/SP-backup-restore scenarios belong to [`MiamiCenter/Simoder#5`](http://192.168.101.42:3000/MiamiCenter/Simoder/issues/5). |
-| Whole-U3 acceptance (`MiamiCenter/Simoder#1`) | **PENDING_OWNER_SIGNOFF**: technical artifacts, pinned revisions, and deviation dispositions are complete; awaits explicit owner acceptance. |
+| Game lifecycle qualification (`SimCity.exe`) | **PENDING_U6** (`gamePid = 0` at review time): live process/UI/reload/restart/crash/SP-backup-restore scenarios were not run. |
+| Whole-U3 acceptance | **PENDING_OWNER_SIGNOFF**: the recorded technical artifacts, pins, and deviation dispositions awaited explicit owner acceptance. |
 
 ## Lifecycle and migration limits
 

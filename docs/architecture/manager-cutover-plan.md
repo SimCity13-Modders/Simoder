@@ -1,5 +1,9 @@
 # Canonical ModManager cutover plan
 
+> **Historical implementation plan.** The staged acceptance markers below
+> describe prior isolated work and do not define current Rust runtime behavior.
+> See the current [architecture overview](../architecture.md).
+
 Status: **Plan, implementation and audit accepted through U3f-m4b; U3f-m5a plan
 and audit accepted. Isolated U3f-m5b1 close foundation passes host verification;
 its exact audit and human acceptance remain separate.

@@ -36,7 +36,7 @@ jobs:
           gh run download $env:RUN_ID --name simoder-windows-x86 --dir release-assets
           if ($LASTEXITCODE -ne 0) { throw 'Artifact download failed' }
       - name: Revalidate downloaded distribution
-        run: python tools/distribution/check_runtime.py release-assets
+        run: python .github/scripts/check_runtime.py release-assets
       - name: Package legal notices
         shell: pwsh
         run: Compress-Archive -LiteralPath release-assets/licenses -DestinationPath release-assets/licenses.zip

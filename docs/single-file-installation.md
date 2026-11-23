@@ -1,48 +1,35 @@
 # Single-DLL installation
 
-The production target `simoder-runtime` emits one integrated x86 `d3d9.dll`.
-The proxy, supported game hooks, mod lifecycle, Luau compiler/VM and overlay are
-linked into this file. It does not extract executable dependencies or examples.
-Node.js and developer services are not part of the runtime distribution.
+The supported runtime is the integrated x86 `d3d9.dll` built by the
+`simoder-d3d9` crate. Close SimCity before installing or updating it.
 
-## Install, update and remove
+## Build and install
 
-1. Close SimCity.
-2. Copy `build/vs2026/bin/Release/d3d9.dll` beside the actual `SimCity.exe`,
-   usually `<installation>/SimCity/SimCity.exe`.
-3. Launch normally through EA App.
-
-VS2022 builds use the corresponding `build/vs2022` directory. Preserve a foreign
-`d3d9.dll`, such as a graphics mod: proxy chaining is unsupported. Updates replace
-the DLL while the game is closed. Removing it stops automatic startup and retains
-user mods/settings. Program Files installation can require administrator access.
-
-## Generated data
-
-For the supported EA layout, the installation root is the parent of the EXE
-directory. `<installation>/simoder/` stores settings, state and logs;
-`<installation>/mods/` contains user packages and immutable source caches.
-These directories need write access for changes and compilation.
-
-`simoder/proxy.disabled` disables runtime bootstrap on the next start while
-graphics forwarding remains active. Bootstrap writes `simoder/logs/proxy-bootstrap.log`,
-with a local application-data logging fallback. No bundle extraction directory
-is used. Failure to validate the game executable leaves ordinary graphics
-forwarding available rather than installing unsupported hooks.
-
-## Build and checks
+Build the production target from the repository root:
 
 ```powershell
-cmake --preset vs2026-x86
-cmake --build --preset vs2026-release --target simoder-runtime
+cargo build --release --target i686-pc-windows-msvc -p simoder-d3d9
 ```
 
-Build all tests before running CTest. The integrated bootstrap test starts a
-synthetic host with only the DLL beside it and verifies graphics forwarding,
-safe unsupported-build rejection and absence of extracted DLL/EXE dependencies.
-Desktop Direct3D access is required. These checks do not prove behavior in an
-actual EA-launched city; live-game acceptance must be recorded separately.
+Copy `target/i686-pc-windows-msvc/release/simoder_d3d9.dll` beside the actual
+`SimCity.exe`, renaming the copy to `d3d9.dll`. Launch the game normally through
+EA App. Remove that copied DLL to uninstall Simoder; user data stays in place.
 
-Example mods and optional developer services are installed from DevTools. Luau
-gameplay requires no external compiler. Optional TypeScript/native-resource
-authoring remains separate from the one-DLL runtime installation.
+The proxy forwards Direct3D 9 calls and starts Simoder outside `DllMain`.
+Unsupported game builds are rejected before hooks are installed, while graphics
+forwarding remains available. Chaining another `d3d9.dll` proxy is not supported.
+
+## Runtime data
+
+The runtime creates configuration, state, logs and crash data under the game
+installation's `simoder/` directory. User mods are discovered under `mods/`.
+`simoder/proxy.disabled` disables runtime startup after restarting the game,
+while keeping graphics forwarding active. Remove the flag and restart to enable
+the runtime again.
+
+## Evidence limits
+
+Run the workspace Clippy and tests described in the [README](../README.md).
+They cover Rust code and synthetic integration fixtures. They do not establish
+compatibility with a live EA-launched game; follow the separate
+[first-test checklist](first-test.md) for that acceptance.
