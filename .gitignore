@@ -25,3 +25,5 @@ tools/reverse/reports/
 *.suo
 *.VC.db
 *.VC.VC.opendb
+
+.cargo/config.toml
