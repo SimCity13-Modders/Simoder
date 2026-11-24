@@ -24,6 +24,9 @@ pub struct UiSyncRequest<'a> {
     pub reload_gen: u64,
     /// Ordered composed patches ready to render for the active phase.
     pub patches: &'a [UiPatchDescriptor],
+    /// Whether any active sandboxed Luau mod requested skipping the startup intro movie.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_intro: bool,
 }
 
 /// One bounded console or `window.Client` bridge log entry captured inside `EAWebKit`.
@@ -72,11 +75,22 @@ pub fn build_sync_packet_with_reload(
     reload_gen: u64,
     patches: &[UiPatchDescriptor],
 ) -> Result<String, String> {
+    build_sync_packet_full(revision, reload_gen, patches, false)
+}
+
+/// Serialize a bounded [`UiSyncRequest`] packet with hot-reload generation and game-action flags.
+pub fn build_sync_packet_full(
+    revision: u64,
+    reload_gen: u64,
+    patches: &[UiPatchDescriptor],
+    skip_intro: bool,
+) -> Result<String, String> {
     serde_json::to_string(&UiSyncRequest {
         op: "sync",
         revision,
         reload_gen,
         patches,
+        skip_intro,
     })
     .map_err(|e| format!("failed serializing UI sync packet: {e}"))
 }

@@ -102,6 +102,8 @@ pub enum UiNodeKind {
     Tab,
     /// Bounded horizontal progress bar rendered from `min..max` and `value`.
     Progress,
+    /// Interactive key-chord capture button emitting canonical chord strings.
+    Keybind,
 }
 
 impl UiNodeKind {

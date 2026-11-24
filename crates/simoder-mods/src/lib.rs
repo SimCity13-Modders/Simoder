@@ -5,6 +5,7 @@
 
 pub mod assets;
 pub mod config;
+pub mod keybinds;
 pub mod manager;
 pub mod manifest;
 pub mod native_host;
@@ -16,6 +17,6 @@ pub mod types;
 pub mod ui_patch;
 
 pub use {
-    assets::*, config::*, manager::*, manifest::*, native_host::*, native_trust::*, overlay::*,
-    patch_registry::*, state_store::*, types::*, ui_patch::*,
+    assets::*, config::*, keybinds::*, manager::*, manifest::*, native_host::*, native_trust::*,
+    overlay::*, patch_registry::*, state_store::*, types::*, ui_patch::*,
 };

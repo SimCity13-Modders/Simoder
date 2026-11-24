@@ -287,6 +287,22 @@
                             return origFn.apply(this, arguments);
                         };
                     });
+                    tryWrap(scruiObj.cUIManager.prototype, "IsMouseInUI", function (origFn) {
+                        return function () {
+                            if (window.__simoderUiHost && window.__simoderUiHost.activeModalClose) {
+                                return true;
+                            }
+                            return origFn.apply(this, arguments);
+                        };
+                    });
+                    tryWrap(scruiObj.cUIManager.prototype, "IsPointInUI", function (origFn) {
+                        return function () {
+                            if (window.__simoderUiHost && window.__simoderUiHost.activeModalClose) {
+                                return true;
+                            }
+                            return origFn.apply(this, arguments);
+                        };
+                    });
                 }
             }
         }
@@ -393,9 +409,44 @@
             return JSON.stringify({ ok: false, error: "document.body unavailable" });
         }
 
+        if (packet.skipIntro === true && sim) {
+            if (sim.cLauncher3D) {
+                sim.cLauncher3D.mSkipIntroMovie = true;
+            }
+            if (sim.gSessionManager && typeof sim.gSessionManager.SetSkipMovie === "function") {
+                sim.gSessionManager.SetSkipMovie(true);
+            }
+            if (!host.skipIntroPatched && sim.cCurtainUIHandler && sim.cCurtainUIHandler.prototype) {
+                host.skipIntroPatched = true;
+                var curtainProto = sim.cCurtainUIHandler.prototype;
+                curtainProto.Show = function () {
+                    if (sim.cLauncher3D) { sim.cLauncher3D.mSkipIntroMovie = true; }
+                    if (sim.gSessionManager && typeof sim.gSessionManager.SetSkipMovie === "function") {
+                        sim.gSessionManager.SetSkipMovie(true);
+                    }
+                    if (typeof this.OnIntroMovieStop === "function") {
+                        this.OnIntroMovieStop();
+                    }
+                };
+                curtainProto.PlayIntroMovie = function () {
+                    this.mMoviePlaying = false;
+                    if (typeof this.DestroyListeners === "function") {
+                        this.DestroyListeners();
+                    }
+                    if (typeof this.OnIntroMovieStop === "function") {
+                        this.OnIntroMovieStop();
+                    }
+                };
+            }
+            if (sim.gCurtainUIHandler && sim.gCurtainUIHandler.mMoviePlaying && typeof sim.gCurtainUIHandler.StopIntroMovie === "function") {
+                sim.gCurtainUIHandler.StopIntroMovie();
+            }
+        }
+
         if (!host.escBound && doc.addEventListener) {
             host.escBound = true;
             doc.addEventListener("keydown", function (e) {
+                if (host.keybindCaptureActive) { return; }
                 var code = e ? (e.keyCode || e.which) : 0;
                 if (code === 27 && host.activeModalClose) {
                     pushEvent(host.activeModalClose.patchId, host.activeModalClose.action, "modal_escape_close", null);
@@ -415,7 +466,7 @@
 
         var ensureStyles = function () {
             var cssText =
-                ".simoder-slot-launcher{position:fixed;left:336px;bottom:8px;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;}" +
+                ".simoder-slot-launcher{position:fixed;left:336px;bottom:8px;z-index:10;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;}" +
                 ".simoder-slot-hub{position:fixed;left:44px;bottom:84px;z-index:99980;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
                 ".simoder-slot-region{position:fixed;z-index:99982;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;display:none;}" +
                 ".simoder-region-tile-btn{position:absolute;right:6px;bottom:6px;z-index:25;padding:3px 9px;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;text-transform:uppercase;letter-spacing:0.3px;border-radius:11px;border:1px solid #8ea3b8;background:#eef3f8;background-image:-webkit-gradient(linear,left top,left bottom,from(#ffffff),color-stop(0.55,#e5edf5),to(#cad7e5));color:#1c2f42;cursor:pointer;box-shadow:0 2px 5px rgba(8,18,30,0.55);}" +
@@ -427,13 +478,14 @@
                 ".simoder-modal-header .simoder-modal-title{position:static;display:inline;width:auto;height:auto;text-align:left;color:#ffffff;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:42px;}" +
                 ".simoder-modal-close{-webkit-appearance:none;position:absolute;right:8px;top:7px;width:26px;height:26px;line-height:24px;text-align:center;background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.35);-webkit-border-image:none;-webkit-border-radius:3px;border-radius:3px;color:#ffffff;font-size:16px;font-weight:bold;cursor:pointer;padding:0;outline:none;}" +
                 ".simoder-modal-close:hover{background:#d9483b;border-color:#a82b20;}" +
-                ".simoder-modal-body{position:absolute;top:42px;bottom:52px;left:0;right:0;overflow-y:auto;padding:12px 16px;box-sizing:border-box;}" +
+                ".simoder-modal-body{position:absolute;top:42px;bottom:52px;left:0;right:0;overflow-y:hidden;padding:12px 16px;box-sizing:border-box;}" +
                 ".simoder-modal-body-nofooter{bottom:0;}" +
                 ".simoder-modal-footer{position:absolute;bottom:0;left:0;right:0;height:52px;padding:10px 16px;box-sizing:border-box;background:#dfe8f2;background-image:-webkit-gradient(linear,left top,left bottom,from(#e8eff7),to(#d5e0ec));border-top:1px solid #b8c8d8;-webkit-border-image:none;-webkit-border-radius:0;border-radius:0;text-align:right;}" +
                 ".simoder-modal-footer .simoder-row{margin:0;}" +
                 ".simoder-modal-footer .simoder-row>*{margin-right:0;margin-left:8px;}" +
                 ".simoder-panel{position:static;background:#ffffff;border:1px solid #c3d1df;-webkit-border-image:none;-webkit-border-radius:3px;border-radius:3px;padding:10px 12px;margin:8px 0;box-shadow:inset 0 1px 0 rgba(255,255,255,0.9),0 1px 2px rgba(25,45,68,0.08);}" +
-                ".simoder-panel-scroll{max-height:210px;overflow-y:auto;background:#f7fafd;}" +
+                ".simoder-panel-scroll{max-height:175px;overflow-y:auto;background:#f7fafd;box-sizing:border-box;}" +
+                ".simoder-modal-body .simoder-panel-scroll{margin-bottom:0;}" +
                 ".simoder-row{margin:6px 0;}" +
                 ".simoder-row>*{display:inline-block;vertical-align:middle;margin-right:8px;}" +
                 ".simoder-text{position:static;width:auto;height:auto;color:#233547;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.45;text-align:left;}" +
@@ -463,6 +515,10 @@
                 ".simoder-badge{background:#d94235;color:#ffffff;border-radius:9px;padding:1px 6px;margin-left:6px;font-size:10px;font-weight:bold;line-height:13px;}" +
                 ".simoder-badge-ok{background:#2d9620;}" +
                 ".simoder-badge-muted{background:#5f7489;}" +
+                ".simoder-panel-danger{background:#fff2f2;border-color:#d94235;border-left:4px solid #c93d32;}" +
+                ".simoder-text-danger{color:#b91c1c;font-weight:bold;}" +
+                ".simoder-keybind-btn{min-width:124px;text-align:center;font-family:Consolas,monospace;letter-spacing:0.3px;}" +
+                ".simoder-keybind-capturing{border-color:#2ca7e6 !important;box-shadow:0 0 0 2px rgba(44,167,230,0.45) !important;}" +
                 ".simoder-divider{position:static;width:100%;height:1px;border:0;border-top:1px solid #d0dce8;margin:8px 0;}" +
                 ".simoder-field{margin:6px 0;}" +
                 ".simoder-field-label{position:static;display:block;width:auto;height:auto;font-family:EAAGSimCityStdBk,Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;color:#30465b;margin-bottom:3px;text-align:left;}" +
@@ -537,6 +593,7 @@
             var viewW = window.innerWidth || (doc.documentElement && doc.documentElement.clientWidth) || 1280;
             var tags = ["a", "button", "div", "span"];
             var bestRect = null;
+            var bestEl = null;
             var t, i, els, el, rect, txt, lower;
             for (t = 0; t < tags.length; t += 1) {
                 els = doc.getElementsByTagName(tags[t]);
@@ -550,14 +607,15 @@
                     if (txt.length === 0 || txt.length > 48 || txt.indexOf("2013") !== -1) { continue; }
                     lower = txt.toLowerCase();
                     if (lower.indexOf("update") !== -1 || lower.indexOf("aktualiz") !== -1 || el.tagName === "A") {
-                        return { rect: rect, viewW: viewW, viewH: viewH };
+                        return { el: el, rect: rect, viewW: viewW, viewH: viewH };
                     }
                     if (!bestRect || rect.top > bestRect.top) {
                         bestRect = rect;
+                        bestEl = el;
                     }
                 }
             }
-            return bestRect ? { rect: bestRect, viewW: viewW, viewH: viewH } : null;
+            return bestRect ? { el: bestEl, rect: bestRect, viewW: viewW, viewH: viewH } : null;
         };
 
         var findMainMenuHubColumn = function () {
@@ -1366,10 +1424,27 @@
                     var maxRight = Math.round(anchor.viewW - 265);
                     if (targetLeft > maxRight) { targetLeft = maxRight; }
                     if (targetLeft < 180) { targetLeft = 180; }
-                    container.style.left = targetLeft + "px";
-                    container.style.right = "auto";
-                    container.style.top = Math.round(anchor.rect.top + (anchor.rect.height - 24) / 2) + "px";
-                    container.style.bottom = "auto";
+                    var targetTop = Math.round(anchor.rect.top + (anchor.rect.height - 24) / 2);
+                    var hostParent = anchor.el ? (anchor.el.offsetParent || anchor.el.parentNode) : null;
+                    if (hostParent && hostParent !== doc.body && hostParent !== doc.documentElement && typeof hostParent.getBoundingClientRect === "function") {
+                        if (container.parentNode !== hostParent) {
+                            hostParent.appendChild(container);
+                        }
+                        var pRect = hostParent.getBoundingClientRect();
+                        container.style.position = "absolute";
+                        container.style.zIndex = "5";
+                        container.style.left = Math.round(targetLeft - pRect.left) + "px";
+                        container.style.right = "auto";
+                        container.style.top = Math.round(targetTop - pRect.top) + "px";
+                        container.style.bottom = "auto";
+                    } else {
+                        container.style.position = "fixed";
+                        container.style.zIndex = "10";
+                        container.style.left = targetLeft + "px";
+                        container.style.right = "auto";
+                        container.style.top = targetTop + "px";
+                        container.style.bottom = "auto";
+                    }
                 }
             } else if (viewName === "main.menu") {
                 var hub = findMainMenuHubColumn();
@@ -1464,6 +1539,26 @@
             container.setAttribute("data-simoder-view", viewName);
             container.className = slotClassFor(viewName, slotName);
             if (slotName === "modal.overlay") {
+                container.mControl = {
+                    __simoderModalSentinel: true,
+                    mSelectable: true,
+                    mPrivate_IsDestroyed: false,
+                    ConvertAbsoluteToLocalSpace: function (x, y) { return [x, y]; },
+                    Private_OnMouseDown: function () { var m = window.gUIManager || uiMgr; if (m) { m.mAllowDefaultMouseBehavior = true; } },
+                    Private_OnMouseUp: function () { var m = window.gUIManager || uiMgr; if (m) { m.mAllowDefaultMouseBehavior = true; } },
+                    Private_OnMouseMove: function () { var m = window.gUIManager || uiMgr; if (m) { m.mAllowDefaultMouseBehavior = true; } },
+                    Private_OnGainFocus: function () {},
+                    Private_OnLoseFocus: function () {}
+                };
+                var stopModalMouseProp = function (e) {
+                    if (e && e.stopPropagation) { e.stopPropagation(); }
+                    if (e) { e.cancelBubble = true; }
+                };
+                container.onmousedown = stopModalMouseProp;
+                container.onmouseup = stopModalMouseProp;
+                container.onmousemove = stopModalMouseProp;
+                container.oncontextmenu = stopModalMouseProp;
+                container.onmousewheel = stopModalMouseProp;
                 container.onclick = function (e) {
                     var tgt = e ? (e.target || e.srcElement) : null;
                     if (tgt === container && host.activeModalClose) {
@@ -1728,6 +1823,80 @@
                     for (ti = 0; ti < activeTabNode.children.length; ti += 1) tabBody.appendChild(renderNode(patchId, activeTabNode.children[ti]));
                 }
                 el.appendChild(tabBody);
+            } else if (kind === "keybind") {
+                el = doc.createElement("button");
+                el.type = "button";
+                el.className = "simoder-btn simoder-keybind-btn cButton cButtonNormal";
+                if (node.tone === "danger") { el.className += " simoder-btn-danger"; }
+                else if (node.tone === "primary") { el.className += " simoder-btn-primary"; }
+                else if (node.tone === "warning") { el.className += " simoder-btn-warning"; }
+                if (node.disabled === true) { el.disabled = true; }
+                var kbSpan = doc.createElement("span");
+                kbSpan.className = "Head_11_CR_Vmid_UC simoder-btn-label";
+                var displayChord = (node.value && String(node.value).length > 0) ? String(node.value) : (node.placeholder || "Unbound");
+                kbSpan.textContent = displayChord;
+                el.appendChild(kbSpan);
+                attachVanillaInteractiveFeedback(el, true);
+                (function (pId, act, tId, btnEl, spanEl, prevText) {
+                    var keyTokenFromEvent = function (e) {
+                        var c = e ? (e.keyCode || e.which) : 0;
+                        if (c >= 65 && c <= 90) { return String.fromCharCode(c); }
+                        if (c >= 48 && c <= 57) { return String.fromCharCode(c); }
+                        if (c >= 112 && c <= 123) { return "F" + String(c - 111); }
+                        var map = {
+                            32: "Space", 13: "Enter", 9: "Tab", 27: "Esc", 8: "Backspace",
+                            46: "Delete", 45: "Insert", 36: "Home", 35: "End", 33: "PageUp",
+                            34: "PageDown", 38: "Up", 40: "Down", 37: "Left", 39: "Right",
+                            192: "Backquote", 189: "Minus", 187: "Equal", 219: "BracketLeft",
+                            221: "BracketRight", 186: "Semicolon", 222: "Quote", 188: "Comma",
+                            190: "Period", 191: "Slash", 220: "Backslash"
+                        };
+                        return map[c] || null;
+                    };
+                    btnEl.onclick = function () {
+                        if (btnEl.disabled || host.keybindCaptureActive) { return; }
+                        host.keybindCaptureActive = true;
+                        spanEl.textContent = "Press key...";
+                        btnEl.className += " simoder-keybind-capturing";
+                        var onKey = function (e) {
+                            var c = e ? (e.keyCode || e.which) : 0;
+                            if (c === 16 || c === 17 || c === 18 || c === 91 || c === 92) {
+                                if (e && e.preventDefault) { e.preventDefault(); }
+                                if (e && e.stopPropagation) { e.stopPropagation(); }
+                                return;
+                            }
+                            if (e && e.preventDefault) { e.preventDefault(); }
+                            if (e && e.stopPropagation) { e.stopPropagation(); }
+                            if (e && e.stopImmediatePropagation) { e.stopImmediatePropagation(); }
+                            doc.removeEventListener("keydown", onKey, true);
+                            host.keybindCaptureActive = false;
+                            btnEl.className = String(btnEl.className || "").replace(/\s*simoder-keybind-capturing/g, "");
+                            if (c === 27) {
+                                spanEl.textContent = prevText;
+                                return;
+                            }
+                            if (c === 8 && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+                                spanEl.textContent = node.placeholder || "Unbound";
+                                pushEvent(pId, act || "rebind_key", tId, "");
+                                return;
+                            }
+                            var tok = keyTokenFromEvent(e);
+                            if (!tok) {
+                                spanEl.textContent = prevText;
+                                return;
+                            }
+                            var parts = [];
+                            if (e.ctrlKey) { parts.push("Ctrl"); }
+                            if (e.altKey) { parts.push("Alt"); }
+                            if (e.shiftKey) { parts.push("Shift"); }
+                            parts.push(tok);
+                            var chord = parts.join("+");
+                            spanEl.textContent = chord;
+                            pushEvent(pId, act || "rebind_key", tId, chord);
+                        };
+                        doc.addEventListener("keydown", onKey, true);
+                    };
+                }(patchId, node.action, node.id, el, kbSpan, displayChord));
             } else if (kind === "divider") {
                 el = doc.createElement("div");
                 el.className = "simoder-divider HUD_Palette_Divider";
@@ -1742,6 +1911,7 @@
                 el.className = "simoder-text Body_12_Left";
                 if (node.tone === "muted") { el.className = "simoder-text-muted Body_12_Left"; }
                 else if (node.tone === "title") { el.className = "simoder-text-title Header_12_Center_Upper"; }
+                else if (node.tone === "danger") { el.className = "simoder-text simoder-text-danger Body_12_Left"; }
                 el.textContent = node.text || node.label || "";
             } else {
                 el = doc.createElement("div");
@@ -1797,6 +1967,8 @@
                         el.className = "simoder-row";
                     } else if (node.tone === "scroll") {
                         el.className = "simoder-panel simoder-panel-scroll Browse_Tile_Recessed_SharpCorners";
+                    } else if (node.tone === "danger") {
+                        el.className = "simoder-panel simoder-panel-danger Browse_Tile_Recessed_SharpCorners";
                     } else if (node.tone === "muted" || node.tone === "warning") {
                         el.className = "simoder-panel Rollover_Recessed";
                     } else {
@@ -1869,6 +2041,49 @@
             }
         }
 
+        var fitModalScrollPanels = function () {
+            if (!doc.querySelectorAll) { return; }
+            var bodies = doc.querySelectorAll(".simoder-modal-body");
+            var bi, si, bodyEl, bodyRect, scrolls, scrollEl, sr, cur, cs, bottomReserve, avail;
+            for (bi = 0; bi < bodies.length; bi += 1) {
+                bodyEl = bodies[bi];
+                if (!bodyEl || typeof bodyEl.getBoundingClientRect !== "function" || !bodyEl.querySelectorAll) { continue; }
+                bodyRect = bodyEl.getBoundingClientRect();
+                if (!bodyRect || bodyRect.height <= 0) { continue; }
+                scrolls = bodyEl.querySelectorAll(".simoder-panel-scroll");
+                for (si = 0; si < scrolls.length; si += 1) {
+                    scrollEl = scrolls[si];
+                    if (!scrollEl || typeof scrollEl.getBoundingClientRect !== "function") { continue; }
+                    sr = scrollEl.getBoundingClientRect();
+                    if (!sr || sr.width <= 0) { continue; }
+                    bottomReserve = 0;
+                    if (typeof window.getComputedStyle === "function") {
+                        cur = scrollEl.parentNode;
+                        while (cur && cur.nodeType === 1) {
+                            try {
+                                cs = window.getComputedStyle(cur, null);
+                                if (cs) {
+                                    bottomReserve += (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+                                    if (cur !== bodyEl) {
+                                        bottomReserve += (parseFloat(cs.marginBottom) || 0);
+                                    }
+                                }
+                            } catch (_e) {}
+                            if (cur === bodyEl) { break; }
+                            cur = cur.parentNode;
+                        }
+                        bottomReserve += 2;
+                    } else {
+                        bottomReserve = 28;
+                    }
+                    avail = Math.floor(bodyRect.bottom - sr.top - bottomReserve);
+                    if (avail < 80) { avail = 80; }
+                    scrollEl.style.maxHeight = avail + "px";
+                }
+            }
+            host.lastModalFitH = window.innerHeight || 0;
+        };
+
         if (needsReconcile) {
             ensureStyles();
             var focusRestore = null;
@@ -1895,6 +2110,9 @@
                 if (allNodes[i].parentNode) {
                     allNodes[i].parentNode.removeChild(allNodes[i]);
                 }
+            }
+            if (uiMgr && uiMgr.mControlUnderMouse && uiMgr.mControlUnderMouse.__simoderModalSentinel && typeof uiMgr.SetControlUnderMouse === "function") {
+                uiMgr.SetControlUnderMouse(null);
             }
             for (i = 0; i < activeForPhase.length; i += 1) {
                 var p = activeForPhase[i];
@@ -1959,6 +2177,9 @@
                     } catch (_e) {}
                 }
             }
+            fitModalScrollPanels();
+        } else if (host.activeModalClose && (window.innerHeight || 0) !== host.lastModalFitH) {
+            fitModalScrollPanels();
         }
 
         var drained = host.events.splice(0, host.events.length);

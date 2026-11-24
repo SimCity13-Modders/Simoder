@@ -1,20 +1,23 @@
 #![forbid(unsafe_code)]
 
 //! Sandboxed `mlua` Luau host running `Simoder-Base` (`init.luau`, `services/ui-manager.luau`,
-//! `services/mods-ui.luau`) and binding private `__simoder_base.{ui, mods}` capabilities.
+//! `services/mods-ui.luau`) and binding private `__simoder_base.{ui, mods, keybinds}` capabilities.
+
+mod bindings;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use mlua::serde::SerializeOptions;
-use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
+use mlua::{Function, Lua, Table, Value};
 use parking_lot::Mutex;
-use serde::Serialize;
-use simoder_mods::{UiPatchDescriptor, UiPatchEvent, UiViewObservation};
+use simoder_mods::{
+    KeybindDescriptor, KeybindSnapshotEntry, UiPatchDescriptor, UiPatchEvent, UiViewObservation,
+};
 use walkdir::WalkDir;
 
+use self::bindings::install_private_host_table;
 use crate::runtime::{IntegratedSimoderRuntime, ModsUiSnapshot};
 
 /// Host UI transport state contract shared between runtime-owned and static global runtimes.
@@ -29,6 +32,10 @@ pub trait UiStateHost: Send + Sync {
     ) -> Result<u64, String>;
     /// Drain queued DOM click/toggle events.
     fn drain_ui_events(&self) -> Vec<UiPatchEvent>;
+    /// Record or clear whether `mod_id` requests skipping the startup intro movie.
+    fn set_mod_skip_intro(&self, _mod_id: &str, _enabled: bool) {}
+    /// Clear any game-action flags owned by `mod_id`.
+    fn revoke_mod_game_actions(&self, _mod_id: &str) {}
 }
 
 impl UiStateHost for IntegratedSimoderRuntime {
@@ -46,6 +53,14 @@ impl UiStateHost for IntegratedSimoderRuntime {
 
     fn drain_ui_events(&self) -> Vec<UiPatchEvent> {
         IntegratedSimoderRuntime::drain_ui_events(self)
+    }
+
+    fn set_mod_skip_intro(&self, mod_id: &str, enabled: bool) {
+        IntegratedSimoderRuntime::set_mod_skip_intro(self, mod_id, enabled);
+    }
+
+    fn revoke_mod_game_actions(&self, mod_id: &str) {
+        IntegratedSimoderRuntime::revoke_mod_game_actions(self, mod_id);
     }
 }
 
@@ -65,17 +80,17 @@ impl UiStateHost for &'static IntegratedSimoderRuntime {
     fn drain_ui_events(&self) -> Vec<UiPatchEvent> {
         IntegratedSimoderRuntime::drain_ui_events(self)
     }
+
+    fn set_mod_skip_intro(&self, mod_id: &str, enabled: bool) {
+        IntegratedSimoderRuntime::set_mod_skip_intro(self, mod_id, enabled);
+    }
+
+    fn revoke_mod_game_actions(&self, mod_id: &str) {
+        IntegratedSimoderRuntime::revoke_mod_game_actions(self, mod_id);
+    }
 }
 
-const SERDE_NIL_OPTIONS: SerializeOptions = SerializeOptions::new().serialize_none_to_null(false);
 const BASE_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LuaActionResult {
-    ok: bool,
-    error: Option<String>,
-}
 
 /// Host callback interface wiring `Simoder-Base` `mods-ui` actions to either Win32 native loading or test doubles.
 pub trait ModsActionBackend: Send + Sync {
@@ -102,16 +117,32 @@ pub trait ModsActionBackend: Send + Sync {
     ) -> Result<(), String> {
         Err("Per-region mod contexts are unavailable".into())
     }
+    /// List all registered keybinds and any active conflicts.
+    fn list_keybinds(&self) -> Vec<KeybindSnapshotEntry> {
+        Vec::new()
+    }
+    /// Register or update a keybind descriptor.
+    fn register_keybind(&self, _desc: KeybindDescriptor) -> Result<String, String> {
+        Err("Keybind registry is unavailable".into())
+    }
+    /// Rebind a keybind to `chord` (`None` or empty string unbinds).
+    fn rebind_keybind(&self, _id: &str, _chord: Option<&str>) -> Result<Option<String>, String> {
+        Err("Keybind registry is unavailable".into())
+    }
+    /// Reset a keybind back to its default chord.
+    fn reset_keybind(&self, _id: &str) -> Result<(), String> {
+        Err("Keybind registry is unavailable".into())
+    }
 }
 
-/// Default [`ModsActionBackend`] backed by [`IntegratedSimoderRuntime`] for unit/integration testing.
+/// Pure in-memory [`ModsActionBackend`] backed by [`IntegratedSimoderRuntime`] for unit and integration tests.
 pub struct RuntimeOnlyModsBackend {
     runtime: Arc<IntegratedSimoderRuntime>,
 }
 
 impl RuntimeOnlyModsBackend {
-    /// Wrap `runtime` cleanly without OS DLL loading side effects.
-    pub fn new(runtime: Arc<IntegratedSimoderRuntime>) -> Self {
+    /// Construct a test/headless backend bound to `runtime`.
+    pub const fn new(runtime: Arc<IntegratedSimoderRuntime>) -> Self {
         Self { runtime }
     }
 }
@@ -176,7 +207,7 @@ impl ModsActionBackend for RuntimeOnlyModsBackend {
 
     fn set_enabled(&self, mod_id: &str, enabled: bool) -> Result<(), String> {
         self.runtime.with_mod_manager_mut(|maybe| {
-            let mgr = maybe.ok_or_else(|| "ModManager is unavailable".to_string())?;
+            let mgr = maybe.ok_or_else(|| "ModManager unavailable".to_string())?;
             mgr.set_enabled(mod_id, enabled).map_err(|e| e.to_string())
         })
     }
@@ -194,6 +225,22 @@ impl ModsActionBackend for RuntimeOnlyModsBackend {
         self.runtime
             .set_region_mod_enabled(region_id, mod_id, enabled)
     }
+
+    fn list_keybinds(&self) -> Vec<KeybindSnapshotEntry> {
+        self.runtime.list_keybinds()
+    }
+
+    fn register_keybind(&self, desc: KeybindDescriptor) -> Result<String, String> {
+        self.runtime.register_keybind(desc)
+    }
+
+    fn rebind_keybind(&self, id: &str, chord: Option<&str>) -> Result<Option<String>, String> {
+        self.runtime.rebind_keybind(id, chord)
+    }
+
+    fn reset_keybind(&self, id: &str) -> Result<(), String> {
+        self.runtime.reset_keybind(id)
+    }
 }
 
 struct ModuleLoaderState {
@@ -206,6 +253,7 @@ struct ModuleLoaderState {
 /// Embedded sandboxed `mlua` Luau runtime hosting `Simoder-Base` UI composition and `mods-ui`.
 pub struct BaseRuntimeHost {
     lua: Mutex<Lua>,
+    runtime: Arc<dyn UiStateHost>,
 }
 
 impl BaseRuntimeHost {
@@ -232,7 +280,7 @@ impl BaseRuntimeHost {
 
         let lua = Lua::new();
         let _ = lua.set_memory_limit(BASE_MEMORY_LIMIT_BYTES);
-        install_private_host_table(&lua, runtime, backend)?;
+        install_private_host_table(&lua, runtime.clone(), backend)?;
 
         let loader = Arc::new(Mutex::new(ModuleLoaderState {
             scripts,
@@ -257,6 +305,7 @@ impl BaseRuntimeHost {
 
         Ok(Self {
             lua: Mutex::new(lua),
+            runtime,
         })
     }
 
@@ -317,8 +366,24 @@ impl BaseRuntimeHost {
             .call((mod_id, generation))
             .map_err(|e| format!("forMod failed: {e}"))?;
 
+        let game_api = lua.create_table().map_err(|e| e.to_string())?;
+        let rt_for_skip = self.runtime.clone();
+        let mod_id_for_skip = mod_id.to_string();
+        game_api
+            .set(
+                "setSkipIntro",
+                lua.create_function(move |_, enabled: bool| {
+                    rt_for_skip.set_mod_skip_intro(&mod_id_for_skip, enabled);
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        game_api.set_readonly(true);
+
         let api = lua.create_table().map_err(|e| e.to_string())?;
         api.set("ui", mod_ui).map_err(|e| e.to_string())?;
+        api.set("game", game_api).map_err(|e| e.to_string())?;
         api.set_readonly(true);
 
         let mod_table: Table = lua
@@ -332,6 +397,19 @@ impl BaseRuntimeHost {
         entry
             .call::<()>(api)
             .map_err(|e| format!("mod '{mod_id}.{entry_fn_name}' error: {e}"))
+    }
+
+    /// Revoke all UI patches and game-action flags owned by `mod_id`.
+    pub fn revoke_mod_in_base(&self, mod_id: &str) {
+        self.runtime.revoke_mod_game_actions(mod_id);
+        let lua = self.lua.lock();
+        if let Ok(exports) = lua.globals().get::<Table>("__simoder_base_exports")
+            && let Ok(services) = exports.get::<Table>("services")
+            && let Ok(ui_mgr) = services.get::<Table>("ui-manager")
+            && let Ok(revoke) = ui_mgr.get::<Function>("revokeMod")
+        {
+            let _ = revoke.call::<()>(mod_id);
+        }
     }
 
     /// Invoke `exports.onDisable()` during clean shutdown.
@@ -375,14 +453,13 @@ fn read_luau_scripts_tree(scripts_dir: &Path) -> Result<BTreeMap<String, String>
     let mut out = BTreeMap::new();
     for entry in WalkDir::new(scripts_dir).follow_links(false) {
         let entry = entry.map_err(|e| format!("walkdir error under scripts: {e}"))?;
-        let ft = entry.file_type();
-        if ft.is_symlink() {
+        if entry.file_type().is_symlink() {
             return Err(format!(
                 "rejected symlink inside Simoder-Base scripts: '{}'",
                 entry.path().display()
             ));
         }
-        if !ft.is_file() {
+        if !entry.file_type().is_file() {
             continue;
         }
         let path = entry.path();
@@ -391,32 +468,32 @@ fn read_luau_scripts_tree(scripts_dir: &Path) -> Result<BTreeMap<String, String>
         }
         let rel = path
             .strip_prefix(scripts_dir)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("failed normalizing script path: {e}"))?;
         let key = rel
             .with_extension("")
             .to_string_lossy()
             .replace('\\', "/");
-        let content = fs::read_to_string(path)
+        let text = fs::read_to_string(path)
             .map_err(|e| format!("failed reading '{}': {e}", path.display()))?;
-        out.insert(key, content);
+        out.insert(key, text);
     }
     Ok(out)
 }
 
-fn resolve_module_key(caller: Option<&str>, request: &str) -> Result<String, String> {
+fn resolve_require_path(caller_key: Option<&str>, request: &str) -> Result<String, String> {
     let normalized = request.trim().replace('\\', "/");
-    let unaliased = normalized.strip_prefix("@simoder.base/").unwrap_or(&normalized);
+    let unaliased = normalized
+        .strip_prefix("@simoder.base/")
+        .or_else(|| normalized.strip_prefix("@self/"))
+        .unwrap_or(&normalized);
     let stripped = unaliased.strip_suffix(".luau").unwrap_or(unaliased);
-
     let mut parts: Vec<String> = Vec::new();
+
     if stripped.starts_with("./") || stripped.starts_with("../") {
-        if let Some(caller_key) = caller {
-            let caller_parts: Vec<&str> = caller_key.split('/').collect();
-            if caller_parts.len() > 1 {
-                for seg in &caller_parts[..caller_parts.len() - 1] {
-                    parts.push((*seg).to_string());
-                }
-            }
+        if let Some(caller) = caller_key {
+            let mut caller_segs: Vec<&str> = caller.split('/').collect();
+            caller_segs.pop();
+            parts.extend(caller_segs.into_iter().map(str::to_string));
         }
         for seg in stripped.split('/') {
             match seg {
@@ -475,348 +552,15 @@ fn load_module(lua: &Lua, state: &Arc<Mutex<ModuleLoaderState>>, key: &str) -> R
 }
 
 fn install_require(lua: &Lua, state: Arc<Mutex<ModuleLoaderState>>) -> Result<(), String> {
-    let req_fn = lua
-        .create_function(move |lua, spec: String| {
+    let require_fn = lua
+        .create_function(move |lua, req: String| {
             let caller = state.lock().stack.last().cloned();
-            let resolved = resolve_module_key(caller.as_deref(), &spec)
-                .map_err(mlua::Error::runtime)?;
+            let resolved =
+                resolve_require_path(caller.as_deref(), &req).map_err(mlua::Error::runtime)?;
             load_module(lua, &state, &resolved).map_err(mlua::Error::runtime)
         })
         .map_err(|e| e.to_string())?;
     lua.globals()
-        .set("require", req_fn)
-        .map_err(|e| e.to_string())
-}
-
-fn action_result_to_lua(lua: &Lua, res: Result<(), String>) -> mlua::Result<Value> {
-    let dto = match res {
-        Ok(()) => LuaActionResult {
-            ok: true,
-            error: None,
-        },
-        Err(err) => LuaActionResult {
-            ok: false,
-            error: Some(err),
-        },
-    };
-    lua.to_value_with(&dto, SERDE_NIL_OPTIONS)
-}
-
-fn install_private_host_table(
-    lua: &Lua,
-    runtime: Arc<dyn UiStateHost>,
-    backend: Arc<dyn ModsActionBackend>,
-) -> Result<(), String> {
-    let host = lua.create_table().map_err(|e| e.to_string())?;
-
-    let values = lua.create_table().map_err(|e| e.to_string())?;
-    values
-        .set(
-            "validate",
-            lua.create_function(|_, (wire, _schema): (Value, Value)| Ok(wire))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    values
-        .set(
-            "wire",
-            lua.create_function(|_, val: Value| Ok(val))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("values", values).map_err(|e| e.to_string())?;
-
-    let tasks = lua.create_table().map_err(|e| e.to_string())?;
-    tasks
-        .set(
-            "poll",
-            lua.create_function(|_, _h: Value| Ok(Value::Nil))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    tasks
-        .set(
-            "cancel",
-            lua.create_function(|_, _h: Value| Ok((Value::Nil, "Unsupported")))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    tasks
-        .set(
-            "observe",
-            lua.create_function(|_, (_h, _cb): (Value, Value)| Ok("noop"))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    tasks
-        .set(
-            "await",
-            lua.create_function(|_, _h: Value| Ok((Value::Nil, "CoroutineNotRegistered")))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("tasks", tasks).map_err(|e| e.to_string())?;
-
-    let lifecycle = lua.create_table().map_err(|e| e.to_string())?;
-    lifecycle
-        .set(
-            "snapshot",
-            lua.create_function(|lua, ()| {
-                let tbl = lua.create_table()?;
-                tbl.set("epoch", "1")?;
-                tbl.set("sequence", "1")?;
-                Ok(tbl)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    lifecycle
-        .set(
-            "subscribe",
-            lua.create_function(|_, _cb: Value| Ok("noop"))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("lifecycle", lifecycle).map_err(|e| e.to_string())?;
-
-    let registry = lua.create_table().map_err(|e| e.to_string())?;
-    registry
-        .set(
-            "descriptors",
-            lua.create_function(|lua, ()| Ok((lua.create_table()?, 2i32)))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("registry", registry).map_err(|e| e.to_string())?;
-
-    let rt_tbl = lua.create_table().map_err(|e| e.to_string())?;
-    rt_tbl
-        .set(
-            "run",
-            lua.create_function(|_, _cb: Value| Ok("noop"))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    rt_tbl
-        .set(
-            "request",
-            lua.create_function(|_, (_m, _v): (Value, Value)| Ok((Value::Nil, "Unavailable")))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    rt_tbl
-        .set(
-            "observeSession",
-            lua.create_function(|_, (_t, _g, _l): (Value, Value, Value)| {
-                Ok((Value::Nil, "Unavailable"))
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("runtime", rt_tbl).map_err(|e| e.to_string())?;
-
-    let ui_tbl = lua.create_table().map_err(|e| e.to_string())?;
-    let rt_obs = runtime.clone();
-    ui_tbl
-        .set(
-            "observeViews",
-            lua.create_function(move |lua, ()| {
-                lua.to_value_with(&rt_obs.get_ui_observation(), SERDE_NIL_OPTIONS)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let rt_commit = runtime.clone();
-    ui_tbl
-        .set(
-            "commitPatches",
-            lua.create_function(move |lua, (rev, patches_val): (u64, Value)| {
-                let patches: Vec<UiPatchDescriptor> = match &patches_val {
-                    Value::Nil => Vec::new(),
-                    Value::Table(t) if t.raw_len() == 0 && t.pairs::<Value, Value>().next().is_none() => {
-                        Vec::new()
-                    }
-                    _ => lua.from_value(patches_val)?,
-                };
-                rt_commit
-                    .commit_composed_ui_patches(rev, patches)
-                    .map_err(mlua::Error::runtime)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let rt_poll = runtime;
-    ui_tbl
-        .set(
-            "pollEvents",
-            lua.create_function(move |lua, ()| {
-                lua.to_value_with(&rt_poll.drain_ui_events(), SERDE_NIL_OPTIONS)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("ui", ui_tbl).map_err(|e| e.to_string())?;
-
-    let mods_tbl = lua.create_table().map_err(|e| e.to_string())?;
-    let b_list = backend.clone();
-    mods_tbl
-        .set(
-            "list",
-            lua.create_function(move |lua, ()| lua.to_value_with(&b_list.list_mods(), SERDE_NIL_OPTIONS))
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let b_approve = backend.clone();
-    mods_tbl
-        .set(
-            "approveNative",
-            lua.create_function(move |lua, (mod_id, sha256): (String, String)| {
-                action_result_to_lua(lua, b_approve.approve_native(&mod_id, &sha256))
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let b_deny = backend.clone();
-    mods_tbl
-        .set(
-            "denyNative",
-            lua.create_function(move |lua, (mod_id, sha256): (String, String)| {
-                action_result_to_lua(lua, b_deny.deny_native(&mod_id, &sha256))
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let b_revoke = backend.clone();
-    mods_tbl
-        .set(
-            "revokeNative",
-            lua.create_function(move |lua, mod_id: String| {
-                action_result_to_lua(lua, b_revoke.revoke_native(&mod_id))
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let b_toggle = backend.clone();
-    mods_tbl
-        .set(
-            "setEnabled",
-            lua.create_function(move |lua, (mod_id, enabled): (String, bool)| {
-                action_result_to_lua(lua, b_toggle.set_enabled(&mod_id, enabled))
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let b_reg_get = backend.clone();
-    mods_tbl
-        .set(
-            "getRegionMods",
-            lua.create_function(move |lua, region_id: String| {
-                lua.to_value_with(&b_reg_get.get_region_mods(&region_id), SERDE_NIL_OPTIONS)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    let b_reg_set = backend;
-    mods_tbl
-        .set(
-            "setRegionModEnabled",
-            lua.create_function(move |lua, (region_id, mod_id, enabled): (String, String, bool)| {
-                action_result_to_lua(
-                    lua,
-                    b_reg_set.set_region_mod_enabled(&region_id, &mod_id, enabled),
-                )
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    mods_tbl
-        .set(
-            "extractZip",
-            lua.create_function(|lua, (zip_path, target_dir): (String, String)| {
-                let res = crate::net::extract_zip_archive(Path::new(&zip_path), Path::new(&target_dir));
-                let tbl = lua.create_table()?;
-                match res {
-                    Ok(count) => {
-                        tbl.set("ok", true)?;
-                        tbl.set("count", count)?;
-                    }
-                    Err(err) => {
-                        tbl.set("ok", false)?;
-                        tbl.set("error", err)?;
-                    }
-                }
-                Ok(tbl)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("mods", mods_tbl).map_err(|e| e.to_string())?;
-
-    let net_tbl = lua.create_table().map_err(|e| e.to_string())?;
-    net_tbl
-        .set(
-            "getJson",
-            lua.create_function(|lua, url: String| {
-                let res = crate::net::get_json(&url);
-                let tbl = lua.create_table()?;
-                match res {
-                    Ok(json) => {
-                        tbl.set("ok", true)?;
-                        tbl.set("body", json)?;
-                    }
-                    Err(err) => {
-                        tbl.set("ok", false)?;
-                        tbl.set("error", err)?;
-                    }
-                }
-                Ok(tbl)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    net_tbl
-        .set(
-            "downloadFile",
-            lua.create_function(|lua, (url, dest_path): (String, String)| {
-                let res = crate::net::download_file(&url, Path::new(&dest_path), |_cur, _tot| {});
-                let tbl = lua.create_table()?;
-                match res {
-                    Ok(()) => {
-                        tbl.set("ok", true)?;
-                    }
-                    Err(err) => {
-                        tbl.set("ok", false)?;
-                        tbl.set("error", err)?;
-                    }
-                }
-                Ok(tbl)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("net", net_tbl).map_err(|e| e.to_string())?;
-
-    let sys_tbl = lua.create_table().map_err(|e| e.to_string())?;
-    sys_tbl
-        .set(
-            "openUrl",
-            lua.create_function(|_, url: String| {
-                #[cfg(all(windows, not(test)))]
-                {
-                    crate::win32_native::open_url_in_browser(&url);
-                }
-                #[cfg(any(not(windows), test))]
-                {
-                    let _ = url;
-                }
-                Ok(true)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    host.set("system", sys_tbl).map_err(|e| e.to_string())?;
-
-    lua.globals()
-        .set("__simoder_base", host)
+        .set("require", require_fn)
         .map_err(|e| e.to_string())
 }

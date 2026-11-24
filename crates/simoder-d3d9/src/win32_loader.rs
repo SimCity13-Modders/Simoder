@@ -10,43 +10,27 @@ use std::mem::transmute;
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use parking_lot::Mutex;
 use simoder_core::{LogConsoleFilter, LogLevel, LogSourceType};
 use simoder_crash::BOOTSTRAP_LOG_RELATIVE_PATH;
 use simoder_mods::RESERVED_BASE_MOD_ID;
 
-use crate::base_bridge::{BaseRuntimeHost, ModsActionBackend};
-use crate::base_hot_reload::{BaseHotReloadState, load_applicator_script};
 use crate::bootstrap::BootstrapOutcome;
-use crate::eawebkit_bridge::{
-    execute_eawebkit_packet, initialize_eawebkit_bridge, is_eawebkit_bridge_ready,
-};
+use crate::eawebkit_bridge::initialize_eawebkit_bridge;
 use crate::exports::D3d9Export;
 use crate::proxy_ffi::{
     FnDirect3DCreate9, FnDirect3DCreate9Ex, global_d3d9_forwarder, global_simoder_runtime,
 };
-use crate::resource_bridge::{
-    initialize_resource_bridge, is_resource_bridge_ready, shutdown_in_memory_raw_resources,
-    sync_in_memory_raw_resources,
-};
-use crate::runtime::ModsUiSnapshot;
-use crate::ui_patch_host::{
-    UI_PATCH_APPLICATOR_ES5, build_sync_packet_with_reload, parse_sync_reply,
-};
-use crate::win32_console::{
-    current_thread_id, start_global_logger, stop_global_logger, unix_time_ms,
-};
-use crate::win32_native::{
-    approve_and_load_native_mod, deny_native_mod, revoke_native_mod, scan_and_load_native_mods,
-    shutdown_admitted_native_owners,
-};
+use crate::resource_bridge::{initialize_resource_bridge, shutdown_in_memory_raw_resources};
+use crate::win32_console::{current_thread_id, start_global_logger, stop_global_logger, unix_time_ms};
+use crate::win32_native::{scan_and_load_native_mods, shutdown_admitted_native_owners};
+use crate::win32_ui_sync::{on_ui_sync_tick, shutdown_base_ui_host, start_base_ui_host};
 use crate::win32_window_dispatch::{
-    bind_game_window, configure_ui_tick, current_bound_window, find_primary_game_window,
-    is_window_dispatch_drained, set_modal_overlay_active, shutdown_window_dispatch,
+    bind_game_window, configure_ui_tick, current_bound_window, ensure_window_dispatch_healthy,
+    find_primary_game_window, is_window_dispatch_drained, shutdown_window_dispatch,
 };
 
 type HModule = *mut c_void;
@@ -75,201 +59,7 @@ unsafe extern "system" {
 static PROXY_HMODULE: AtomicUsize = AtomicUsize::new(0);
 static SYSTEM_D3D9_INIT: OnceLock<()> = OnceLock::new();
 static BOOTSTRAP_STARTED: AtomicBool = AtomicBool::new(false);
-static LOADER_STOPPING: AtomicBool = AtomicBool::new(false);
-static EAWEBKIT_VIEW_SEEN: AtomicBool = AtomicBool::new(false);
-static LAST_HOT_RELOAD_POLL_MS: AtomicU64 = AtomicU64::new(0);
-static BASE_HOST_SLOT: OnceLock<Mutex<Option<BaseRuntimeHost>>> = OnceLock::new();
-static BASE_HOT_RELOAD: OnceLock<Mutex<Option<BaseHotReloadState>>> = OnceLock::new();
-
-fn base_host_slot() -> &'static Mutex<Option<BaseRuntimeHost>> {
-    BASE_HOST_SLOT.get_or_init(|| Mutex::new(None))
-}
-
-fn base_hot_reload_slot() -> &'static Mutex<Option<BaseHotReloadState>> {
-    BASE_HOT_RELOAD.get_or_init(|| Mutex::new(None))
-}
-
-struct Win32ModsBackend;
-
-impl ModsActionBackend for Win32ModsBackend {
-    fn list_mods(&self) -> ModsUiSnapshot {
-        global_simoder_runtime().mods_ui_snapshot()
-    }
-
-    fn approve_native(&self, mod_id: &str, sha256: &str) -> Result<(), String> {
-        approve_and_load_native_mod(mod_id, sha256)
-    }
-
-    fn deny_native(&self, mod_id: &str, sha256: &str) -> Result<(), String> {
-        deny_native_mod(mod_id, sha256)
-    }
-
-    fn revoke_native(&self, mod_id: &str) -> Result<(), String> {
-        revoke_native_mod(mod_id)
-    }
-
-    fn set_enabled(&self, mod_id: &str, enabled: bool) -> Result<(), String> {
-        global_simoder_runtime().with_mod_manager_mut(|maybe| {
-            let mgr = maybe.ok_or_else(|| "ModManager unavailable".to_string())?;
-            mgr.set_enabled(mod_id, enabled).map_err(|e| e.to_string())
-        })?;
-        sync_raw_resources_on_game_thread();
-        Ok(())
-    }
-
-    fn get_region_mods(&self, region_id: &str) -> std::collections::BTreeMap<String, bool> {
-        global_simoder_runtime().get_region_mods(region_id)
-    }
-
-    fn set_region_mod_enabled(
-        &self,
-        region_id: &str,
-        mod_id: &str,
-        enabled: bool,
-    ) -> Result<(), String> {
-        global_simoder_runtime().set_region_mod_enabled(region_id, mod_id, enabled)?;
-        sync_raw_resources_on_game_thread();
-        Ok(())
-    }
-}
-
-fn sync_raw_resources_on_game_thread() {
-    if !is_resource_bridge_ready() {
-        return;
-    }
-    let runtime = global_simoder_runtime();
-    let active_region = runtime.active_region();
-    let resources = runtime.effective_active_raw_resources(active_region.as_deref());
-    match sync_in_memory_raw_resources(&resources) {
-        Ok(Some(count)) => emit_log(
-            LogLevel::Info,
-            LogSourceType::Loader,
-            "simoder.resources",
-            &format!(
-                "Synchronized {count} in-memory raw resources with IResourceManager"
-            ),
-        ),
-        Ok(None) => {}
-        Err(err) => emit_log(
-            LogLevel::Warning,
-            LogSourceType::Loader,
-            "simoder.resources",
-            &format!("In-memory raw-resources sync deferred/failed: {err}"),
-        ),
-    }
-}
-
-fn on_ui_sync_tick(hwnd: usize) {
-    if LOADER_STOPPING.load(Ordering::Acquire) || !is_eawebkit_bridge_ready() {
-        return;
-    }
-    sync_raw_resources_on_game_thread();
-    let runtime = global_simoder_runtime();
-    let now_ms = unix_time_ms();
-    let last_poll = LAST_HOT_RELOAD_POLL_MS.load(Ordering::Acquire);
-    if now_ms.saturating_sub(last_poll) >= 1000
-        && LAST_HOT_RELOAD_POLL_MS
-            .compare_exchange(last_poll, now_ms, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        && let (Some(watcher), Some(host)) = (
-            base_hot_reload_slot().lock().as_mut(),
-            base_host_slot().lock().as_mut(),
-        )
-    {
-        match watcher.check_and_reload(host, Arc::new(runtime), Arc::new(Win32ModsBackend)) {
-            Ok(Some(report)) => emit_log(
-                LogLevel::Info,
-                LogSourceType::Mod,
-                RESERVED_BASE_MOD_ID,
-                &format!(
-                    "Hot-reloaded Simoder-Base (gen={}, external_applicator={})",
-                    report.reload_gen, report.external_applicator
-                ),
-            ),
-            Ok(None) => {}
-            Err(err) => emit_log(
-                LogLevel::Warning,
-                LogSourceType::Mod,
-                RESERVED_BASE_MOD_ID,
-                &format!("Simoder-Base hot-reload rejected (keeping previous version): {err}"),
-            ),
-        }
-    }
-
-    for _pass in 0..2 {
-        if let Some(base) = base_host_slot().lock().as_ref()
-            && let Err(err) = base.tick_ui()
-        {
-            emit_log(
-                LogLevel::Warning,
-                LogSourceType::Mod,
-                RESERVED_BASE_MOD_ID,
-                &format!("Simoder-Base UI tick error: {err}"),
-            );
-            return;
-        }
-        let (revision, patches) = runtime.composed_ui_snapshot();
-        set_modal_overlay_active(patches.iter().any(|p| p.slot == "modal.overlay"));
-        let (reload_gen, applicator_script) = {
-            let guard = base_hot_reload_slot().lock();
-            if let Some(watcher) = guard.as_ref() {
-                (watcher.reload_gen(), watcher.applicator_script().to_string())
-            } else {
-                (0, UI_PATCH_APPLICATOR_ES5.to_string())
-            }
-        };
-        let Ok(packet) = build_sync_packet_with_reload(revision, reload_gen, &patches) else {
-            return;
-        };
-        match execute_eawebkit_packet(hwnd, &applicator_script, &packet) {
-            Ok(raw_reply) => match parse_sync_reply(&raw_reply) {
-                Ok(reply) => {
-                    if !EAWEBKIT_VIEW_SEEN.swap(true, Ordering::AcqRel) {
-                        emit_log(
-                            LogLevel::Info,
-                            LogSourceType::Loader,
-                            "simoder.ui",
-                            "Connected Simoder-Base declarative UI bridge to active EAWebKit view",
-                        );
-                        try_attach_eawebkit_debuglog_hook(true);
-                    }
-                    for entry in reply.console_logs {
-                        let lvl = LogLevel::parse(&entry.level).unwrap_or(LogLevel::Info);
-                        emit_log(lvl, LogSourceType::Game, &entry.source, &entry.message);
-                    }
-                    let next_region = reply
-                        .active_region_id
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    if next_region != runtime.active_region() {
-                        runtime.set_active_region(next_region);
-                        sync_raw_resources_on_game_thread();
-                    }
-                    let prev_obs = runtime.get_ui_observation();
-                    let obs_changed = reply
-                        .observation
-                        .as_ref()
-                        .is_some_and(|obs| *obs != prev_obs);
-                    if let Some(obs) = reply.observation {
-                        runtime.set_ui_observation(obs);
-                    }
-                    let has_events = !reply.events.is_empty();
-                    if has_events {
-                        runtime.push_ui_events(reply.events);
-                    }
-                    if !has_events && !obs_changed {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    emit_log(LogLevel::Warning, LogSourceType::Loader, "simoder.ui", &err);
-                    break;
-                }
-            },
-            Err(_not_ready) => break,
-        }
-    }
-}
+pub(crate) static LOADER_STOPPING: AtomicBool = AtomicBool::new(false);
 
 /// Record our own proxy `HMODULE` and disable per-thread `DLL_THREAD_ATTACH` notifications.
 pub fn on_process_attach(instance: HModule) {
@@ -370,13 +160,9 @@ pub fn shutdown_loaded_native_modules() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    if let Some(mut slot) = base_host_slot().try_lock() {
-        *slot = None;
-    }
-    if let Some(mut watcher) = base_hot_reload_slot().try_lock() {
-        *watcher = None;
-    }
+    shutdown_base_ui_host();
     shutdown_in_memory_raw_resources();
+    crate::win32_dev_ui::shutdown_dev_ui_mods();
     shutdown_admitted_native_owners();
     crate::win32_eawebkit_debuglog_hook::uninstall_eawebkit_debuglog_hook();
     crate::win32_ods_hook::uninstall_output_debug_string_hooks();
@@ -422,6 +208,13 @@ fn run_bootstrap_worker() {
                 Arc::clone(global_simoder_runtime().logs()),
                 LogConsoleFilter::from(&config.developer_console),
                 build_verified,
+            );
+            crate::win32_crash::install_crash_handler(&paths.data_root);
+            emit_log(
+                LogLevel::Info,
+                LogSourceType::Loader,
+                "simoder.crash",
+                "Installed Win32 unhandled exception crash handler (crashes/ + report UI)",
             );
             let console_active = crate::win32_console::is_developer_console_active();
             let ods_hooks = crate::win32_ods_hook::install_output_debug_string_hooks(
@@ -480,34 +273,16 @@ fn run_bootstrap_worker() {
 
             scan_and_load_native_mods(&paths, &mods_root, &config);
 
+            if config.enabled {
+                crate::win32_dev_ui::init_dev_ui_mods(
+                    &paths.data_root,
+                    &mods_root,
+                    config.dev_mode || config.developer_console.enabled,
+                );
+            }
+
             if config.enabled && global_simoder_runtime().is_base_ready() {
-                let base_dir = mods_root.join(RESERVED_BASE_MOD_ID);
-                match BaseRuntimeHost::start_from_base_dir(
-                    &base_dir,
-                    Arc::new(global_simoder_runtime()),
-                    Arc::new(Win32ModsBackend),
-                ) {
-                    Ok(host) => {
-                        *base_host_slot().lock() = Some(host);
-                        let watcher = BaseHotReloadState::new(base_dir.clone());
-                        let (_, ext_app) = load_applicator_script(&base_dir);
-                        *base_hot_reload_slot().lock() = Some(watcher);
-                        emit_log(
-                            LogLevel::Info,
-                            LogSourceType::Mod,
-                            RESERVED_BASE_MOD_ID,
-                            &format!(
-                                "Initialized Simoder-Base Luau UI composition & Mods UI services (hot_reload=true, external_applicator={ext_app})"
-                            ),
-                        );
-                    }
-                    Err(err) => emit_log(
-                        LogLevel::Error,
-                        LogSourceType::Mod,
-                        RESERVED_BASE_MOD_ID,
-                        &format!("Failed booting Simoder-Base UI host: {err}"),
-                    ),
-                }
+                start_base_ui_host(&mods_root);
 
                 if let Err(err) = initialize_resource_bridge(build_verified) {
                     emit_log(
@@ -535,16 +310,63 @@ fn run_bootstrap_worker() {
                 } else {
                     try_attach_eawebkit_debuglog_hook(false);
                     configure_ui_tick(on_ui_sync_tick);
+                    let mut last_watch: Option<(Option<usize>, usize)> = None;
+                    let mut last_failed_bind: Option<usize> = None;
                     while !LOADER_STOPPING.load(Ordering::Acquire) {
-                        if let Some(hwnd) = find_primary_game_window()
-                            && hwnd != current_bound_window()
-                            && bind_game_window(hwnd)
-                        {
+                        let found = find_primary_game_window();
+                        let bound = current_bound_window();
+                        if last_watch != Some((found, bound)) {
+                            last_watch = Some((found, bound));
+                            let found_str = match found {
+                                Some(h) => format!("0x{h:X}"),
+                                None => "none".to_string(),
+                            };
                             emit_log(
-                                LogLevel::Info,
+                                LogLevel::Debug,
                                 LogSourceType::Loader,
                                 "simoder.ui",
-                                &format!("Attached UI sync dispatcher to game HWND 0x{hwnd:X}"),
+                                &format!("Window watcher: found={found_str}, bound=0x{bound:X}"),
+                            );
+                        }
+                        if let Some(hwnd) = found {
+                            if hwnd != bound {
+                                if bind_game_window(hwnd) {
+                                    last_failed_bind = None;
+                                    emit_log(
+                                        LogLevel::Info,
+                                        LogSourceType::Loader,
+                                        "simoder.ui",
+                                        &format!("Attached UI sync dispatcher to game HWND 0x{hwnd:X}"),
+                                    );
+                                } else if last_failed_bind != Some(hwnd) {
+                                    last_failed_bind = Some(hwnd);
+                                    emit_log(
+                                        LogLevel::Warning,
+                                        LogSourceType::Loader,
+                                        "simoder.ui",
+                                        &format!("bind_game_window(0x{hwnd:X}) returned false"),
+                                    );
+                                }
+                            } else if let Some(reason) = ensure_window_dispatch_healthy(hwnd) {
+                                emit_log(
+                                    LogLevel::Info,
+                                    LogSourceType::Loader,
+                                    "simoder.ui",
+                                    &format!(
+                                        "Re-attached UI sync dispatcher to game HWND 0x{hwnd:X} ({reason})"
+                                    ),
+                                );
+                            }
+                        } else if bound != 0
+                            && let Some(reason) = ensure_window_dispatch_healthy(bound)
+                        {
+                            emit_log(
+                                LogLevel::Debug,
+                                LogSourceType::Loader,
+                                "simoder.ui",
+                                &format!(
+                                    "Detached UI sync dispatcher from game HWND 0x{bound:X} ({reason})"
+                                ),
                             );
                         }
                         std::thread::sleep(Duration::from_millis(250));
@@ -594,7 +416,7 @@ pub(crate) fn to_wide_null(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-fn try_attach_eawebkit_debuglog_hook(warn_on_err: bool) {
+pub(crate) fn try_attach_eawebkit_debuglog_hook(warn_on_err: bool) {
     match crate::win32_eawebkit_debuglog_hook::install_eawebkit_debuglog_hook(Arc::clone(
         global_simoder_runtime().logs(),
     )) {

@@ -3,7 +3,7 @@
 //! Integrated top-level runtime coordinator uniting `simoder-core`, `simoder-formats`,
 //! `simoder-mods`, `simoder-scripting`, and `simoder-crash` inside the single `d3d9.dll` proxy.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,10 +15,11 @@ use serde::Serialize;
 use simoder_core::{DiagnosticLogPipeline, LogLevel, LogSourceType};
 use simoder_crash::{BridgeCorrelationTracker, CrashHandlerCoordinator, SymbolCatalog};
 use simoder_mods::{
-    HostToolRegistry, ModManager, NativeModuleCallbacks, NativeModuleHost,
-    NativeModuleRegistration, NativeModStatus, NativeModUiRecord, PatchRegistry,
-    RESERVED_BASE_MOD_ID, SD_READY_MENU, SD_READY_RUNTIME, SdHandle, SdLifecycleState, SdResult,
-    UiPatchDescriptor, UiPatchEvent, UiPatchRegistry, UiViewObservation, load_base_mod_definition,
+    HostToolRegistry, KEYBINDS_TOON_FILE_NAME, KeybindDescriptor, KeybindRegistry,
+    KeybindSnapshotEntry, ModManager, NativeModStatus, NativeModUiRecord, NativeModuleCallbacks,
+    NativeModuleHost, NativeModuleRegistration, PatchRegistry, RESERVED_BASE_MOD_ID,
+    SD_READY_MENU, SD_READY_RUNTIME, SdHandle, SdLifecycleState, SdResult, UiPatchDescriptor,
+    UiPatchEvent, UiPatchRegistry, UiViewObservation, load_base_mod_definition,
 };
 use simoder_scripting::{FaultPolicy, ScriptScheduler};
 
@@ -72,7 +73,9 @@ pub struct AuthoringModUiRecord {
 pub struct ModsUiSnapshot {
     /// Discovered native `.dll` mods awaiting approval, active, denied, or failed.
     pub native_mods: Vec<NativeModUiRecord>,
-    /// Discovered authoring/property/script mods managed by [`ModManager`].
+    /// Discovered `dev_ui` script overlays awaiting approval, active, or denied.
+    pub dev_ui_mods: Vec<NativeModUiRecord>,
+    /// Discovered authoring/property/script mods managed by [`ModManager`] (excluding native/`dev_ui`).
     pub authoring_mods: Vec<AuthoringModUiRecord>,
     /// True once `mods/simoder.base` passed startup validation.
     pub base_ready: bool,
@@ -93,9 +96,13 @@ pub struct IntegratedSimoderRuntime {
     ui_observation: Mutex<UiViewObservation>,
     pending_ui_events: Mutex<VecDeque<UiPatchEvent>>,
     native_candidates: Mutex<BTreeMap<String, NativeModCandidateState>>,
+    dev_ui_candidates: Mutex<BTreeMap<String, NativeModCandidateState>>,
     region_mod_overrides: Mutex<BTreeMap<String, BTreeMap<String, bool>>>,
     region_mods_path: Mutex<Option<PathBuf>>,
     active_region_id: Mutex<Option<String>>,
+    keybinds: Mutex<KeybindRegistry>,
+    keybinds_path: Mutex<Option<PathBuf>>,
+    skip_intro_mods: Mutex<BTreeSet<String>>,
 }
 
 impl Default for IntegratedSimoderRuntime {
@@ -125,9 +132,13 @@ impl IntegratedSimoderRuntime {
             }),
             pending_ui_events: Mutex::new(VecDeque::new()),
             native_candidates: Mutex::new(BTreeMap::new()),
+            dev_ui_candidates: Mutex::new(BTreeMap::new()),
             region_mod_overrides: Mutex::new(BTreeMap::new()),
             region_mods_path: Mutex::new(None),
             active_region_id: Mutex::new(None),
+            keybinds: Mutex::new(KeybindRegistry::new()),
+            keybinds_path: Mutex::new(None),
+            skip_intro_mods: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -229,9 +240,56 @@ impl IntegratedSimoderRuntime {
             .collect()
     }
 
-    /// Build a combined [`ModsUiSnapshot`] merging native `.dll` records and [`ModManager`] state.
+    /// Register or replace a discovered `dev_ui` script overlay candidate for `Mods` UI consent.
+    pub fn register_dev_ui_candidate(&self, candidate: NativeModCandidateState) {
+        let key = candidate.record.mod_id.clone();
+        self.dev_ui_candidates.lock().insert(key, candidate);
+    }
+
+    /// Fetch a cloned `dev_ui` candidate state by `mod_id`.
+    pub fn get_dev_ui_candidate(&self, mod_id: &str) -> Option<NativeModCandidateState> {
+        self.dev_ui_candidates.lock().get(mod_id).cloned()
+    }
+
+    /// Update trust/admission status and optional diagnostic for a `dev_ui` candidate `mod_id`.
+    pub fn update_dev_ui_candidate_status(
+        &self,
+        mod_id: &str,
+        status: NativeModStatus,
+        sha256: Option<String>,
+        diagnostic: Option<String>,
+    ) -> bool {
+        let mut guard = self.dev_ui_candidates.lock();
+        let Some(entry) = guard.get_mut(mod_id) else {
+            return false;
+        };
+        entry.record.status = status;
+        if let Some(hash) = sha256 {
+            entry.record.sha256 = hash;
+        }
+        entry.record.diagnostic = diagnostic;
+        true
+    }
+
+    /// Return all registered `dev_ui` candidate summaries sorted by `mod_id`.
+    pub fn list_dev_ui_mods(&self) -> Vec<NativeModUiRecord> {
+        self.dev_ui_candidates
+            .lock()
+            .values()
+            .map(|c| c.record.clone())
+            .collect()
+    }
+
+    /// Build a combined [`ModsUiSnapshot`] keeping `native_mods`, `dev_ui_mods`, and `authoring_mods`
+    /// cleanly separated without duplicate entries in `Installed Mods`.
     pub fn mods_ui_snapshot(&self) -> ModsUiSnapshot {
         let native_mods = self.list_native_mods();
+        let dev_ui_mods = self.list_dev_ui_mods();
+        let excluded_ids: std::collections::BTreeSet<&str> = native_mods
+            .iter()
+            .chain(dev_ui_mods.iter())
+            .map(|m| m.mod_id.as_str())
+            .collect();
         let authoring_mods = self
             .mod_manager
             .lock()
@@ -239,6 +297,7 @@ impl IntegratedSimoderRuntime {
             .map(|mgr| {
                 mgr.snapshot()
                     .into_iter()
+                    .filter(|entry| !excluded_ids.contains(entry.id.as_str()))
                     .map(|entry| AuthoringModUiRecord {
                         id: entry.id,
                         name: entry.name,
@@ -254,6 +313,7 @@ impl IntegratedSimoderRuntime {
             .unwrap_or_default();
         ModsUiSnapshot {
             native_mods,
+            dev_ui_mods,
             authoring_mods,
             base_ready: self.is_base_ready(),
         }
@@ -315,6 +375,61 @@ impl IntegratedSimoderRuntime {
         self.active_region_id.lock().clone()
     }
 
+    /// Return a UI snapshot of all registered keybinds and any active conflicts.
+    pub fn list_keybinds(&self) -> Vec<KeybindSnapshotEntry> {
+        self.keybinds.lock().snapshot()
+    }
+
+    /// Register or update a mod keybind descriptor.
+    pub fn register_keybind(&self, desc: KeybindDescriptor) -> Result<String, String> {
+        self.keybinds.lock().register(desc)
+    }
+
+    /// Remove all keybind descriptors owned by `mod_id`.
+    pub fn revoke_mod_keybinds(&self, mod_id: &str) -> usize {
+        self.keybinds.lock().revoke_mod(mod_id)
+    }
+
+    /// Rebind `id` to `chord_opt` and persist `keybinds.toon` when configured.
+    pub fn rebind_keybind(
+        &self,
+        id: &str,
+        chord_opt: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let mut reg = self.keybinds.lock();
+        let res = reg.rebind(id, chord_opt)?;
+        if let Some(path) = self.keybinds_path.lock().as_ref() {
+            reg.save_overrides(path)?;
+        }
+        Ok(res)
+    }
+
+    /// Reset `id` to its default chord and persist `keybinds.toon` when configured.
+    pub fn reset_keybind(&self, id: &str) -> Result<(), String> {
+        let mut reg = self.keybinds.lock();
+        reg.reset(id)?;
+        if let Some(path) = self.keybinds_path.lock().as_ref() {
+            reg.save_overrides(path)?;
+        }
+        Ok(())
+    }
+
+    /// Return the current keybind registry revision counter.
+    pub fn keybinds_revision(&self) -> u64 {
+        self.keybinds.lock().revision()
+    }
+
+    /// Return `short_action_id -> canonical_chord` for all active keybinds owned by `mod_id`.
+    pub fn mod_keybinds_map(&self, mod_id: &str) -> BTreeMap<String, String> {
+        self.keybinds.lock().effective_map_for_mod(mod_id)
+    }
+
+    /// Access the [`KeybindRegistry`] under its lock.
+    pub fn with_keybinds_mut<R>(&self, f: impl FnOnce(&mut KeybindRegistry) -> R) -> R {
+        let mut guard = self.keybinds.lock();
+        f(&mut guard)
+    }
+
     /// Compute effective enablement for `mod_id` in `region_id` (`region_override.unwrap_or(global_enabled)`).
     pub fn effective_mod_enabled(&self, region_id: Option<&str>, mod_id: &str) -> bool {
         if let Some(reg) = region_id
@@ -334,6 +449,7 @@ impl IntegratedSimoderRuntime {
     }
 
     /// Resolve effective in-memory Schema 3 raw resources for `region_id` (falling back to global state).
+    /// Collect active raw DBPF resources for the current region context.
     pub fn effective_active_raw_resources(
         &self,
         region_id: Option<&str>,
@@ -345,6 +461,42 @@ impl IntegratedSimoderRuntime {
             .lock()
             .as_ref()
             .map_or_else(Vec::new, |mgr| mgr.effective_raw_resources(&overrides))
+    }
+
+    /// Record or clear whether `mod_id` requests skipping the startup intro movie.
+    pub fn set_mod_skip_intro(&self, mod_id: &str, enabled: bool) {
+        let mut guard = self.skip_intro_mods.lock();
+        if enabled {
+            guard.insert(mod_id.to_string());
+        } else {
+            guard.remove(mod_id);
+        }
+    }
+
+    /// Clear all game-action flags owned by `mod_id`.
+    pub fn revoke_mod_game_actions(&self, mod_id: &str) {
+        self.skip_intro_mods.lock().remove(mod_id);
+    }
+
+    /// Return `true` when any active sandboxed Luau mod requested skipping the startup intro.
+    pub fn skip_intro_requested(&self) -> bool {
+        !self.skip_intro_mods.lock().is_empty()
+    }
+
+    /// Collect `(mod_id, entry_path)` for enabled third-party Luau authoring mods.
+    pub fn enabled_luau_authoring_mods(&self, region_id: Option<&str>) -> Vec<(String, PathBuf)> {
+        let overrides = region_id
+            .map(|reg| self.get_region_mods(reg))
+            .unwrap_or_default();
+        self.mod_manager
+            .lock()
+            .as_ref()
+            .map_or_else(Vec::new, |mgr| {
+                mgr.effective_luau_scripts(&overrides)
+                    .into_iter()
+                    .filter(|(id, _)| id != RESERVED_BASE_MOD_ID)
+                    .collect()
+            })
     }
 
     /// Borrow the one-shot [`BootstrapCoordinator`].
@@ -460,6 +612,18 @@ impl IntegratedSimoderRuntime {
                 *self.region_mod_overrides.lock() = loaded;
             }
             *self.region_mods_path.lock() = Some(region_mods_path);
+            let keybinds_path = paths.data_root.join(KEYBINDS_TOON_FILE_NAME);
+            if let Err(err) = self.keybinds.lock().load_overrides(&keybinds_path) {
+                let _ = self.logs.push(
+                    timestamp_ms,
+                    LogSourceType::Loader,
+                    "simoder-d3d9",
+                    LogLevel::Warning,
+                    1,
+                    &format!("Failed loading keybinds.toon: {err}"),
+                );
+            }
+            *self.keybinds_path.lock() = Some(keybinds_path);
             let patch_registry = Arc::new(PatchRegistry::new());
             *self.mod_manager.lock() = Some(ModManager::new(&mods_root, &state_path, patch_registry));
 

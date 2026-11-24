@@ -21,6 +21,8 @@ pub const LOG_DRAIN_BATCH_SIZE: usize = 64;
 /// Maximum byte length copied from a single `OutputDebugStringA/W` or engine log message (`docs/logging.md`).
 pub const MAX_CAPTURED_LOG_BYTES: usize = 4096;
 
+const MAX_RECENT_TAIL_LINES: usize = 64;
+
 thread_local! {
     static ODS_RECURSION_GUARD: Cell<bool> = const { Cell::new(false) };
 }
@@ -236,6 +238,7 @@ impl LogRecord {
 
 struct PipelineInner {
     queue: VecDeque<LogRecord>,
+    recent_tail: VecDeque<String>,
     dropped_since_last_drain: u64,
     total_dropped: u64,
 }
@@ -278,6 +281,7 @@ impl DiagnosticLogPipeline {
             batch_size: batch_size.max(1),
             inner: Mutex::new(PipelineInner {
                 queue: VecDeque::with_capacity(cap.min(2048)),
+                recent_tail: VecDeque::with_capacity(MAX_RECENT_TAIL_LINES),
                 dropped_since_last_drain: 0,
                 total_dropped: 0,
             }),
@@ -305,7 +309,20 @@ impl DiagnosticLogPipeline {
             message: clean_message,
         };
 
+        let tail_line = format!(
+            "[{}] [{}] [{}] {}",
+            record.source_type.as_str(),
+            record.source_name,
+            record.level.as_str(),
+            record.message
+        );
+
         let mut inner = self.inner.lock();
+        if inner.recent_tail.len() >= MAX_RECENT_TAIL_LINES {
+            inner.recent_tail.pop_front();
+        }
+        inner.recent_tail.push_back(tail_line);
+
         if inner.queue.len() >= self.capacity {
             inner.dropped_since_last_drain = inner.dropped_since_last_drain.saturating_add(1);
             inner.total_dropped = inner.total_dropped.saturating_add(1);
@@ -313,6 +330,16 @@ impl DiagnosticLogPipeline {
         }
         inner.queue.push_back(record);
         true
+    }
+
+    /// Non-blocking snapshot of up to `max_lines` recent redacted log lines for crash capture.
+    ///
+    /// Returns `None` if the pipeline mutex is currently held (preventing deadlocks inside a crash handler).
+    pub fn try_recent_tail(&self, max_lines: usize) -> Option<Vec<String>> {
+        let inner = self.inner.try_lock()?;
+        let take_count = max_lines.min(inner.recent_tail.len());
+        let start = inner.recent_tail.len().saturating_sub(take_count);
+        Some(inner.recent_tail.iter().skip(start).cloned().collect())
     }
 
     /// Capture an `OutputDebugStringA` or `OutputDebugStringW` message with a thread-local recursion guard

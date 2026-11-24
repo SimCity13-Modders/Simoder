@@ -175,7 +175,16 @@ fn creates_loads_and_validates_config_toon_and_toml() {
     let updated = load_or_create_config(dir.path()).unwrap();
     assert!(updated.developer_console.enabled);
     assert!(!updated.developer_console.capture_game_logs);
+    assert!(!updated.dev_mode);
     assert_eq!(updated.developer_console.level, LogLevel::Debug);
+
+    let dev_mode_cfg = LoaderConfig::from_toon(
+        "devMode: true\ndeveloperConsole:\n  enabled: true\n  level: trace\n",
+    )
+    .unwrap();
+    assert!(dev_mode_cfg.dev_mode);
+    assert!(dev_mode_cfg.developer_console.enabled);
+    assert_eq!(dev_mode_cfg.developer_console.level, LogLevel::Trace);
 
     fs::write(
         dir.path().join("config.toon"),

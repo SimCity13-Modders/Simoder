@@ -1082,3 +1082,30 @@ fn es5_dom_applicator_captures_console_and_client_bridge_logs() {
             .any(|l| l.level == "debug" && l.source == "EAWebKit::Telemetry" && l.message.contains("SC_UI_CITYLOG_CLICK"))
     );
 }
+
+#[test]
+fn sandboxed_luau_mod_can_toggle_and_revoke_skip_intro() {
+    let runtime = Arc::new(IntegratedSimoderRuntime::new());
+    let backend: Arc<dyn ModsActionBackend> = Arc::new(RuntimeOnlyModsBackend::new(runtime.clone()));
+    let host = BaseRuntimeHost::start_from_base_dir(&simoder_base_dir(), runtime.clone(), backend)
+        .expect("Simoder-Base DAG should boot cleanly");
+
+    assert!(!runtime.skip_intro_requested());
+    host.run_sandboxed_mod_script(
+        "simoder.skip_intro",
+        1,
+        r#"
+            return {
+                onEnable = function(api)
+                    api.game.setSkipIntro(true)
+                end,
+            }
+        "#,
+        "onEnable",
+    )
+    .expect("sandboxed Luau mod should call api.game.setSkipIntro(true)");
+    assert!(runtime.skip_intro_requested());
+
+    host.revoke_mod_in_base("simoder.skip_intro");
+    assert!(!runtime.skip_intro_requested());
+}

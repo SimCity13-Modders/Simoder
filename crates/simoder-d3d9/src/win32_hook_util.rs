@@ -8,23 +8,32 @@
 
 use std::ffi::c_void;
 use std::mem::{MaybeUninit, size_of};
-use std::ptr::{null, write_volatile};
+#[cfg(target_arch = "x86")]
+use std::ptr::null;
+use std::ptr::write_volatile;
 
+#[cfg(target_arch = "x86")]
 use simoder_core::LoadedModuleView;
 
 use crate::config::MIN_VALID_USER_ADDRESS;
+#[cfg(target_arch = "x86")]
 use crate::pe::parse_loaded_pe_text_and_rdata_ranges;
+#[cfg(target_arch = "x86")]
 use crate::win32_loader::to_wide_null;
 
+#[cfg(target_arch = "x86")]
 type HModule = *mut c_void;
 type Handle = *mut c_void;
 
 const PAGE_READWRITE: u32 = 0x04;
+#[cfg(target_arch = "x86")]
 const PE_HEADER_PROBE_BYTES: usize = 4096;
+#[cfg(target_arch = "x86")]
 const MAX_SECTION_READ_BYTES: usize = 32 * 1024 * 1024;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    #[cfg(target_arch = "x86")]
     fn GetModuleHandleW(lp_module_name: *const u16) -> HModule;
     fn GetCurrentProcess() -> Handle;
     fn ReadProcessMemory(
@@ -43,6 +52,7 @@ unsafe extern "system" {
 }
 
 /// Owned in-memory snapshot of a loaded PE32 module's `.text` and `.rdata` sections.
+#[cfg(target_arch = "x86")]
 pub(crate) struct OwnedModuleSnapshot {
     pub(crate) image_base: u32,
     pub(crate) text_rva: u32,
@@ -51,6 +61,7 @@ pub(crate) struct OwnedModuleSnapshot {
     pub(crate) rdata: Vec<u8>,
 }
 
+#[cfg(target_arch = "x86")]
 impl OwnedModuleSnapshot {
     /// Borrow this snapshot as a [`simoder_core::LoadedModuleView`] for symbol resolution.
     pub(crate) fn as_view(&self) -> LoadedModuleView<'_> {
@@ -65,6 +76,7 @@ impl OwnedModuleSnapshot {
 }
 
 /// Snapshot the `.text` and `.rdata` sections of a loaded 32-bit PE module (`None` = host `.exe`).
+#[cfg(target_arch = "x86")]
 pub(crate) fn snapshot_loaded_module(
     module_name: Option<&str>,
 ) -> Result<OwnedModuleSnapshot, String> {
@@ -127,6 +139,7 @@ pub(crate) fn snapshot_loaded_module(
 }
 
 /// Safely read `out.len()` bytes from `addr` in the current process via `ReadProcessMemory`.
+#[cfg(target_arch = "x86")]
 pub(crate) fn read_bytes_exact(addr: usize, out: &mut [u8]) -> bool {
     if addr < MIN_VALID_USER_ADDRESS as usize || out.is_empty() {
         return false;
@@ -171,6 +184,7 @@ pub(crate) fn read_struct<T: Copy>(addr: usize) -> Option<T> {
 }
 
 /// Safely read a bounded NUL-terminated ANSI/UTF-8 C string from `addr` via `ReadProcessMemory`.
+#[cfg(target_arch = "x86")]
 pub(crate) fn read_remote_cstr(addr: usize, max_bytes: usize) -> Option<String> {
     if addr < MIN_VALID_USER_ADDRESS as usize || max_bytes == 0 {
         return None;

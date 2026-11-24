@@ -456,16 +456,10 @@ impl ModManager {
         None
     }
 
-    /// Resolve effective in-memory Schema 3 raw resources after applying per-region `region_overrides`.
-    ///
-    /// Mods with `region_overrides.get(id) == Some(&false)` are excluded even if globally enabled;
-    /// discovered mods with `region_overrides.get(id) == Some(&true)` are included even if globally disabled
-    /// without mutating global `state.toon`.
-    pub fn effective_raw_resources(
-        &self,
+    fn effective_ids(
+        inner: &InnerState,
         region_overrides: &BTreeMap<String, bool>,
-    ) -> Vec<ActiveRawResource> {
-        let inner = self.lock_state();
+    ) -> Vec<String> {
         let mut effective_ids: Vec<String> = inner
             .enabled_order
             .iter()
@@ -484,6 +478,20 @@ impl ModManager {
                 effective_ids.push(id.clone());
             }
         }
+        effective_ids
+    }
+
+    /// Resolve effective in-memory Schema 3 raw resources after applying per-region `region_overrides`.
+    ///
+    /// Mods with `region_overrides.get(id) == Some(&false)` are excluded even if globally enabled;
+    /// discovered mods with `region_overrides.get(id) == Some(&true)` are included even if globally disabled
+    /// without mutating global `state.toon`.
+    pub fn effective_raw_resources(
+        &self,
+        region_overrides: &BTreeMap<String, bool>,
+    ) -> Vec<ActiveRawResource> {
+        let inner = self.lock_state();
+        let effective_ids = Self::effective_ids(&inner, region_overrides);
 
         let mut out = Vec::new();
         for owner in &effective_ids {
@@ -494,6 +502,27 @@ impl ModManager {
                     Self::load_raw_resources_into_memory(&record.definition, &self.known_vanilla_digests)
             {
                 out.extend(entries);
+            }
+        }
+        out
+    }
+
+    /// Collect `(mod_id, resolved_entry_path)` for all effective Schema 2 authoring mods
+    /// declaring `[scripts] language = "luau"`.
+    pub fn effective_luau_scripts(
+        &self,
+        region_overrides: &BTreeMap<String, bool>,
+    ) -> Vec<(String, PathBuf)> {
+        let inner = self.lock_state();
+        let effective_ids = Self::effective_ids(&inner, region_overrides);
+        let mut out = Vec::new();
+        for owner in effective_ids {
+            if let Some(record) = inner.records.get(&owner)
+                && let ModPayload::Authoring(data) = &record.definition.payload
+                && let Some(scripts) = &data.scripts
+                && scripts.language.eq_ignore_ascii_case("luau")
+            {
+                out.push((owner, scripts.resolved_path.clone()));
             }
         }
         out

@@ -219,3 +219,30 @@ fn sha256_reexport_matches_standard_vector() {
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
 }
+
+#[test]
+fn try_recent_tail_returns_bounded_redacted_lines() {
+    let pipe = simoder_core::DiagnosticLogPipeline::new();
+    pipe.push(
+        1,
+        LogSourceType::Loader,
+        "simoder-d3d9",
+        LogLevel::Info,
+        1,
+        r"loaded C:\Users\dawid\secret.txt",
+    );
+    pipe.push(
+        2,
+        LogSourceType::Mod,
+        "simoder.ui",
+        LogLevel::Warning,
+        1,
+        "second line",
+    );
+    let tail = pipe.try_recent_tail(1).unwrap();
+    assert_eq!(tail.len(), 1);
+    assert!(tail[0].contains("second line"));
+    let all = pipe.try_recent_tail(10).unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(!all[0].contains("dawid"));
+}

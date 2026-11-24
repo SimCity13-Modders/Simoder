@@ -9,6 +9,7 @@ pub mod base_bridge;
 pub mod base_hot_reload;
 pub mod bootstrap;
 pub mod config;
+pub mod dev_ui_mods;
 pub mod exports;
 pub mod net;
 pub mod pe;
@@ -22,6 +23,12 @@ pub(crate) mod eawebkit_bridge;
 #[cfg(all(windows, not(test)))]
 pub(crate) mod win32_console;
 #[cfg(all(windows, not(test)))]
+pub(crate) mod win32_crash;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_crash_ui;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_dev_ui;
+#[cfg(all(windows, not(test)))]
 pub(crate) mod win32_eawebkit_debuglog_hook;
 #[cfg(all(windows, not(test)))]
 pub(crate) mod win32_hook_util;
@@ -32,13 +39,17 @@ pub(crate) mod win32_native;
 #[cfg(all(windows, not(test)))]
 pub(crate) mod win32_ods_hook;
 #[cfg(all(windows, not(test)))]
+pub(crate) mod win32_semantic_abi;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_ui_sync;
+#[cfg(all(windows, not(test)))]
 pub(crate) mod win32_window_dispatch;
 
 use std::path::Path;
 
 pub use {
-    base_bridge::*, base_hot_reload::*, bootstrap::*, config::*, exports::*, pe::*, proxy_ffi::*,
-    resource_bridge::*, runtime::*, ui_patch_host::*, vftable::*,
+    base_bridge::*, base_hot_reload::*, bootstrap::*, config::*, dev_ui_mods::*, exports::*,
+    pe::*, proxy_ffi::*, resource_bridge::*, runtime::*, ui_patch_host::*, vftable::*,
 };
 
 /// Errors returned by `simoder-d3d9` installation path checks, PE32 parsing, and bootstrap orchestration.

@@ -172,14 +172,13 @@ impl HostToolRegistry {
             .collect()
     }
 
-    /// Invoke a mod-registered tool by `tool_name` after verifying its owning `(mod_id, generation)`
-    /// is still active and `granted_permissions` satisfies all `required_grants`.
-    pub fn invoke_tool(
+    /// Resolve and authorize a mod-registered tool handler without holding the registry lock
+    /// while executing the callback (preventing AB-BA deadlocks with UI-thread reloads).
+    pub fn resolve_tool_handler(
         &self,
         tool_name: &str,
-        arguments: &JsonValue,
         granted_permissions: &BTreeSet<String>,
-    ) -> Result<JsonValue, SdResult> {
+    ) -> Result<ModToolHandler, SdResult> {
         let Some(entry) = self.tools.get(tool_name) else {
             return Err(SdResult::Invalid);
         };
@@ -199,7 +198,19 @@ impl HostToolRegistry {
         {
             return Err(SdResult::Denied);
         }
-        (entry.handler)(arguments).map_err(|_| SdResult::OperationFailed)
+        Ok(Arc::clone(&entry.handler))
+    }
+
+    /// Invoke a mod-registered tool by `tool_name` after verifying its owning `(mod_id, generation)`
+    /// is still active and `granted_permissions` satisfies all `required_grants`.
+    pub fn invoke_tool(
+        &self,
+        tool_name: &str,
+        arguments: &JsonValue,
+        granted_permissions: &BTreeSet<String>,
+    ) -> Result<JsonValue, SdResult> {
+        let handler = self.resolve_tool_handler(tool_name, granted_permissions)?;
+        (handler)(arguments).map_err(|_| SdResult::OperationFailed)
     }
 }
 

@@ -104,6 +104,8 @@ impl Default for LoaderConfig {
 struct ToonBootstrapConfig {
     #[serde(rename = "developerConsole")]
     developer_console: DeveloperConsoleConfig,
+    #[serde(default, rename = "devMode", skip_serializing_if = "std::ops::Not::not")]
+    dev_mode: bool,
 }
 
 /// Generate the canonical default `config.toon` text from [`DeveloperConsoleConfig::default`] via [`serde_toon`].
@@ -133,6 +135,7 @@ impl LoaderConfig {
     fn from_toon_bootstrap(root: ToonBootstrapConfig) -> Result<Self, FormatError> {
         Self::validate_threshold(root.developer_console.level)?;
         Ok(Self {
+            dev_mode: root.dev_mode,
             developer_console: root.developer_console,
             ..Self::default()
         })

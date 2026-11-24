@@ -8,8 +8,8 @@ use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
@@ -21,6 +21,10 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_NCDESTROY: u32 = 0x0082;
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_TIMER: u32 = 0x0113;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_CAPTURECHANGED: u32 = 0x0215;
 const WM_APP_SIMODER_SYNC: u32 = 0x8313;
 const HTCLIENT: isize = 1;
 const HTCAPTION: isize = 2;
@@ -42,6 +46,7 @@ type UiTickCallback = fn(usize);
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn GetConsoleWindow() -> Hwnd;
     fn GetCurrentProcessId() -> u32;
     fn GetCurrentThreadId() -> u32;
     fn GetLastError() -> u32;
@@ -51,10 +56,14 @@ unsafe extern "system" {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn EnumWindows(lp_enum_func: EnumWindowsProc, lparam: isize) -> i32;
+    fn GetClassNameW(hwnd: Hwnd, lp_class_name: *mut u16, n_max_count: i32) -> i32;
     fn GetWindowThreadProcessId(hwnd: Hwnd, lpdw_process_id: *mut u32) -> u32;
     fn IsWindow(hwnd: Hwnd) -> i32;
     fn IsWindowVisible(hwnd: Hwnd) -> i32;
     fn GetWindowRect(hwnd: Hwnd, lp_rect: *mut Rect) -> i32;
+    fn GetClientRect(hwnd: Hwnd, lp_rect: *mut Rect) -> i32;
+    fn SetCapture(hwnd: Hwnd) -> Hwnd;
+    fn ReleaseCapture() -> i32;
     fn CallWindowProcW(
         lp_prev_wnd_func: isize,
         hwnd: Hwnd,
@@ -85,7 +94,40 @@ static CURRENT_TID: AtomicU32 = AtomicU32::new(0);
 static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static DISPATCH_CLOSED: AtomicBool = AtomicBool::new(false);
 static MODAL_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LAST_TICK_MS: AtomicU64 = AtomicU64::new(0);
+static DEV_UI_OVERLAY_STATE: OnceLock<Mutex<DevUiOverlayHitState>> = OnceLock::new();
 static ACTIVE_CALLS: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Default)]
+struct DevUiOverlayHitState {
+    overlay_rect: Option<[f32; 4]>,
+    drag_handle_rect: Option<[f32; 4]>,
+    dragging: bool,
+    last_norm_pos: Option<[f32; 2]>,
+    pending_delta: [f32; 2],
+    last_wake: Option<Instant>,
+}
+
+fn dev_ui_overlay_state() -> &'static Mutex<DevUiOverlayHitState> {
+    DEV_UI_OVERLAY_STATE.get_or_init(|| Mutex::new(DevUiOverlayHitState::default()))
+}
+
+fn client_norm_from_lparam(hwnd: Hwnd, lparam: isize) -> Option<[f32; 2]> {
+    let mut cr = Rect::default();
+    // SAFETY: Queries client bounds of the verified attached `HWND`.
+    if unsafe { GetClientRect(hwnd, &mut cr) } == 0 {
+        return None;
+    }
+    let w = (cr.right - cr.left).max(1) as f32;
+    let h = (cr.bottom - cr.top).max(1) as f32;
+    let cx = (lparam & 0xFFFF) as i16 as f32;
+    let cy = ((lparam >> 16) & 0xFFFF) as i16 as f32;
+    Some([cx / w, cy / h])
+}
+
+fn rect_contains(rect: [f32; 4], pos: [f32; 2]) -> bool {
+    pos[0] >= rect[0] && pos[0] <= rect[2] && pos[1] >= rect[1] && pos[1] <= rect[3]
+}
 static UI_TICK_CALLBACK: OnceLock<Mutex<Option<UiTickCallback>>> = OnceLock::new();
 static PENDING_JS_EVALS: OnceLock<Mutex<VecDeque<PendingJsEval>>> = OnceLock::new();
 
@@ -208,11 +250,78 @@ unsafe extern "system" fn router_wndproc(
         if msg == WM_DESTROY || msg == WM_NCDESTROY {
             detach_bound_window(hwnd_val);
         } else if msg == WM_APP_SIMODER_SYNC || (msg == WM_TIMER && wparam == SIMODER_UI_TIMER_ID) {
+            LAST_TICK_MS.store(crate::win32_console::unix_time_ms(), Ordering::Release);
             drain_pending_js_evals(hwnd_val);
             if let Some(cb) = *callback_slot().lock() {
                 cb(hwnd_val);
             }
             if msg == WM_APP_SIMODER_SYNC {
+                return 0;
+            }
+        } else if msg == WM_LBUTTONDOWN {
+            if let Some(pos) = client_norm_from_lparam(hwnd, lparam) {
+                let mut st = dev_ui_overlay_state().lock();
+                if let Some(handle) = st.drag_handle_rect
+                    && rect_contains(handle, pos)
+                {
+                    st.dragging = true;
+                    st.last_norm_pos = Some(pos);
+                    st.pending_delta = [0.0, 0.0];
+                    st.last_wake = None;
+                    drop(st);
+                    // SAFETY: Captures mouse for the verified attached `HWND` until `WM_LBUTTONUP`.
+                    unsafe {
+                        let _ = SetCapture(hwnd);
+                    }
+                    return 0;
+                }
+            }
+        } else if msg == WM_MOUSEMOVE {
+            let mut should_wake = false;
+            let mut is_dragging = false;
+            {
+                let mut st = dev_ui_overlay_state().lock();
+                if st.dragging {
+                    is_dragging = true;
+                    if let Some(pos) = client_norm_from_lparam(hwnd, lparam) {
+                        if let Some(prev) = st.last_norm_pos {
+                            st.pending_delta[0] += pos[0] - prev[0];
+                            st.pending_delta[1] += pos[1] - prev[1];
+                        }
+                        st.last_norm_pos = Some(pos);
+                    }
+                    let now = Instant::now();
+                    if st
+                        .last_wake
+                        .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(16))
+                    {
+                        st.last_wake = Some(now);
+                        should_wake = true;
+                    }
+                }
+            }
+            if is_dragging {
+                if should_wake {
+                    wake_ui_dispatch();
+                }
+                return 0;
+            }
+        } else if msg == WM_LBUTTONUP || msg == WM_CAPTURECHANGED {
+            let was_dragging = {
+                let mut st = dev_ui_overlay_state().lock();
+                let was = st.dragging;
+                st.dragging = false;
+                st.last_norm_pos = None;
+                was
+            };
+            if was_dragging {
+                if msg == WM_LBUTTONUP {
+                    // SAFETY: Releases mouse capture acquired on `WM_LBUTTONDOWN`.
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
+                }
+                wake_ui_dispatch();
                 return 0;
             }
         }
@@ -227,12 +336,32 @@ unsafe extern "system" fn router_wndproc(
         }
     };
 
-    if attached
-        && msg == WM_NCHITTEST
-        && MODAL_OVERLAY_ACTIVE.load(Ordering::Acquire)
-        && result == HTCAPTION
-    {
-        return HTCLIENT;
+    if attached && msg == WM_NCHITTEST && result == HTCAPTION {
+        if MODAL_OVERLAY_ACTIVE.load(Ordering::Acquire) {
+            return HTCLIENT;
+        }
+        let (dragging, overlay_rect) = {
+            let st = dev_ui_overlay_state().lock();
+            (st.dragging, st.overlay_rect)
+        };
+        if dragging {
+            return HTCLIENT;
+        }
+        if let Some(rect) = overlay_rect {
+            let sx = (lparam & 0xFFFF) as i16 as i32;
+            let sy = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            let mut wr = Rect::default();
+            // SAFETY: Queries bounding rectangle of the verified attached `HWND`.
+            if unsafe { GetWindowRect(hwnd, &mut wr) } != 0 {
+                let w = (wr.right - wr.left).max(1) as f32;
+                let h = (wr.bottom - wr.top).max(1) as f32;
+                let nx = (sx - wr.left) as f32 / w;
+                let ny = (sy - wr.top) as f32 / h;
+                if rect_contains(rect, [nx, ny]) {
+                    return HTCLIENT;
+                }
+            }
+        }
     }
 
     if msg == WM_NCDESTROY && hwnd_val == CURRENT_HWND.load(Ordering::Acquire) {
@@ -251,15 +380,39 @@ pub fn set_modal_overlay_active(active: bool) {
     MODAL_OVERLAY_ACTIVE.store(active, Ordering::Release);
 }
 
+/// Track the normalized `[left, top, right, bottom]` rectangles of any active `dev_ui` overlay
+/// and its drag handle so `WM_NCHITTEST` and native Win32 drag capture operate smoothly.
+pub fn set_dev_ui_overlay_rects(
+    overlay_rect: Option<[f32; 4]>,
+    drag_handle_rect: Option<[f32; 4]>,
+) {
+    let mut st = dev_ui_overlay_state().lock();
+    st.overlay_rect = overlay_rect;
+    st.drag_handle_rect = drag_handle_rect;
+}
+
+/// Drain any accumulated normalized `(dx, dy)` drag delta produced by Win32 drag-handle capture.
+pub fn take_dev_ui_drag_delta() -> Option<[f32; 2]> {
+    let mut st = dev_ui_overlay_state().lock();
+    let [dx, dy] = st.pending_delta;
+    if dx.abs() < 1e-5 && dy.abs() < 1e-5 {
+        return None;
+    }
+    st.pending_delta = [0.0, 0.0];
+    Some([dx, dy])
+}
+
 /// Configure the periodic owning-thread UI callback and wake signal.
 pub fn configure_ui_tick(callback: UiTickCallback) {
     *callback_slot().lock() = Some(callback);
 }
 
-/// Locate the primary visible top-level window belonging to the current process.
+/// Locate the primary visible top-level window belonging to the current process,
+/// excluding any attached console window (`GetConsoleWindow` / `ConsoleWindowClass`).
 pub fn find_primary_game_window() -> Option<usize> {
     struct Search {
         pid: u32,
+        console_hwnd: usize,
         best_hwnd: usize,
         best_area: i64,
     }
@@ -267,17 +420,31 @@ pub fn find_primary_game_window() -> Option<usize> {
     unsafe extern "system" fn enum_cb(hwnd: Hwnd, lparam: isize) -> i32 {
         // SAFETY: Stack pointer `&mut search` valid during synchronous `EnumWindows`.
         let search = unsafe { &mut *(lparam as *mut Search) };
+        if (hwnd as usize) == search.console_hwnd {
+            return 1;
+        }
         let mut pid: u32 = 0;
         // SAFETY: Valid `HWND` from `EnumWindows`.
-        unsafe {
-            let _ = GetWindowThreadProcessId(hwnd, &mut pid);
-        }
-        if pid != search.pid {
+        let tid = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if tid == 0 || pid != search.pid {
             return 1;
         }
         // SAFETY: Check visibility & area.
         if unsafe { IsWindowVisible(hwnd) } == 0 {
             return 1;
+        }
+        let mut class_buf = [0u16; 64];
+        // SAFETY: Valid `HWND` and stack UTF-16 buffer.
+        let class_len =
+            unsafe { GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+        if class_len > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..class_len as usize]);
+            if matches!(
+                class_name.as_str(),
+                "ConsoleWindowClass" | "PseudoConsoleWindow" | "CASCADIA_HOSTING_WINDOW_CLASS"
+            ) {
+                return 1;
+            }
         }
         let mut rc = Rect::default();
         // SAFETY: Read outer window bounds.
@@ -292,10 +459,13 @@ pub fn find_primary_game_window() -> Option<usize> {
         1
     }
 
-    // SAFETY: Current PID lookup.
+    // SAFETY: Current PID and console window handle lookup.
     let pid = unsafe { GetCurrentProcessId() };
+    // SAFETY: Queries any console `HWND` attached to the current process.
+    let console_hwnd = unsafe { GetConsoleWindow() } as usize;
     let mut search = Search {
         pid,
+        console_hwnd,
         best_hwnd: 0,
         best_area: 0,
     };
@@ -322,6 +492,8 @@ fn detach_bound_window(hwnd_val: usize) {
         return;
     }
     CURRENT_TID.store(0, Ordering::Release);
+    LAST_TICK_MS.store(0, Ordering::Release);
+    MODAL_OVERLAY_ACTIVE.store(false, Ordering::Release);
     let orig = ORIGINAL_WNDPROC.swap(0, Ordering::AcqRel);
     let hwnd = hwnd_val as Hwnd;
     // SAFETY: Detaches only if our `router_wndproc` remains topmost.
@@ -373,10 +545,50 @@ pub fn bind_game_window(hwnd_val: usize) -> bool {
         ORIGINAL_WNDPROC.store(prev, Ordering::Release);
         CURRENT_TID.store(tid, Ordering::Release);
         CURRENT_HWND.store(hwnd_val, Ordering::Release);
+        LAST_TICK_MS.store(crate::win32_console::unix_time_ms(), Ordering::Release);
         let _ = SetTimer(hwnd, SIMODER_UI_TIMER_ID, UI_SYNC_INTERVAL_MS, null_mut());
         let _ = PostMessageW(hwnd, WM_APP_SIMODER_SYNC, 0, 0);
         true
     }
+}
+
+/// Verify that the bound window still exists, retains our `router_wndproc` subclass, and
+/// continues receiving periodic timer ticks; self-heal if the game replaced `GWLP_WNDPROC`
+/// or killed `SIMODER_UI_TIMER_ID` across a phase/window transition.
+pub fn ensure_window_dispatch_healthy(hwnd_val: usize) -> Option<&'static str> {
+    if hwnd_val == 0 || DISPATCH_CLOSED.load(Ordering::Acquire) {
+        return None;
+    }
+    let hwnd = hwnd_val as Hwnd;
+    // SAFETY: Checks window validity on the bound `HWND`.
+    if unsafe { IsWindow(hwnd) } == 0 {
+        detach_bound_window(hwnd_val);
+        return Some("window destroyed");
+    }
+    let now_ms = crate::win32_console::unix_time_ms();
+    let last_ms = LAST_TICK_MS.load(Ordering::Acquire);
+    if now_ms.saturating_sub(last_ms) < 1500 {
+        return None;
+    }
+    // SAFETY: Queries current `GWLP_WNDPROC` on a verified live `HWND`.
+    let current_proc = unsafe { get_wnd_long(hwnd, GWLP_WNDPROC) };
+    let router_ptr: WndProcFn = router_wndproc;
+    if current_proc != ((router_ptr as usize) as isize) {
+        CURRENT_HWND.store(0, Ordering::Release);
+        CURRENT_TID.store(0, Ordering::Release);
+        ORIGINAL_WNDPROC.store(0, Ordering::Release);
+        if bind_game_window(hwnd_val) {
+            return Some("WNDPROC replaced");
+        }
+        return None;
+    }
+    // SAFETY: Re-arms `SIMODER_UI_TIMER_ID` and posts an immediate wake on the verified `HWND`.
+    unsafe {
+        let _ = SetTimer(hwnd, SIMODER_UI_TIMER_ID, UI_SYNC_INTERVAL_MS, null_mut());
+        let _ = PostMessageW(hwnd, WM_APP_SIMODER_SYNC, 0, 0);
+    }
+    LAST_TICK_MS.store(now_ms, Ordering::Release);
+    Some("timer re-armed")
 }
 
 /// Enqueue an immediate UI sync message onto the subclassed game window thread.
