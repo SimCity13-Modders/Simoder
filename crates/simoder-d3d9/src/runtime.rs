@@ -95,6 +95,7 @@ pub struct IntegratedSimoderRuntime {
     native_candidates: Mutex<BTreeMap<String, NativeModCandidateState>>,
     region_mod_overrides: Mutex<BTreeMap<String, BTreeMap<String, bool>>>,
     region_mods_path: Mutex<Option<PathBuf>>,
+    active_region_id: Mutex<Option<String>>,
 }
 
 impl Default for IntegratedSimoderRuntime {
@@ -126,6 +127,7 @@ impl IntegratedSimoderRuntime {
             native_candidates: Mutex::new(BTreeMap::new()),
             region_mod_overrides: Mutex::new(BTreeMap::new()),
             region_mods_path: Mutex::new(None),
+            active_region_id: Mutex::new(None),
         }
     }
 
@@ -298,6 +300,51 @@ impl IntegratedSimoderRuntime {
             fs::write(path, body).map_err(|e| format!("Failed saving region_mods.toon: {e}"))?;
         }
         Ok(())
+    }
+
+    /// Set the currently active region context (or `None` when in global/main-menu context).
+    pub fn set_active_region(&self, region_id: Option<String>) {
+        *self.active_region_id.lock() = region_id.and_then(|s| {
+            let trimmed = s.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        });
+    }
+
+    /// Return the currently active region ID, if any.
+    pub fn active_region(&self) -> Option<String> {
+        self.active_region_id.lock().clone()
+    }
+
+    /// Compute effective enablement for `mod_id` in `region_id` (`region_override.unwrap_or(global_enabled)`).
+    pub fn effective_mod_enabled(&self, region_id: Option<&str>, mod_id: &str) -> bool {
+        if let Some(reg) = region_id
+            && let Some(overridden) = self
+                .region_mod_overrides
+                .lock()
+                .get(reg)
+                .and_then(|m| m.get(mod_id))
+                .copied()
+        {
+            return overridden;
+        }
+        self.mod_manager
+            .lock()
+            .as_ref()
+            .is_some_and(|mgr| mgr.enabled_order().iter().any(|id| id == mod_id))
+    }
+
+    /// Resolve effective in-memory Schema 3 raw resources for `region_id` (falling back to global state).
+    pub fn effective_active_raw_resources(
+        &self,
+        region_id: Option<&str>,
+    ) -> Vec<simoder_mods::ActiveRawResource> {
+        let overrides = region_id
+            .map(|reg| self.get_region_mods(reg))
+            .unwrap_or_default();
+        self.mod_manager
+            .lock()
+            .as_ref()
+            .map_or_else(Vec::new, |mgr| mgr.effective_raw_resources(&overrides))
     }
 
     /// Borrow the one-shot [`BootstrapCoordinator`].

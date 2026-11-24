@@ -26,6 +26,18 @@ pub struct UiSyncRequest<'a> {
     pub patches: &'a [UiPatchDescriptor],
 }
 
+/// One bounded console or `window.Client` bridge log entry captured inside `EAWebKit`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiConsoleLogEntry {
+    /// Severity string (`"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`).
+    pub level: String,
+    /// Origin identifier (for example `"EAWebKit::Console"` or `"EAWebKit::ClientBridge"`).
+    pub source: String,
+    /// Bounded UTF-8 log message text.
+    pub message: String,
+}
+
 /// Reply returned by [`UI_PATCH_APPLICATOR_ES5`] containing current view observation and user events.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +50,12 @@ pub struct UiSyncReply {
     /// Bounded user interaction events raised since the previous sync tick.
     #[serde(default)]
     pub events: Vec<UiPatchEvent>,
+    /// Bounded game console and `window.Client` bridge logs drained during this sync tick.
+    #[serde(default)]
+    pub console_logs: Vec<UiConsoleLogEntry>,
+    /// Currently selected or active region identifier reported by the UI host, if any.
+    #[serde(default)]
+    pub active_region_id: Option<String>,
     /// Optional JS-side failure message when `ok == false`.
     #[serde(default)]
     pub error: Option<String>,

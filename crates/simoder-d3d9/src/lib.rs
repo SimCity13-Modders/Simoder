@@ -22,9 +22,15 @@ pub(crate) mod eawebkit_bridge;
 #[cfg(all(windows, not(test)))]
 pub(crate) mod win32_console;
 #[cfg(all(windows, not(test)))]
+pub(crate) mod win32_eawebkit_debuglog_hook;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_hook_util;
+#[cfg(all(windows, not(test)))]
 pub(crate) mod win32_loader;
 #[cfg(all(windows, not(test)))]
 pub(crate) mod win32_native;
+#[cfg(all(windows, not(test)))]
+pub(crate) mod win32_ods_hook;
 #[cfg(all(windows, not(test)))]
 pub(crate) mod win32_window_dispatch;
 

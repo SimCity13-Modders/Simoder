@@ -2,6 +2,7 @@
 
 //! Core identifiers, hashing re-exports, filters, runtime PROP table helpers, signature scanner, and logging primitives for Simoder.
 
+pub mod binary_resolver;
 pub mod filter;
 pub mod hash;
 pub mod logging;
@@ -11,7 +12,10 @@ pub mod signature;
 
 pub use dbpf::ResourceId;
 pub use dbpf::ResourceId as Tgi;
-pub use {filter::*, hash::*, logging::*, redaction::*, runtime_table::*, signature::*};
+pub use {
+    binary_resolver::*, filter::*, hash::*, logging::*, redaction::*, runtime_table::*,
+    signature::*,
+};
 pub use hex;
 pub use sha2::{Digest, Sha256};
 

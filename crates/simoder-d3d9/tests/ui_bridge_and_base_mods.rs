@@ -935,3 +935,150 @@ fn base_mods_ui_auto_updater_and_manual_modal_dialog() {
     let node_json = serde_json::to_string(&modal_patch2.unwrap().node).unwrap();
     assert!(node_json.contains("manual_update_modal") || node_json.contains("Manual Update Required"), "manual update dialog must be presented");
 }
+
+#[test]
+fn es5_dom_applicator_captures_console_and_client_bridge_logs() {
+    use rquickjs::{Context, Runtime};
+
+    let rt = Runtime::new().unwrap();
+    let ctx = Context::full(&rt).unwrap();
+    let reply_json: String = ctx.with(|ctx| {
+        ctx.eval::<(), _>(
+            r#"
+            var recordedActions = [];
+            var recordedConsole = [];
+            var window = {
+                __simoderMockPhase: "main.menu",
+                console: {
+                    log: function (m) { recordedConsole.push(["log", m]); },
+                    warn: function (m) { recordedConsole.push(["warn", m]); },
+                    error: function (m) { recordedConsole.push(["error", m]); },
+                    info: function (m) { recordedConsole.push(["info", m]); },
+                    debug: function (m) { recordedConsole.push(["debug", m]); }
+                },
+                Client: null,
+                document: {
+                    body: { appendChild: function () {} },
+                    head: { appendChild: function () {} },
+                    getElementById: function () { return null; },
+                    createElement: function () {
+                        return { style: {}, setAttribute: function () {}, appendChild: function () {}, className: "" };
+                    },
+                    createTextNode: function () { return {}; },
+                    querySelector: function () { return null; },
+                    querySelectorAll: function () { return []; }
+                }
+            };
+            "#,
+        )
+        .unwrap();
+
+        let fn_src = format!(
+            "var __apply = {UI_PATCH_APPLICATOR_ES5}; __apply({});",
+            serde_json::to_string(&build_sync_packet(1, &[]).unwrap()).unwrap()
+        );
+        let _: String = ctx.eval(fn_src).unwrap();
+
+        // Late-bound `window.Client`, `window.scrui`, and `window.simcity` arriving after tick 1 must still be hooked.
+        ctx.eval::<(), _>(
+            r#"
+            window.Client = {
+                SendGameAction: function (act, arg) {
+                    recordedActions.push([act, arg]);
+                    return "ok";
+                },
+                PostGameCommand: function (cmd) {
+                    recordedActions.push(["cmd", cmd]);
+                    return "ok";
+                },
+                RequestGameData: function (q) { return "{}"; }
+            };
+            window.scrui = {
+                gClient_PostGameCommand: function (cmd) {
+                    recordedActions.push(["scrui_cmd", cmd]);
+                    return "ok";
+                },
+                cUIManager: {
+                    ReceiveGameEventFromClient: function (id, data) {
+                        recordedActions.push(["evt", id, data]);
+                    }
+                }
+            };
+            window.simcity = {
+                AddTelemetry: function (name, id, payload) {
+                    recordedActions.push(["tel", name, id, payload]);
+                }
+            };
+            "#,
+        )
+        .unwrap();
+
+        let fn_src2 = format!(
+            "__apply({});",
+            serde_json::to_string(&build_sync_packet(1, &[]).unwrap()).unwrap()
+        );
+        let _: String = ctx.eval(fn_src2).unwrap();
+
+        ctx.eval::<(), _>(
+            r#"
+            window.console.warn("UI layout warning");
+            window.Client.SendGameAction("TestAction", 42);
+            window.Client.PostGameCommand("TestCmd");
+            window.scrui.gClient_PostGameCommand("ManualUiCmd");
+            window.scrui.cUIManager.ReceiveGameEventFromClient(182429322, "speed");
+            window.simcity.AddTelemetry("SC_UI_CITYLOG_CLICK", 1, "{}");
+            "#,
+        )
+        .unwrap();
+
+        // Read-only `observe` probe must NOT drain or discard buffered consoleLogs.
+        let obs_src = format!(r#"__apply({UI_OBSERVE_PACKET_JSON:?});"#);
+        let obs_reply_json: String = ctx.eval(obs_src).unwrap();
+        let obs_reply = parse_sync_reply(&obs_reply_json).unwrap();
+        assert!(obs_reply.console_logs.is_empty());
+
+        let fn_src3 = format!(
+            "__apply({});",
+            serde_json::to_string(&build_sync_packet(1, &[]).unwrap()).unwrap()
+        );
+        ctx.eval(fn_src3).unwrap()
+    });
+
+    let reply = parse_sync_reply(&reply_json).unwrap();
+    assert!(
+        reply
+            .console_logs
+            .iter()
+            .any(|l| l.level == "warn" && l.source == "EAWebKit::Console" && l.message.contains("UI layout warning"))
+    );
+    assert!(
+        reply
+            .console_logs
+            .iter()
+            .any(|l| l.level == "debug" && l.source == "EAWebKit::ClientBridge" && l.message.contains("SendGameAction"))
+    );
+    assert!(
+        reply
+            .console_logs
+            .iter()
+            .any(|l| l.level == "debug" && l.source == "EAWebKit::ClientBridge" && l.message.contains("PostGameCommand"))
+    );
+    assert!(
+        reply
+            .console_logs
+            .iter()
+            .any(|l| l.level == "debug" && l.source == "EAWebKit::ClientBridge" && l.message.contains("ManualUiCmd"))
+    );
+    assert!(
+        reply
+            .console_logs
+            .iter()
+            .any(|l| l.level == "debug" && l.source == "EAWebKit::GameEvent" && l.message.contains("182429322"))
+    );
+    assert!(
+        reply
+            .console_logs
+            .iter()
+            .any(|l| l.level == "debug" && l.source == "EAWebKit::Telemetry" && l.message.contains("SC_UI_CITYLOG_CLICK"))
+    );
+}

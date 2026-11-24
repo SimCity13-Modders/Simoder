@@ -16,6 +16,314 @@
         var client = window.Client || null;
         var uiMgr = (window.scrui && window.scrui.gUIManager) ? window.scrui.gUIManager : null;
 
+        if (!window.__simoderUiHost) {
+            window.__simoderUiHost = {
+                revision: -1,
+                reloadGen: -1,
+                lastPhase: "",
+                events: [],
+                consoleLogs: [],
+                consoleLogHooked: false,
+                clientBridgeHooked: false,
+                errorLogHooked: false,
+                simoderProbing: false,
+                activeModalClose: null,
+                activeRegionContext: null,
+                escBound: false
+            };
+        }
+        var host = window.__simoderUiHost;
+        host.consoleLogs = host.consoleLogs || [];
+
+        var pushConsoleLog = function (level, source, message) {
+            if (host.consoleLogs.length >= 64) { return; }
+            var text = String(message === undefined || message === null ? "" : message);
+            if (text.length > 512) { text = text.substring(0, 512) + "..."; }
+            host.consoleLogs.push({
+                level: String(level || "info"),
+                source: String(source || "EAWebKit::Console"),
+                message: text
+            });
+        };
+
+        var formatConsoleArgs = function (args) {
+            var out = [];
+            for (var i = 0; i < args.length; i++) {
+                var v = args[i];
+                if (typeof v === "string") {
+                    out.push(v);
+                } else {
+                    try { out.push(JSON.stringify(v)); } catch (_e) { out.push(String(v)); }
+                }
+            }
+            return out.join(" ");
+        };
+
+        var currentGen = typeof packet.reloadGen === "number" ? packet.reloadGen : 0;
+        var isWrapped = function (obj, name) {
+            try { return !!(obj && obj[name] && obj[name].__simoderWrapped === true); } catch (_e) { return false; }
+        };
+        var tryWrap = function (obj, name, makeFn) {
+            if (!obj || typeof obj[name] !== "function") { return false; }
+            if (isWrapped(obj, name)) { return true; }
+            var orig = obj[name];
+            var wrapped = makeFn(orig);
+            wrapped.__simoderWrapped = true;
+            try { obj[name] = wrapped; } catch (_e) {}
+            if (isWrapped(obj, name)) { return true; }
+            try {
+                if (Object.defineProperty) {
+                    Object.defineProperty(obj, name, { value: wrapped, writable: true, configurable: true });
+                }
+            } catch (_e2) {}
+            return isWrapped(obj, name);
+        };
+        var assignWindowProp = function (propName, val) {
+            try { window[propName] = val; } catch (_e) {}
+            if (window[propName] === val) { return true; }
+            try {
+                if (Object.defineProperty) {
+                    Object.defineProperty(window, propName, { value: val, writable: true, configurable: true });
+                }
+            } catch (_e2) {}
+            return window[propName] === val;
+        };
+        var bindDelegate = function (targetObj, key) {
+            var member = targetObj[key];
+            if (typeof member === "function") {
+                return function () { return member.apply(targetObj, arguments); };
+            }
+            return member;
+        };
+
+        var consoleMode = "none";
+        if (window.console) {
+            var levels = ["log", "info", "warn", "error", "debug"];
+            var anyDirectConsole = false;
+            for (var li = 0; li < levels.length; li++) {
+                (function (methodName) {
+                    var mapped = methodName === "log" ? "info" : methodName;
+                    if (tryWrap(window.console, methodName, function (origFn) {
+                        return function () {
+                            try { pushConsoleLog(mapped, "EAWebKit::Console", formatConsoleArgs(arguments)); } catch (_e) {}
+                            return origFn.apply(window.console, arguments);
+                        };
+                    })) {
+                        anyDirectConsole = true;
+                    }
+                })(levels[li]);
+            }
+            if (anyDirectConsole) {
+                consoleMode = window.console.__simoderProxy ? "proxy" : "direct";
+                host.consoleLogHooked = true;
+            } else {
+                var origConsole = window.console;
+                var proxyConsole = { __simoderProxy: true };
+                for (var ck in origConsole) {
+                    try { proxyConsole[ck] = bindDelegate(origConsole, ck); } catch (_e) {}
+                }
+                for (var pli = 0; pli < levels.length; pli++) {
+                    (function (methodName) {
+                        var origFn = origConsole[methodName];
+                        if (typeof origFn === "function") {
+                            var mapped = methodName === "log" ? "info" : methodName;
+                            var w = function () {
+                                try { pushConsoleLog(mapped, "EAWebKit::Console", formatConsoleArgs(arguments)); } catch (_e) {}
+                                return origFn.apply(origConsole, arguments);
+                            };
+                            w.__simoderWrapped = true;
+                            proxyConsole[methodName] = w;
+                        }
+                    })(levels[pli]);
+                }
+                if (assignWindowProp("console", proxyConsole)) {
+                    consoleMode = "proxy";
+                    host.consoleLogHooked = true;
+                } else {
+                    consoleMode = "readonly";
+                    host.consoleLogHooked = false;
+                }
+            }
+        }
+
+        if (!host.errorLogHooked) {
+            host.errorLogHooked = true;
+            var prevOnError = window.onerror;
+            window.onerror = function (msg, url, line) {
+                try {
+                    pushConsoleLog("error", "EAWebKit::Console", String(msg || "Script error") + (url ? (" (" + url + ":" + (line || 0) + ")") : ""));
+                } catch (_e) {}
+                if (typeof prevOnError === "function") {
+                    return prevOnError.apply(this, arguments);
+                }
+                return false;
+            };
+        }
+
+        var clientMode = "none";
+        var wrappedPost = false;
+        var wrappedSend = false;
+        var wrappedReq = false;
+        if (client && (typeof client.SendGameAction === "function" || typeof client.RequestGameData === "function" || typeof client.PostGameCommand === "function")) {
+            var makePostWrap = function (targetThis, origFn) {
+                return function () {
+                    if (!host.simoderProbing) {
+                        try { pushConsoleLog("debug", "EAWebKit::ClientBridge", "PostGameCommand(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                    }
+                    return origFn.apply(targetThis, arguments);
+                };
+            };
+            var makeSendWrap = function (targetThis, origFn) {
+                return function () {
+                    try { pushConsoleLog("debug", "EAWebKit::ClientBridge", "SendGameAction(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                    return origFn.apply(targetThis, arguments);
+                };
+            };
+            var makeReqWrap = function (targetThis, origFn) {
+                return function (query) {
+                    if (!host.simoderProbing && typeof query === "string" && query !== "periodTimes/0" && query !== "gamespeed" && query !== "isLoadingFinalized" && query !== "activeBoxId") {
+                        try { pushConsoleLog("trace", "EAWebKit::ClientBridge", "RequestGameData(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                    }
+                    return origFn.apply(targetThis, arguments);
+                };
+            };
+
+            wrappedPost = tryWrap(client, "PostGameCommand", function (origFn) { return makePostWrap(client, origFn); });
+            wrappedSend = tryWrap(client, "SendGameAction", function (origFn) { return makeSendWrap(client, origFn); });
+            wrappedReq = tryWrap(client, "RequestGameData", function (origFn) { return makeReqWrap(client, origFn); });
+
+            if (wrappedPost || wrappedSend || wrappedReq) {
+                clientMode = client.__simoderProxy ? "proxy" : "direct";
+                host.clientBridgeHooked = true;
+            } else {
+                var origClient = client;
+                var proxyClient = { __simoderProxy: true };
+                var knownMethods = ["PostGameCommand", "RequestGameData", "SendGameAction", "RequestUpdaterData", "PostUpdaterCommand", "SendTelemetry", "Log"];
+                for (var ek in origClient) {
+                    try { proxyClient[ek] = bindDelegate(origClient, ek); } catch (_e) {}
+                }
+                for (var ki = 0; ki < knownMethods.length; ki++) {
+                    var km = knownMethods[ki];
+                    if (!proxyClient[km]) {
+                        try {
+                            if (origClient[km] !== undefined) { proxyClient[km] = bindDelegate(origClient, km); }
+                        } catch (_e) {}
+                    }
+                }
+                if (typeof origClient.PostGameCommand === "function") {
+                    proxyClient.PostGameCommand = makePostWrap(origClient, origClient.PostGameCommand);
+                    proxyClient.PostGameCommand.__simoderWrapped = true;
+                }
+                if (typeof origClient.SendGameAction === "function") {
+                    proxyClient.SendGameAction = makeSendWrap(origClient, origClient.SendGameAction);
+                    proxyClient.SendGameAction.__simoderWrapped = true;
+                }
+                if (typeof origClient.RequestGameData === "function") {
+                    proxyClient.RequestGameData = makeReqWrap(origClient, origClient.RequestGameData);
+                    proxyClient.RequestGameData.__simoderWrapped = true;
+                }
+                if (assignWindowProp("Client", proxyClient)) {
+                    client = window.Client;
+                    clientMode = "proxy";
+                    wrappedPost = isWrapped(client, "PostGameCommand");
+                    wrappedSend = isWrapped(client, "SendGameAction");
+                    wrappedReq = isWrapped(client, "RequestGameData");
+                    host.clientBridgeHooked = true;
+                } else {
+                    clientMode = "readonly";
+                    host.clientBridgeHooked = false;
+                }
+            }
+        }
+
+        var scruiPost = false;
+        var scruiReq = false;
+        var scruiEvts = false;
+        var scruiEvt = false;
+        var scruiMsg = false;
+        var telemetryHooked = false;
+        var scruiObj = window.scrui || null;
+        if (scruiObj) {
+            scruiPost = tryWrap(scruiObj, "gClient_PostGameCommand", function (origFn) {
+                return function () {
+                    if (!host.simoderProbing) {
+                        try { pushConsoleLog("debug", "EAWebKit::ClientBridge", "PostGameCommand(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                    }
+                    return origFn.apply(this, arguments);
+                };
+            });
+            scruiReq = tryWrap(scruiObj, "gClient_RequestGameData", function (origFn) {
+                return function (query) {
+                    if (!host.simoderProbing && typeof query === "string" && query !== "periodTimes/0" && query !== "gamespeed" && query !== "isLoadingFinalized" && query !== "activeBoxId") {
+                        try { pushConsoleLog("trace", "EAWebKit::ClientBridge", "RequestGameData(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                    }
+                    return origFn.apply(this, arguments);
+                };
+            });
+            scruiEvts = tryWrap(scruiObj, "gClient_RequestGameEvents", function (origFn) {
+                return function () {
+                    var res = origFn.apply(this, arguments);
+                    try {
+                        if (res && res !== "[]" && res !== "{}" && (!res.length || res.length > 0)) {
+                            pushConsoleLog("trace", "EAWebKit::ClientBridge", "RequestGameEvents -> " + formatConsoleArgs([res]));
+                        }
+                    } catch (_e) {}
+                    return res;
+                };
+            });
+            if (scruiObj.cUIManager) {
+                scruiEvt = tryWrap(scruiObj.cUIManager, "ReceiveGameEventFromClient", function (origFn) {
+                    return function () {
+                        try { pushConsoleLog("debug", "EAWebKit::GameEvent", "ReceiveGameEventFromClient(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                        return origFn.apply(this, arguments);
+                    };
+                });
+                if (scruiObj.cUIManager.prototype) {
+                    scruiMsg = tryWrap(scruiObj.cUIManager.prototype, "SendMessage", function (origFn) {
+                        return function (msgType, controlId) {
+                            if (msgType === 10 || msgType === 16) {
+                                try { pushConsoleLog("debug", "EAWebKit::UI", "SendMessage(type=" + msgType + ", control=" + controlId + ")"); } catch (_e) {}
+                            }
+                            return origFn.apply(this, arguments);
+                        };
+                    });
+                }
+            }
+        }
+        if (sim) {
+            telemetryHooked = tryWrap(sim, "AddTelemetry", function (origFn) {
+                return function () {
+                    try { pushConsoleLog("debug", "EAWebKit::Telemetry", "AddTelemetry(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                    return origFn.apply(this, arguments);
+                };
+            });
+        }
+
+        if (packet.op === "sync" && (host.bridgeReportGen !== currentGen || host.lastReportedClientMode !== clientMode || host.lastScruiPost !== scruiPost || host.lastScruiEvt !== scruiEvt)) {
+            host.bridgeReportGen = currentGen;
+            host.lastReportedClientMode = clientMode;
+            host.lastScruiPost = scruiPost;
+            host.lastScruiEvt = scruiEvt;
+            pushConsoleLog("info", "EAWebKit::ClientBridge", "Hooks status (clientMode=" + clientMode + ", consoleMode=" + consoleMode + ", PostGameCommand=" + wrappedPost + ", scruiPost=" + scruiPost + ", scruiEvt=" + scruiEvt + ", scruiMsg=" + scruiMsg + ", telemetry=" + telemetryHooked + ")");
+        }
+
+        var logNamespaces = [sim, uiMgr];
+        var logNames = ["Log", "log", "cLog", "DebugLog"];
+        for (var ni = 0; ni < logNamespaces.length; ni++) {
+            var nsObj = logNamespaces[ni];
+            if (!nsObj) { continue; }
+            for (var lni = 0; lni < logNames.length; lni++) {
+                (function (targetNs, fnName) {
+                    tryWrap(targetNs, fnName, function (origFn) {
+                        return function () {
+                            try { pushConsoleLog("info", "EAWebKit::GameLog", fnName + "(" + formatConsoleArgs(arguments) + ")"); } catch (_e) {}
+                            return origFn.apply(targetNs, arguments);
+                        };
+                    });
+                })(nsObj, logNames[lni]);
+            }
+        }
+
         var detectLocale = function () {
             if (uiMgr && uiMgr.mLocaleManager && typeof uiMgr.mLocaleManager.mLocaleCode === "string" && uiMgr.mLocaleManager.mLocaleCode.length > 0) {
                 return uiMgr.mLocaleManager.mLocaleCode;
@@ -34,6 +342,7 @@
                 return "intro";
             }
             if (client && typeof client.RequestGameData === "function") {
+                host.simoderProbing = true;
                 try {
                     var fin = client.RequestGameData("isLoadingFinalized");
                     if (typeof fin === "string") { fin = JSON.parse(fin); }
@@ -49,6 +358,8 @@
                     }
                 } catch (_err) {
                     /* ignore transient query error before preload finishes */
+                } finally {
+                    host.simoderProbing = false;
                 }
             }
             if (sim && sim.cLauncher3D) {
@@ -72,26 +383,15 @@
             return JSON.stringify({
                 ok: !!doc.body,
                 observation: observation,
-                events: []
+                events: [],
+                consoleLogs: [],
+                activeRegionId: (host.activeRegionContext && host.activeRegionContext.regionId) ? String(host.activeRegionContext.regionId) : null
             });
         }
 
         if (!doc.body) {
             return JSON.stringify({ ok: false, error: "document.body unavailable" });
         }
-
-        if (!window.__simoderUiHost) {
-            window.__simoderUiHost = {
-                revision: -1,
-                reloadGen: -1,
-                lastPhase: "",
-                events: [],
-                activeModalClose: null,
-                activeRegionContext: null,
-                escBound: false
-            };
-        }
-        var host = window.__simoderUiHost;
 
         if (!host.escBound && doc.addEventListener) {
             host.escBound = true;
@@ -1662,10 +1962,13 @@
         }
 
         var drained = host.events.splice(0, host.events.length);
+        var drainedLogs = host.consoleLogs.splice(0, host.consoleLogs.length);
         return JSON.stringify({
             ok: true,
             observation: observation,
-            events: drained
+            events: drained,
+            consoleLogs: drainedLogs,
+            activeRegionId: (host.activeRegionContext && host.activeRegionContext.regionId) ? String(host.activeRegionContext.regionId) : null
         });
     } catch (err) {
         return JSON.stringify({

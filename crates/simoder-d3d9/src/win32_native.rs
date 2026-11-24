@@ -108,6 +108,13 @@ struct SdSemanticHostApiV2Raw {
         out_len: *mut usize,
         timeout_ms: u32,
     ) -> u32,
+    log_message: extern "C" fn(
+        level: u32,
+        source_ptr: *const u8,
+        source_len: usize,
+        msg_ptr: *const u8,
+        msg_len: usize,
+    ) -> u32,
 }
 
 const MAX_SEMANTIC_JS_INPUT_BYTES: usize = 128 * 1024;
@@ -178,10 +185,46 @@ extern "C" fn host_eval_ui_js(
     status_code as u32
 }
 
+extern "C" fn host_log_message(
+    level: u32,
+    source_ptr: *const u8,
+    source_len: usize,
+    msg_ptr: *const u8,
+    msg_len: usize,
+) -> u32 {
+    if source_ptr.is_null()
+        || source_len == 0
+        || source_len > 128
+        || msg_ptr.is_null()
+        || msg_len == 0
+        || msg_len > 4096
+    {
+        return SdResult::Invalid as u32;
+    }
+    // SAFETY: Caller passes valid UTF-8 byte ranges for `source_len` and `msg_len`.
+    let source_bytes = unsafe { std::slice::from_raw_parts(source_ptr, source_len) };
+    // SAFETY: Caller passes valid UTF-8 byte ranges for `msg_len`.
+    let msg_bytes = unsafe { std::slice::from_raw_parts(msg_ptr, msg_len) };
+    let (Ok(source), Ok(msg)) = (std::str::from_utf8(source_bytes), std::str::from_utf8(msg_bytes))
+    else {
+        return SdResult::Invalid as u32;
+    };
+    let mapped_level = match level {
+        0 => LogLevel::Trace,
+        1 => LogLevel::Debug,
+        2 => LogLevel::Info,
+        3 => LogLevel::Warning,
+        _ => LogLevel::Error,
+    };
+    emit_log(mapped_level, LogSourceType::Mod, source, msg);
+    SdResult::Ok as u32
+}
+
 static SEMANTIC_HOST_API_V2: SdSemanticHostApiV2Raw = SdSemanticHostApiV2Raw {
     size: size_of::<SdSemanticHostApiV2Raw>() as u32,
-    version: 1,
+    version: 2,
     eval_ui_js: host_eval_ui_js,
+    log_message: host_log_message,
 };
 
 #[repr(C)]

@@ -28,6 +28,7 @@ const FILE_SHARE_READ_WRITE: u32 = 0x0000_0001 | 0x0000_0002;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const CP_UTF8: u32 = 65_001;
+const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
 const ALLOC_CONSOLE_MODE_NEW_WINDOW: i32 = 1;
 const ALLOC_CONSOLE_RESULT_NEW_CONSOLE: i32 = 1;
@@ -196,7 +197,7 @@ fn try_allocate_developer_console() -> Option<ConsoleHandle> {
 
         let handle = CreateFileW(
             conout.as_ptr(),
-            GENERIC_WRITE,
+            GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ_WRITE,
             null_mut(),
             OPEN_EXISTING,
@@ -213,7 +214,10 @@ fn try_allocate_developer_console() -> Option<ConsoleHandle> {
 
         let mut mode: u32 = 0;
         let ansi_enabled = GetConsoleMode(handle, &mut mode) != 0
-            && SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+            && SetConsoleMode(
+                handle,
+                mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            ) != 0;
 
         Some(ConsoleHandle {
             raw_handle: raw_addr,

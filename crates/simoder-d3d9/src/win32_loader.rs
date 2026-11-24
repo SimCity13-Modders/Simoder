@@ -127,7 +127,9 @@ impl ModsActionBackend for Win32ModsBackend {
         mod_id: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        global_simoder_runtime().set_region_mod_enabled(region_id, mod_id, enabled)
+        global_simoder_runtime().set_region_mod_enabled(region_id, mod_id, enabled)?;
+        sync_raw_resources_on_game_thread();
+        Ok(())
     }
 }
 
@@ -135,11 +137,9 @@ fn sync_raw_resources_on_game_thread() {
     if !is_resource_bridge_ready() {
         return;
     }
-    let resources = global_simoder_runtime()
-        .with_mod_manager_mut(|maybe| {
-            Ok::<_, String>(maybe.map(|m| m.active_raw_resources()).unwrap_or_default())
-        })
-        .unwrap_or_default();
+    let runtime = global_simoder_runtime();
+    let active_region = runtime.active_region();
+    let resources = runtime.effective_active_raw_resources(active_region.as_deref());
     match sync_in_memory_raw_resources(&resources) {
         Ok(Some(count)) => emit_log(
             LogLevel::Info,
@@ -231,6 +231,19 @@ fn on_ui_sync_tick(hwnd: usize) {
                             "simoder.ui",
                             "Connected Simoder-Base declarative UI bridge to active EAWebKit view",
                         );
+                        try_attach_eawebkit_debuglog_hook(true);
+                    }
+                    for entry in reply.console_logs {
+                        let lvl = LogLevel::parse(&entry.level).unwrap_or(LogLevel::Info);
+                        emit_log(lvl, LogSourceType::Game, &entry.source, &entry.message);
+                    }
+                    let next_region = reply
+                        .active_region_id
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    if next_region != runtime.active_region() {
+                        runtime.set_active_region(next_region);
+                        sync_raw_resources_on_game_thread();
                     }
                     let prev_obs = runtime.get_ui_observation();
                     let obs_changed = reply
@@ -365,6 +378,8 @@ pub fn shutdown_loaded_native_modules() {
     }
     shutdown_in_memory_raw_resources();
     shutdown_admitted_native_owners();
+    crate::win32_eawebkit_debuglog_hook::uninstall_eawebkit_debuglog_hook();
+    crate::win32_ods_hook::uninstall_output_debug_string_hooks();
     stop_global_logger();
 }
 
@@ -409,6 +424,17 @@ fn run_bootstrap_worker() {
                 build_verified,
             );
             let console_active = crate::win32_console::is_developer_console_active();
+            let ods_hooks = crate::win32_ods_hook::install_output_debug_string_hooks(
+                Arc::clone(global_simoder_runtime().logs()),
+            );
+            emit_log(
+                LogLevel::Info,
+                LogSourceType::Loader,
+                "simoder.console",
+                &format!(
+                    "Installed {ods_hooks} OutputDebugStringA/W IAT hook(s) for [GAME] log capture"
+                ),
+            );
 
             let summary = format!(
                 "Simoder runtime initialized: pid={} exe='{}' mods_dir='{}' enabled={} dev_mode={} build_verified={} console_enabled={} console_active={} level={}",
@@ -507,6 +533,7 @@ fn run_bootstrap_worker() {
                         &format!("EAWebKit UI bridge unavailable: {err}"),
                     );
                 } else {
+                    try_attach_eawebkit_debuglog_hook(false);
                     configure_ui_tick(on_ui_sync_tick);
                     while !LOADER_STOPPING.load(Ordering::Acquire) {
                         if let Some(hwnd) = find_primary_game_window()
@@ -565,6 +592,27 @@ fn query_module_filename(h_mod: HModule) -> Option<PathBuf> {
 
 pub(crate) fn to_wide_null(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn try_attach_eawebkit_debuglog_hook(warn_on_err: bool) {
+    match crate::win32_eawebkit_debuglog_hook::install_eawebkit_debuglog_hook(Arc::clone(
+        global_simoder_runtime().logs(),
+    )) {
+        Ok(true) => emit_log(
+            LogLevel::Info,
+            LogSourceType::Loader,
+            "simoder.ui",
+            "Installed EAWebKitClient::DebugLog vtable hook via String-XREF anchor",
+        ),
+        Ok(false) => {}
+        Err(err) if warn_on_err => emit_log(
+            LogLevel::Warning,
+            LogSourceType::Loader,
+            "simoder.ui",
+            &format!("EAWebKitClient::DebugLog vtable hook skipped: {err}"),
+        ),
+        Err(_) => {}
+    }
 }
 
 pub(crate) fn emit_log(

@@ -8,11 +8,12 @@ use std::io::Read as _;
 use std::path::Path;
 
 pub use goblin::pe::header::COFF_MACHINE_X86;
+use goblin::pe::header::Header;
 use goblin::pe::optional_header::MAGIC_32;
 pub use goblin::pe::section_table::IMAGE_SCN_MEM_EXECUTE;
 use goblin::pe::{PE, options::ParseOptions};
 
-use simoder_core::{Digest, Sha256, hex};
+use simoder_core::{Digest, LoadedModuleView, Sha256, hex, resolve_string_xref_getter};
 
 use crate::D3d9Error;
 use crate::config::{SUPPORTED_GAME_FILE_SHA256, SUPPORTED_GAME_TEXT_SHA256};
@@ -315,4 +316,93 @@ pub fn assess_pe32_bytes(bytes: &[u8]) -> Result<BuildAssessment, D3d9Error> {
 /// Read an executable file from disk and return its [`BuildAssessment`] without re-parsing headers twice.
 pub fn assess_game_executable(path: &Path) -> Result<BuildAssessment, D3d9Error> {
     Ok(Pe32Image::open(path)?.assess())
+}
+
+/// NUL-terminated console formatting literal inside `WebCore::ChromeClientEA::addMessageToConsole`.
+const CONSOLE_FORMAT_ANCHOR: &[u8] = b"%s %s (%d): %s\0";
+
+/// Maximum backward byte window from the `push imm32` anchor xref to search for `GetEAWebKitClient`.
+const XREF_LOOKBACK_BYTES: usize = 0x100;
+
+/// Resolved virtual addresses for `EA::WebKit::GetEAWebKitClient` and `gEAWebKitClient`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedEaWebKitClientGlobal {
+    /// Virtual address of the unique `"%s %s (%d): %s\0"` anchor in `.rdata`.
+    pub console_format_va: u32,
+    /// Virtual address of the unique `push imm32` instruction referencing [`Self::console_format_va`].
+    pub console_xref_va: u32,
+    /// Virtual address of `EA::WebKit::GetEAWebKitClient` (`mov eax, [gEAWebKitClient]; ret`).
+    pub get_client_va: u32,
+    /// Virtual address of the global `EAWebKitClient*` pointer (`gEAWebKitClient`).
+    pub client_global_ptr_va: u32,
+}
+
+/// Extract `.text` and `.rdata` `(virtual_address, virtual_size)` ranges from a loaded 32-bit PE header.
+///
+/// Uses [`goblin::pe::header::Header::parse`] so only the initial `4 KiB` header page of a mapped
+/// module needs to be read.
+pub fn parse_loaded_pe_text_and_rdata_ranges(
+    header_bytes: &[u8],
+) -> Option<((u32, u32), (u32, u32))> {
+    let header = Header::parse(header_bytes).ok()?;
+    let opt = header.optional_header?;
+    if header.coff_header.machine != COFF_MACHINE_X86 || opt.standard_fields.magic != MAGIC_32 {
+        return None;
+    }
+
+    let dos_pe_offset = header.dos_header.pe_pointer as usize;
+    let coff_offset = dos_pe_offset.checked_add(4)?;
+    let opt_size = header.coff_header.size_of_optional_header as usize;
+    let sections_offset = coff_offset.checked_add(20)?.checked_add(opt_size)?;
+    let section_count = header.coff_header.number_of_sections as usize;
+
+    let mut text_range = None;
+    let mut rdata_range = None;
+
+    for idx in 0..section_count {
+        let off = sections_offset.checked_add(idx.checked_mul(40)?)?;
+        let sec = header_bytes.get(off..off + 40)?;
+        let name = &sec[0..8];
+        let v_size = u32::from_le_bytes(sec[8..12].try_into().ok()?);
+        let v_addr = u32::from_le_bytes(sec[12..16].try_into().ok()?);
+        let raw_size = u32::from_le_bytes(sec[16..20].try_into().ok()?);
+        let size = v_size.max(raw_size);
+        if size == 0 {
+            continue;
+        }
+        if name.starts_with(b".text\0") || name == b".text\0\0\0" {
+            text_range = Some((v_addr, size));
+        } else if name.starts_with(b".rdata\0") || name == b".rdata\0\0" {
+            rdata_range = Some((v_addr, size));
+        }
+    }
+
+    Some((text_range?, rdata_range?))
+}
+
+/// Resolve `gEAWebKitClient` via the unique String-XREF anchor in `EAWebKit.dll`.
+///
+/// Returns `None` if any step finds `0` or `> 1` distinct matches, ensuring ambiguous
+/// binaries fail closed rather than patching an unverified address.
+pub fn resolve_eawebkit_client_global(
+    image_base: u32,
+    text_rva: u32,
+    text_bytes: &[u8],
+    rdata_rva: u32,
+    rdata_bytes: &[u8],
+) -> Option<ResolvedEaWebKitClientGlobal> {
+    let view = LoadedModuleView {
+        image_base,
+        text_rva,
+        text: text_bytes,
+        rdata_rva,
+        rdata: rdata_bytes,
+    };
+    let resolved = resolve_string_xref_getter(&view, CONSOLE_FORMAT_ANCHOR, XREF_LOOKBACK_BYTES)?;
+    Some(ResolvedEaWebKitClientGlobal {
+        console_format_va: resolved.string_va,
+        console_xref_va: resolved.xref_va,
+        get_client_va: resolved.getter_va,
+        client_global_ptr_va: resolved.global_ptr_va,
+    })
 }

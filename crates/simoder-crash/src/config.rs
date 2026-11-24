@@ -66,20 +66,23 @@ pub const UI_SPEED_VALUES_RUNNING: &[u64] = &[182_362_527, 182_362_531, 182_362_
 
 /// Verified retail `SimCity.exe` SHA-256 fingerprint (`10.3.6.0`).
 pub const RETAIL_SIMCITY_EXE_SHA256: &str =
-    "2b0aff527baa3aa536aca6c68332c208d1dbd904695f0f985d17d56b128d48ab";
+    "4e5f136a7bf58a52c4b97ed9c9a615a118d4a696e13aa8caa6a0a51fd4516d35";
 
-/// Verified retail `EAWebKit.dll` (`12.4.2.2.2`) SHA-256 fingerprint (`9,602,224` bytes, PE32 x86).
+/// Verified retail `EAWebKit.dll` (`12.4.2.2`) SHA-256 fingerprint (`9,608,808` bytes, PE32 x86).
 pub const RETAIL_EAWEBKIT_DLL_SHA256: &str =
-    "0be0e0c3104739cb56208f91d643c429c8262daff768b2afdcd1799444350e86";
+    "72d76cbff60aac162ee80845ebb7a6957c22f2ccefaa43ede235ed633f212146";
 
-/// Retail `SimCity.exe` virtual address (`0x0091B4F5`) where the native crash handler pushes `"DbgHelp.dll"`
-/// before calling `LoadLibraryA` (`0x0091B4FC`) and `MiniDumpWriteDump` (return address `0x0091B502`).
-pub const RETAIL_MINIDUMP_HANDLER_VA: u32 = 0x0091_B4F5;
+/// Retail `SimCity.exe` virtual address (`0x00921115`) where the native crash handler pushes `"DbgHelp.dll"`
+/// before calling `LoadLibraryA` and `MiniDumpWriteDump` (return address `0x00921122`).
+pub const RETAIL_MINIDUMP_HANDLER_VA: u32 = 0x0092_1115;
 
-/// Retail `SimCity.exe` return virtual address (`0x0091B502`) inside the native minidump writer path.
-pub const RETAIL_MINIDUMP_RETURN_VA: u32 = 0x0091_B502;
+/// Retail `SimCity.exe` return virtual address (`0x00921122`) inside the native minidump writer path.
+pub const RETAIL_MINIDUMP_RETURN_VA: u32 = 0x0092_1122;
 
 /// Retail `EAWebKit.dll` RVA (`0x005AC490`) of `WebCore::ChromeClientEA::addMessageToConsole`.
+///
+/// Runtime hooking uses String-XREF dynamic resolution (`eawebkit_debuglog_resolver`) rather than
+/// relying on this hardcoded RVA.
 pub const EAWEBKIT_ADD_MESSAGE_TO_CONSOLE_RVA: u32 = 0x005A_C490;
 
 /// Retail `EAWebKit.dll` RVA (`0x005AC560`) of the verified console message formatting/dispatch window.
@@ -88,23 +91,26 @@ pub const EAWEBKIT_CONSOLE_DISPATCH_WINDOW_RVA: u32 = 0x005A_C560;
 /// Vtable byte offset (`+0x0C`, slot 3) of `EAWebKitClient::DebugLog(DebugLogInfo&)`.
 pub const EAWEBKIT_CLIENT_DEBUGLOG_VTABLE_OFFSET: u32 = 0x0C;
 
-/// Retail `SimCity.exe` RVA (`0x0095F498`) of the host `EAWebKitClient` vtable.
-pub const RETAIL_EXE_EAWEBKIT_CLIENT_VTABLE_RVA: u32 = 0x0095_F498;
+/// Retail `SimCity.exe` RVA (`0x00964D70`, VA `0x00D64D70`) of the host `EAWebKitClient` vtable.
+///
+/// Runtime hooking resolves `gEAWebKitClient` dynamically via String-XREF (`eawebkit_debuglog_resolver`)
+/// rather than hardcoding this RVA.
+pub const RETAIL_EXE_EAWEBKIT_CLIENT_VTABLE_RVA: u32 = 0x0096_4D70;
 
-/// Retail `SimCity.exe` RVA (`0x0081E7C0`) of the shared `C2 04 00` (`ret 4`) no-op stub.
+/// Retail `SimCity.exe` RVA (`0x0066BC90`, VA `0x00A6BC90`) of the shared `C2 04 00` (`ret 4`) no-op stub.
 ///
 /// Must NEVER be hooked directly via code detour because unrelated callbacks (`GetLocalizedString`,
 /// `NetworkError`, `CursorMoved`, `ViewProcessStatus`, `JSMessageBox`) share this exact address.
-pub const RETAIL_EXE_SHARED_RET4_NOOP_RVA: u32 = 0x0081_E7C0;
+pub const RETAIL_EXE_SHARED_RET4_NOOP_RVA: u32 = 0x0066_BC90;
 
-/// Retail `SimCity.exe` virtual address (`0x008E5630`) of `EA::Trace::TraceHelper::TraceFormatted`.
-pub const RETAIL_EATRACE_TRACE_FORMATTED_VA: u32 = 0x008E_5630;
+/// Retail `SimCity.exe` virtual address (`0x008EB580`) of `EA::Trace::TraceHelper::TraceFormatted`.
+pub const RETAIL_EATRACE_TRACE_FORMATTED_VA: u32 = 0x008E_B580;
 
 /// Retail `SimCity.exe` virtual address (`0x00917380`) of `EA::Trace::Server::Trace`.
 pub const RETAIL_EATRACE_SERVER_TRACE_VA: u32 = 0x0091_7380;
 
-/// Retail `SimCity.exe` virtual address (`0x00916370`) of `anonymous::cLogReporterFile::Report`.
-pub const RETAIL_EATRACE_FILE_REPORTER_VA: u32 = 0x0091_6370;
+/// Retail `SimCity.exe` virtual address (`0x0091C040`) of `anonymous::cLogReporterFile::Report`.
+pub const RETAIL_EATRACE_FILE_REPORTER_VA: u32 = 0x0091_C040;
 
 /// Retail `SimCity.exe` virtual address (`0x0046BE30`) of `anonymous::cLogReporterDebugConsole::Report`.
 pub const RETAIL_EATRACE_CONSOLE_REPORTER_VA: u32 = 0x0046_BE30;
@@ -112,8 +118,8 @@ pub const RETAIL_EATRACE_CONSOLE_REPORTER_VA: u32 = 0x0046_BE30;
 /// Retail `SimCity.exe` virtual address (`0x0046B9E0`) of `SP::cCheatManager::Output`.
 pub const RETAIL_CHEAT_MANAGER_OUTPUT_VA: u32 = 0x0046_B9E0;
 
-/// Retail `SimCity.exe` virtual address (`0x00915D90`) of `EA::Trace::GetServer`.
-pub const RETAIL_EATRACE_GET_SERVER_VA: u32 = 0x0091_5D90;
+/// Retail `SimCity.exe` virtual address (`0x0091BAB0`) of `EA::Trace::GetServer`.
+pub const RETAIL_EATRACE_GET_SERVER_VA: u32 = 0x0091_BAB0;
 
 /// Retail `SimCity.exe` virtual address (`0x00D1B708`) of the `cEcoGameScripts` vtable.
 pub const RETAIL_ECOGAME_SCRIPTS_VTABLE_VA: u32 = 0x00D1_B708;

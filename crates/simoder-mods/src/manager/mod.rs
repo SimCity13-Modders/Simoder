@@ -456,6 +456,49 @@ impl ModManager {
         None
     }
 
+    /// Resolve effective in-memory Schema 3 raw resources after applying per-region `region_overrides`.
+    ///
+    /// Mods with `region_overrides.get(id) == Some(&false)` are excluded even if globally enabled;
+    /// discovered mods with `region_overrides.get(id) == Some(&true)` are included even if globally disabled
+    /// without mutating global `state.toon`.
+    pub fn effective_raw_resources(
+        &self,
+        region_overrides: &BTreeMap<String, bool>,
+    ) -> Vec<ActiveRawResource> {
+        let inner = self.lock_state();
+        let mut effective_ids: Vec<String> = inner
+            .enabled_order
+            .iter()
+            .filter(|id| region_overrides.get(id.as_str()).copied() != Some(false))
+            .cloned()
+            .collect();
+
+        for (id, record) in &inner.records {
+            if region_overrides.get(id.as_str()).copied() == Some(true)
+                && !effective_ids.iter().any(|existing| existing == id)
+                && !matches!(
+                    record.lifecycle,
+                    ModLifecycle::Failed { .. } | ModLifecycle::Missing { .. }
+                )
+            {
+                effective_ids.push(id.clone());
+            }
+        }
+
+        let mut out = Vec::new();
+        for owner in &effective_ids {
+            if let Some(entries) = inner.active_raw_resources.get(owner) {
+                out.extend(entries.iter().cloned());
+            } else if let Some(record) = inner.records.get(owner)
+                && let Ok(entries) =
+                    Self::load_raw_resources_into_memory(&record.definition, &self.known_vanilla_digests)
+            {
+                out.extend(entries);
+            }
+        }
+        out
+    }
+
     fn refresh_locked(&self, inner: &mut InnerState) -> Result<(), ModError> {
         if self.is_stopping() {
             return Err(ModError::Lifecycle("Mod runtime is stopping".into()));

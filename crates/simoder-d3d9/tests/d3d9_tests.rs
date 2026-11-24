@@ -472,3 +472,87 @@ fn in_memory_dbpf_builder_deduplicates_overrides_and_bypasses_signature() {
         PackageMetadataVerdict::BypassSignature
     );
 }
+
+#[test]
+fn region_mods_matrix_resolves_region_on_global_off_and_region_off_global_on() {
+    use simoder_mods::{MOD_MANIFEST_FILE_NAME, sha256_bytes};
+
+    let dir = tempfile::tempdir().unwrap();
+    let game_root = dir.path();
+    let mods_dir = game_root.join("mods");
+    let simoder_dir = game_root.join("simoder");
+    fs::create_dir_all(&mods_dir).unwrap();
+    fs::create_dir_all(&simoder_dir).unwrap();
+
+    // Seed two Schema 3 raw-resources mods: mod.a (globally OFF) and mod.b (globally ON).
+    for (id, payload_bytes) in [
+        ("dawid.region-only", b"region-only-bytes".as_slice()),
+        ("dawid.global-mod", b"global-mod-bytes".as_slice()),
+    ] {
+        let mdir = mods_dir.join(id);
+        fs::create_dir_all(mdir.join("assets")).unwrap();
+        fs::write(mdir.join("assets/res.bin"), payload_bytes).unwrap();
+        let sha = simoder_core::hex::encode(sha256_bytes(payload_bytes));
+        let tgi_inst = if id == "dawid.region-only" {
+            "0000000000000001"
+        } else {
+            "0000000000000002"
+        };
+        fs::write(
+            mdir.join(MOD_MANIFEST_FILE_NAME),
+            format!(
+                "schemaVersion = 3\ncontract = \"simoder.raw-resources\"\n\
+                 requiredCapabilities = [\"resource.register\"]\n\n\
+                 [metadata]\nid = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\n\n\
+                 [[resources]]\nid = \"00B1B104:09878A01:{tgi_inst}\"\noperation = \"add\"\n\
+                 sha256 = \"{sha}\"\nsize = {}\npayload = \"assets/res.bin\"\n",
+                payload_bytes.len()
+            ),
+        )
+        .unwrap();
+    }
+
+    let runtime = IntegratedSimoderRuntime::new();
+    let simcity_dir = game_root.join("SimCity");
+    let sys_dir = game_root.join("sys");
+    fs::create_dir_all(&simcity_dir).unwrap();
+    fs::create_dir_all(&sys_dir).unwrap();
+    let exe = simcity_dir.join("SimCity.exe");
+    let proxy_dll = simcity_dir.join("d3d9.dll");
+    fs::write(&exe, build_synthetic_pe32()).unwrap();
+    fs::write(&proxy_dll, b"MZ").unwrap();
+    fs::write(sys_dir.join("d3d9.dll"), b"MZ").unwrap();
+    let _ = runtime.boot(&proxy_dll, &exe, &sys_dir, 1000).unwrap();
+    runtime.with_mod_manager_mut(|maybe| {
+        let mgr = maybe.unwrap();
+        mgr.initialize().unwrap();
+        mgr.set_enabled("dawid.global-mod", true).unwrap();
+    });
+
+    // Region A: enable `dawid.region-only` (global OFF), disable `dawid.global-mod` (global ON).
+    runtime
+        .set_region_mod_enabled("region-alpha", "dawid.region-only", true)
+        .unwrap();
+    runtime
+        .set_region_mod_enabled("region-alpha", "dawid.global-mod", false)
+        .unwrap();
+
+    // Global & Region B must remain completely unaffected.
+    assert!(!runtime.effective_mod_enabled(None, "dawid.region-only"));
+    assert!(runtime.effective_mod_enabled(None, "dawid.global-mod"));
+    assert!(!runtime.effective_mod_enabled(Some("region-beta"), "dawid.region-only"));
+    assert!(runtime.effective_mod_enabled(Some("region-beta"), "dawid.global-mod"));
+
+    // Region A must flip both overrides cleanly.
+    assert!(runtime.effective_mod_enabled(Some("region-alpha"), "dawid.region-only"));
+    assert!(!runtime.effective_mod_enabled(Some("region-alpha"), "dawid.global-mod"));
+
+    let global_res = runtime.effective_active_raw_resources(None);
+    assert_eq!(global_res.len(), 1);
+    assert_eq!(global_res[0].owner, "dawid.global-mod");
+
+    let region_a_res = runtime.effective_active_raw_resources(Some("region-alpha"));
+    assert_eq!(region_a_res.len(), 1);
+    assert_eq!(region_a_res[0].owner, "dawid.region-only");
+    assert_eq!(region_a_res[0].bytes, b"region-only-bytes");
+}

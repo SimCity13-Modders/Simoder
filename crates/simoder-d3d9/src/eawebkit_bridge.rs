@@ -12,30 +12,31 @@ use std::ffi::{CString, c_void};
 use std::mem::{size_of, transmute, zeroed};
 #[cfg(target_pointer_width = "32")]
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static VERIFIED_BASE: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(target_pointer_width = "32")]
-const PREFERRED_BASE: usize = 0x0040_0000;
+use parking_lot::Mutex;
 #[cfg(target_pointer_width = "32")]
-const NATIVE_THREAD_SLOT_VA: usize = 0x00E5_96F8;
+use simoder_core::{ResolutionStrategy, resolve_symbol};
+
 #[cfg(target_pointer_width = "32")]
-const VIEW_ROOT_SLOT_VA: usize = 0x00FE_13C4;
+use crate::win32_hook_util::{read_bytes_exact, snapshot_loaded_module};
+
 #[cfg(target_pointer_width = "32")]
-const VA_VALUE_SCOPE_CTOR: usize = 0x00A3_85C0;
+#[derive(Clone, Copy)]
+struct ResolvedEaWebKitBridge {
+    native_thread_slot: usize,
+    view_root_slot: usize,
+    value_scope_ctor: usize,
+    value_scope_dtor: usize,
+    text_assign: usize,
+    view_count: usize,
+    context_at: usize,
+    compile: usize,
+    invoke: usize,
+}
+
 #[cfg(target_pointer_width = "32")]
-const VA_VALUE_SCOPE_DTOR: usize = 0x00A3_8500;
-#[cfg(target_pointer_width = "32")]
-const VA_TEXT_ASSIGN: usize = 0x0066_6430;
-#[cfg(target_pointer_width = "32")]
-const VA_VIEW_COUNT: usize = 0x0093_5F10;
-#[cfg(target_pointer_width = "32")]
-const VA_CONTEXT_AT: usize = 0x00A3_BB80;
-#[cfg(target_pointer_width = "32")]
-const VA_COMPILE: usize = 0x00A3_6220;
-#[cfg(target_pointer_width = "32")]
-const VA_INVOKE: usize = 0x00A3_50A0;
+static RESOLVED_BRIDGE: Mutex<Option<ResolvedEaWebKitBridge>> = Mutex::new(None);
 
 #[cfg(target_pointer_width = "32")]
 const MEM_COMMIT: u32 = 0x1000;
@@ -74,7 +75,6 @@ const _: () = assert!(size_of::<ValueScopeStorage>() == 12);
 #[cfg(target_pointer_width = "32")]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn GetModuleHandleW(lp_module_name: *const u16) -> *mut c_void;
     fn GetCurrentThreadId() -> u32;
     fn GetThreadId(h_thread: *mut c_void) -> u32;
     fn VirtualQuery(
@@ -90,9 +90,8 @@ unsafe extern "system" {
     fn GetWindowThreadProcessId(hwnd: *mut c_void, lpdw_process_id: *mut u32) -> u32;
 }
 
-/// Verify retail `SimCity.exe 10.3.6.0` base address and all 5 immutable `EAWebKit` entry signatures.
+/// Resolve retail `SimCity.exe` `EAWebKit` bridge entrypoints via [`simoder_core::binary_resolver`].
 pub fn initialize_eawebkit_bridge(verified_retail_file: bool) -> Result<(), String> {
-    VERIFIED_BASE.store(0, Ordering::Release);
     if !verified_retail_file {
         return Err("EAWebKit bridge requires verified SimCity.exe 10.3.6.0 SHA-256".into());
     }
@@ -102,39 +101,150 @@ pub fn initialize_eawebkit_bridge(verified_retail_file: bool) -> Result<(), Stri
     }
     #[cfg(target_pointer_width = "32")]
     {
-        // SAFETY: Reads main module handle and checks 5 immutable opcode sequences via `VirtualQuery`.
-        let base = unsafe { GetModuleHandleW(std::ptr::null()) } as usize;
-        if base != PREFERRED_BASE {
-            return Err(format!(
-                "EAWebKit bridge requires preferred load base 0x{PREFERRED_BASE:08X}, got 0x{base:08X}"
-            ));
+        *RESOLVED_BRIDGE.lock() = None;
+        let snap = snapshot_loaded_module(None)?;
+        let view = snap.as_view();
+
+        let value_scope_ctor = resolve_symbol(
+            &view,
+            &ResolutionStrategy::HintThenFallback {
+                hint_rva: 0x0063_85C0,
+                hint_prefix: &[0x8B, 0x44, 0x24, 0x04, 0x55, 0x56, 0x8B, 0xF1],
+                fallback: &ResolutionStrategy::UniqueSignature {
+                    pattern: "8B 44 24 04 55 56 8B F1 C7 46 04 00 00 00 00 C7 06 00 00 00 00 C6 46 08",
+                    result_offset: 0,
+                },
+            },
+        )
+        .ok_or_else(|| "ValueScope::ctor signature not found or ambiguous".to_string())?
+        .va as usize;
+
+        let value_scope_dtor = resolve_symbol(
+            &view,
+            &ResolutionStrategy::HintThenFallback {
+                hint_rva: 0x0063_8500,
+                hint_prefix: &[0x80, 0x79, 0x08, 0x00, 0x74, 0x0F, 0x8B, 0x01],
+                fallback: &ResolutionStrategy::UniqueSignature {
+                    pattern: "80 79 08 00 74 0F 8B 01 85 C0 74 09 8B 49 04 50 E8 ?? ?? ?? ?? C3",
+                    result_offset: 0,
+                },
+            },
+        )
+        .ok_or_else(|| "ValueScope::dtor signature not found or ambiguous".to_string())?
+        .va as usize;
+
+        let context_at = resolve_symbol(
+            &view,
+            &ResolutionStrategy::HintThenFallback {
+                hint_rva: 0x0063_BB80,
+                hint_prefix: &[0x8B, 0x51, 0x34, 0x2B, 0x51, 0x30],
+                fallback: &ResolutionStrategy::UniqueSignature {
+                    pattern: "8B 51 34 2B 51 30 8B 44 24 04 C1 FA 02 3B C2 7C 05 33 C0 C2 04 00 8B 49",
+                    result_offset: 0,
+                },
+            },
+        )
+        .ok_or_else(|| "EAWebKit::ContextAt signature not found or ambiguous".to_string())?
+        .va as usize;
+
+        let compile = resolve_symbol(
+            &view,
+            &ResolutionStrategy::HintThenFallback {
+                hint_rva: 0x0063_6220,
+                hint_prefix: &[0x56, 0x8B, 0xF1, 0x83, 0xBE, 0xB0, 0x00, 0x00],
+                fallback: &ResolutionStrategy::UniqueSignature {
+                    pattern: "56 8B F1 83 BE B0 00 00 00 00 74 23 8B 4C 24 0C 85 C9 74 07 E8 ?? ?? ?? ?? EB 02 33 C0 8B 8E B0 00 00 00 8B 11 5E 89 44 24 08 8B 52 40 FF E2",
+                    result_offset: 0,
+                },
+            },
+        )
+        .ok_or_else(|| "EAWebKit::Compile signature not found or ambiguous".to_string())?
+        .va as usize;
+
+        let invoke = resolve_symbol(
+            &view,
+            &ResolutionStrategy::HintThenFallback {
+                hint_rva: 0x0063_50A0,
+                hint_prefix: &[0x53, 0x8B, 0xD9, 0x8B, 0x4C, 0x24, 0x08, 0x85],
+                fallback: &ResolutionStrategy::UniqueSignature {
+                    pattern: "53 8B D9 8B 4C 24 08 85 C9 75 06 32 C0 5B C2 0C 00 56 57 E8 ?? ?? ?? ??",
+                    result_offset: 0,
+                },
+            },
+        )
+        .ok_or_else(|| "EAWebKit::Invoke signature not found or ambiguous".to_string())?
+        .va as usize;
+
+        let native_thread_slot = resolve_symbol(
+            &view,
+            &ResolutionStrategy::GlobalPtrFromSignature {
+                pattern: "8B 42 54 FF D0 84 C0 74 1D E8 ?? ?? ?? ?? 39 05 ?? ?? ?? ?? 75 10 E8 ?? ?? ?? ?? 8B 10 8B C8 8B 42 48 6A 00",
+                imm32_offset: 16,
+            },
+        )
+        .ok_or_else(|| "EAWebKit native thread slot signature not found".to_string())?
+        .va as usize;
+
+        let text_assign = resolve_symbol(
+            &view,
+            &ResolutionStrategy::VerifiedHint {
+                rva: 0x0026_6430,
+                expected_prefix: &[0x6A, 0xFF, 0x68],
+            },
+        )
+        .ok_or_else(|| "EAWebKit TextAssign signature mismatch".to_string())?
+        .va as usize;
+
+        let view_count = resolve_symbol(
+            &view,
+            &ResolutionStrategy::VerifiedHint {
+                rva: 0x0053_5F10,
+                expected_prefix: &[0x8B, 0x41, 0x34, 0x2B, 0x41, 0x30],
+            },
+        )
+        .ok_or_else(|| "EAWebKit ViewCount signature mismatch".to_string())?
+        .va as usize;
+
+        let view_root_getter = resolve_symbol(
+            &view,
+            &ResolutionStrategy::VerifiedHint {
+                rva: 0x0023_8250,
+                expected_prefix: &[0xA1],
+            },
+        )
+        .ok_or_else(|| "EAWebKit ViewRoot getter signature mismatch".to_string())?;
+        let mut root_stub = [0u8; 6];
+        if !read_bytes_exact(view_root_getter.va as usize, &mut root_stub) || root_stub[5] != 0xC3 {
+            return Err("EAWebKit ViewRoot getter stub validation failed".into());
         }
-        let checks: &[(usize, [u8; 8])] = &[
-            (VA_VALUE_SCOPE_CTOR, [0x8b, 0x44, 0x24, 0x04, 0x55, 0x56, 0x8b, 0xf1]),
-            (VA_VALUE_SCOPE_DTOR, [0x80, 0x79, 0x08, 0x00, 0x74, 0x0f, 0x8b, 0x01]),
-            (VA_TEXT_ASSIGN, [0x6a, 0xff, 0x68, 0x88, 0x9b, 0xc4, 0x00, 0x64]),
-            (VA_COMPILE, [0x56, 0x8b, 0xf1, 0x83, 0xbe, 0xb0, 0x00, 0x00]),
-            (VA_INVOKE, [0x53, 0x8b, 0xd9, 0x8b, 0x4c, 0x24, 0x08, 0x85]),
-        ];
-        for &(va, expected) in checks {
-            let ptr = base + va - PREFERRED_BASE;
-            if !is_readable(ptr, expected.len()) {
-                return Err(format!("EAWebKit entry signature at 0x{va:08X} unreadable"));
-            }
-            // SAFETY: Verified readable by `is_readable(ptr, 8)`.
-            let actual = unsafe { std::slice::from_raw_parts(ptr as *const u8, expected.len()) };
-            if actual != expected {
-                return Err(format!("EAWebKit entry signature mismatch at 0x{va:08X}"));
-            }
-        }
-        VERIFIED_BASE.store(base, Ordering::Release);
+        let view_root_slot =
+            u32::from_le_bytes([root_stub[1], root_stub[2], root_stub[3], root_stub[4]]) as usize;
+
+        *RESOLVED_BRIDGE.lock() = Some(ResolvedEaWebKitBridge {
+            native_thread_slot,
+            view_root_slot,
+            value_scope_ctor,
+            value_scope_dtor,
+            text_assign,
+            view_count,
+            context_at,
+            compile,
+            invoke,
+        });
         Ok(())
     }
 }
 
 /// Return true after [`initialize_eawebkit_bridge`] succeeded on the verified game build.
 pub fn is_eawebkit_bridge_ready() -> bool {
-    VERIFIED_BASE.load(Ordering::Acquire) != 0
+    #[cfg(target_pointer_width = "32")]
+    {
+        RESOLVED_BRIDGE.lock().is_some()
+    }
+    #[cfg(not(target_pointer_width = "32"))]
+    {
+        false
+    }
 }
 
 /// Execute `script_source` (pure ES5 JS function `(packetText) -> string`) with `packet_json`
@@ -173,10 +283,6 @@ fn eval_active_view_inner(
     script_source: &str,
     arg_text: &str,
 ) -> Result<String, String> {
-    let base = VERIFIED_BASE.load(Ordering::Acquire);
-    if base == 0 {
-        return Err("EAWebKit bridge is not initialized".into());
-    }
     #[cfg(not(target_pointer_width = "32"))]
     {
         let _ = (hwnd_val, probe_script, script_source, arg_text);
@@ -184,7 +290,10 @@ fn eval_active_view_inner(
     }
     #[cfg(target_pointer_width = "32")]
     {
-        execute_packet_x86(base, hwnd_val, probe_script, script_source, arg_text)
+        let Some(bridge) = *RESOLVED_BRIDGE.lock() else {
+            return Err("EAWebKit bridge is not initialized".into());
+        };
+        execute_packet_x86(&bridge, hwnd_val, probe_script, script_source, arg_text)
     }
 }
 
@@ -221,7 +330,7 @@ fn is_readable(address: usize, len: usize) -> bool {
 }
 
 #[cfg(target_pointer_width = "32")]
-fn vtable_method(base: usize, obj: *mut c_void, offset: usize, expected_va: usize) -> Result<usize, String> {
+fn vtable_method(obj: *mut c_void, offset: usize, expected_va: usize) -> Result<usize, String> {
     let obj_addr = obj as usize;
     if !is_readable(obj_addr, size_of::<usize>()) {
         return Err("Native UI object unreadable".into());
@@ -234,7 +343,7 @@ fn vtable_method(base: usize, obj: *mut c_void, offset: usize, expected_va: usiz
     }
     // SAFETY: Verified readable vtable entry.
     let target = unsafe { *(slot as *const usize) };
-    if expected_va != 0 && target != base + expected_va - PREFERRED_BASE {
+    if expected_va != 0 && target != expected_va {
         return Err(format!("Native vtable mismatch at offset 0x{offset:X}"));
     }
     Ok(target)
@@ -243,12 +352,12 @@ fn vtable_method(base: usize, obj: *mut c_void, offset: usize, expected_va: usiz
 #[cfg(target_pointer_width = "32")]
 struct ValueScope {
     storage: ValueScopeStorage,
-    base: usize,
+    dtor_addr: usize,
 }
 
 #[cfg(target_pointer_width = "32")]
 impl ValueScope {
-    fn new(base: usize, context: *mut c_void) -> Self {
+    fn new(bridge: &ResolvedEaWebKitBridge, context: *mut c_void) -> Self {
         type FnCtor = unsafe extern "thiscall" fn(*mut ValueScopeStorage, *mut c_void);
         let mut storage = ValueScopeStorage {
             value: null_mut(),
@@ -256,12 +365,15 @@ impl ValueScope {
             owned: 0,
             padding: [0; 3],
         };
-        // SAFETY: Verified `ValueScope` constructor signature (`0x00A385C0`).
+        // SAFETY: Verified `ValueScope` constructor address resolved via `binary_resolver`.
         unsafe {
-            let ctor: FnCtor = transmute(base + VA_VALUE_SCOPE_CTOR - PREFERRED_BASE);
+            let ctor: FnCtor = transmute(bridge.value_scope_ctor);
             ctor(&mut storage, context);
         }
-        Self { storage, base }
+        Self {
+            storage,
+            dtor_addr: bridge.value_scope_dtor,
+        }
     }
 }
 
@@ -269,22 +381,22 @@ impl ValueScope {
 impl Drop for ValueScope {
     fn drop(&mut self) {
         type FnDtor = unsafe extern "thiscall" fn(*mut ValueScopeStorage);
-        // SAFETY: Verified `ValueScope` destructor (`0x00A38500`).
+        // SAFETY: Verified `ValueScope` destructor address resolved via `binary_resolver`.
         unsafe {
-            let dtor: FnDtor = transmute(self.base + VA_VALUE_SCOPE_DTOR - PREFERRED_BASE);
+            let dtor: FnDtor = transmute(self.dtor_addr);
             dtor(&mut self.storage);
         }
     }
 }
 
 #[cfg(target_pointer_width = "32")]
-fn copy_value_utf8(base: usize, value: *mut c_void) -> Result<String, String> {
+fn copy_value_utf8(value: *mut c_void) -> Result<String, String> {
     if value.is_null() {
         return Err("EAWebKit returned null JSValue".into());
     }
     type FnType = unsafe extern "thiscall" fn(*mut c_void) -> i32;
     type FnString = unsafe extern "thiscall" fn(*mut c_void, *mut u32) -> *const u16;
-    let type_addr = vtable_method(base, value, 4, 0)?;
+    let type_addr = vtable_method(value, 4, 0)?;
     // SAFETY: Verified `JSValue::Type()` slot.
     let val_type = unsafe {
         let f: FnType = transmute(type_addr);
@@ -293,7 +405,7 @@ fn copy_value_utf8(base: usize, value: *mut c_void) -> Result<String, String> {
     if val_type != 4 {
         return Err(format!("EAWebKit UI script returned non-string type {val_type}"));
     }
-    let str_addr = vtable_method(base, value, 0x38, 0)?;
+    let str_addr = vtable_method(value, 0x38, 0)?;
     let mut len: u32 = 0;
     // SAFETY: Verified `JSValue::GetString()` slot.
     let ptr = unsafe {
@@ -313,7 +425,7 @@ fn copy_value_utf8(base: usize, value: *mut c_void) -> Result<String, String> {
 
 #[cfg(target_pointer_width = "32")]
 fn execute_packet_x86(
-    base: usize,
+    bridge: &ResolvedEaWebKitBridge,
     hwnd_val: usize,
     probe_script: Option<&str>,
     script_source: &str,
@@ -329,10 +441,10 @@ fn execute_packet_x86(
     let observe_c = CString::new(crate::ui_patch_host::UI_OBSERVE_PACKET_JSON)
         .map_err(|_| "observe packet NUL".to_string())?;
 
-    // SAFETY: Verify owning thread affinity against `0x00E596F8` and `hwnd_val`.
+    // SAFETY: Verify owning thread affinity against resolved `native_thread_slot` and `hwnd_val`.
     let (current_tid, native_tid, window_tid) = unsafe {
         let cur = GetCurrentThreadId();
-        let thread_slot = (base + NATIVE_THREAD_SLOT_VA - PREFERRED_BASE) as *const *mut c_void;
+        let thread_slot = bridge.native_thread_slot as *const *mut c_void;
         let nat = if is_readable(thread_slot as usize, 4) && !(*thread_slot).is_null() {
             GetThreadId(*thread_slot)
         } else {
@@ -347,7 +459,7 @@ fn execute_packet_x86(
         ));
     }
 
-    let root_slot = base + VIEW_ROOT_SLOT_VA - PREFERRED_BASE;
+    let root_slot = bridge.view_root_slot;
     if !is_readable(root_slot, 4) {
         return Err("UI root slot unreadable".into());
     }
@@ -363,7 +475,7 @@ fn execute_packet_x86(
     type FnInvoke = unsafe extern "thiscall" fn(*mut c_void, *mut ValueScopeStorage, *mut ValueScopeStorage, *mut ValueScopeStorage) -> bool;
     type FnText = unsafe extern "C" fn(*const i8, *mut ValueScopeStorage);
 
-    let count_addr = vtable_method(base, root, 0x54, VA_VIEW_COUNT)?;
+    let count_addr = vtable_method(root, 0x54, bridge.view_count)?;
     // SAFETY: Verified `GetViewCount`.
     let count = unsafe {
         let f: FnCount = transmute(count_addr);
@@ -372,8 +484,8 @@ fn execute_packet_x86(
     if count <= 0 || count > 16 {
         return Err(format!("Native UI view count {count} out of range"));
     }
-    let ctx_fn: FnContext = unsafe { transmute(vtable_method(base, root, 0x4C, VA_CONTEXT_AT)?) };
-    let text_fn: FnText = unsafe { transmute(base + VA_TEXT_ASSIGN - PREFERRED_BASE) };
+    let ctx_fn: FnContext = unsafe { transmute(vtable_method(root, 0x4C, bridge.context_at)?) };
+    let text_fn: FnText = unsafe { transmute(bridge.text_assign) };
 
     let mut selected_ctx: *mut c_void = null_mut();
     let mut selected_rank: i32 = -1;
@@ -399,22 +511,22 @@ fn execute_packet_x86(
             continue;
         }
 
-        let Ok(compile_addr) = vtable_method(base, ctx, 0x58, VA_COMPILE) else {
+        let Ok(compile_addr) = vtable_method(ctx, 0x58, bridge.compile) else {
             continue;
         };
-        let Ok(invoke_addr) = vtable_method(base, ctx, 0x50, VA_INVOKE) else {
+        let Ok(invoke_addr) = vtable_method(ctx, 0x50, bridge.invoke) else {
             continue;
         };
         let compile: FnCompile = unsafe { transmute(compile_addr) };
         let invoke: FnInvoke = unsafe { transmute(invoke_addr) };
 
-        let mut func_scope = ValueScope::new(base, ctx);
+        let mut func_scope = ValueScope::new(bridge, ctx);
         // SAFETY: Verified `Compile` on active EAWebKit view context.
         if !unsafe { compile(ctx, probe_c.as_ptr(), &mut func_scope.storage) } {
             continue;
         }
-        let mut arg_scope = ValueScope::new(base, ctx);
-        let mut res_scope = ValueScope::new(base, ctx);
+        let mut arg_scope = ValueScope::new(bridge, ctx);
+        let mut res_scope = ValueScope::new(bridge, ctx);
         // SAFETY: Verified `Text` assign + `Invoke`.
         unsafe {
             text_fn(observe_c.as_ptr(), &mut arg_scope.storage);
@@ -427,7 +539,7 @@ fn execute_packet_x86(
                 continue;
             }
         }
-        let Ok(obs_json) = copy_value_utf8(base, res_scope.storage.value) else {
+        let Ok(obs_json) = copy_value_utf8(res_scope.storage.value) else {
             continue;
         };
         if !obs_json.contains("\"ok\":true") {
@@ -458,15 +570,15 @@ fn execute_packet_x86(
         return Err("No active EAWebKit view accepted UI patch script".into());
     }
 
-    let compile: FnCompile = unsafe { transmute(vtable_method(base, selected_ctx, 0x58, VA_COMPILE)?) };
-    let invoke: FnInvoke = unsafe { transmute(vtable_method(base, selected_ctx, 0x50, VA_INVOKE)?) };
-    let mut func_scope = ValueScope::new(base, selected_ctx);
+    let compile: FnCompile = unsafe { transmute(vtable_method(selected_ctx, 0x58, bridge.compile)?) };
+    let invoke: FnInvoke = unsafe { transmute(vtable_method(selected_ctx, 0x50, bridge.invoke)?) };
+    let mut func_scope = ValueScope::new(bridge, selected_ctx);
     // SAFETY: Verified `Compile` for final sync packet.
     if !unsafe { compile(selected_ctx, script_c.as_ptr(), &mut func_scope.storage) } {
         return Err("Selected EAWebKit view failed compiling UI patch applicator".into());
     }
-    let mut arg_scope = ValueScope::new(base, selected_ctx);
-    let mut res_scope = ValueScope::new(base, selected_ctx);
+    let mut arg_scope = ValueScope::new(bridge, selected_ctx);
+    let mut res_scope = ValueScope::new(bridge, selected_ctx);
     // SAFETY: Verified `Text` assign + `Invoke`.
     unsafe {
         text_fn(packet_c.as_ptr(), &mut arg_scope.storage);
@@ -479,5 +591,5 @@ fn execute_packet_x86(
             return Err("EAWebKit UI patch invoke failed".into());
         }
     }
-    copy_value_utf8(base, res_scope.storage.value)
+    copy_value_utf8(res_scope.storage.value)
 }
