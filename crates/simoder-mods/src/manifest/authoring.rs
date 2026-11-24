@@ -217,14 +217,14 @@ pub(super) fn parse(
     Ok(ModDefinition {
         directory: directory.to_path_buf(),
         manifest,
-        payload: ModPayload::Authoring(AuthoringModData {
+        payload: ModPayload::Authoring(Box::new(AuthoringModData {
             patches,
             new_assets,
             vanilla_references,
             materials,
             scripts,
             native,
-        }),
+        })),
     })
 }
 

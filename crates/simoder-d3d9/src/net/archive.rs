@@ -4,13 +4,14 @@ use std::fs::{self, File};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
-use flate2::read::DeflateDecoder;
+use flate2::{CrcReader, read::DeflateDecoder};
 
 #[derive(Debug)]
 struct CentralDirectoryEntry {
     compression_method: u16,
+    expected_crc32: u32,
     compressed_size: u64,
-    _uncompressed_size: u64,
+    uncompressed_size: u64,
     local_header_offset: u64,
     file_name: String,
 }
@@ -83,11 +84,12 @@ pub fn extract_zip_archive(zip_path: &Path, target_dir: &Path) -> Result<usize, 
         file.read_exact(&mut header)
             .map_err(|e| format!("Failed reading Central Directory header: {e}"))?;
 
-        if &header[0..4] != [0x50, 0x4b, 0x01, 0x02] {
+        if header[0..4] != [0x50, 0x4b, 0x01, 0x02] {
             return Err("Invalid Central Directory header signature".into());
         }
 
         let compression = u16::from_le_bytes([header[10], header[11]]);
+        let expected_crc32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
         let comp_size = u32::from_le_bytes([header[20], header[21], header[22], header[23]]) as u64;
         let uncomp_size = u32::from_le_bytes([header[24], header[25], header[26], header[27]]) as u64;
         let name_len = u16::from_le_bytes([header[28], header[29]]) as usize;
@@ -108,8 +110,9 @@ pub fn extract_zip_archive(zip_path: &Path, target_dir: &Path) -> Result<usize, 
 
         entries.push(CentralDirectoryEntry {
             compression_method: compression,
+            expected_crc32,
             compressed_size: comp_size,
-            _uncompressed_size: uncomp_size,
+            uncompressed_size: uncomp_size,
             local_header_offset: local_hdr_offset,
             file_name,
         });
@@ -164,7 +167,7 @@ pub fn extract_zip_archive(zip_path: &Path, target_dir: &Path) -> Result<usize, 
         file.read_exact(&mut loc_hdr)
             .map_err(|e| format!("Failed reading local header: {e}"))?;
 
-        if &loc_hdr[0..4] != [0x50, 0x4b, 0x03, 0x04] {
+        if loc_hdr[0..4] != [0x50, 0x4b, 0x03, 0x04] {
             return Err(format!(
                 "Invalid local file header signature for '{}'",
                 entry.file_name
@@ -179,19 +182,19 @@ pub fn extract_zip_archive(zip_path: &Path, target_dir: &Path) -> Result<usize, 
         let mut out_file = File::create(&dest_full_path)
             .map_err(|e| format!("Failed creating output file '{}': {e}", dest_full_path.display()))?;
 
-        match entry.compression_method {
+        let (actual_crc, actual_size) = match entry.compression_method {
             0 => {
-                // Store (no compression).
-                let mut reader = (&mut file).take(entry.compressed_size);
-                std::io::copy(&mut reader, &mut out_file)
+                let mut reader = CrcReader::new((&mut file).take(entry.compressed_size));
+                let written = std::io::copy(&mut reader, &mut out_file)
                     .map_err(|e| format!("Failed copying uncompressed data for '{}': {e}", relative_str))?;
+                (reader.crc().sum(), written)
             }
             8 => {
-                // Deflate.
                 let reader = (&mut file).take(entry.compressed_size);
-                let mut decoder = DeflateDecoder::new(reader);
-                std::io::copy(&mut decoder, &mut out_file)
+                let mut decoder = CrcReader::new(DeflateDecoder::new(reader));
+                let written = std::io::copy(&mut decoder, &mut out_file)
                     .map_err(|e| format!("Failed decompressing deflate data for '{}': {e}", relative_str))?;
+                (decoder.crc().sum(), written)
             }
             other => {
                 return Err(format!(
@@ -199,6 +202,14 @@ pub fn extract_zip_archive(zip_path: &Path, target_dir: &Path) -> Result<usize, 
                     entry.file_name
                 ));
             }
+        };
+
+        if actual_size != entry.uncompressed_size || actual_crc != entry.expected_crc32 {
+            let _ = fs::remove_file(&dest_full_path);
+            return Err(format!(
+                "Integrity check failed for '{}': expected size={} crc={:#010x}, got size={} crc={:#010x}",
+                relative_str, entry.uncompressed_size, entry.expected_crc32, actual_size, actual_crc
+            ));
         }
 
         extracted_count += 1;
@@ -212,10 +223,8 @@ fn find_common_root_prefix(entries: &[CentralDirectoryEntry]) -> Option<String> 
         return None;
     }
     let first = &entries[0].file_name;
-    let root_cand = match first.find('/') {
-        Some(idx) => &first[..idx],
-        None => return None,
-    };
+    let idx = first.find('/')?;
+    let root_cand = &first[..idx];
     if root_cand.is_empty() {
         return None;
     }

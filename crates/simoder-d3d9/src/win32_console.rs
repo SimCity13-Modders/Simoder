@@ -554,25 +554,33 @@ pub fn prompt_and_bootstrap_base(mods_root: &Path) -> Result<(), String> {
         }
     };
 
-    // Parse download URL from release JSON or fallback to main branch zipball.
-    let mut download_url = "https://github.com/MiamiCenterPL/Simoder-Base/archive/refs/heads/main.zip".to_string();
-    if !release_info.is_empty() {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&release_info) {
-            if let Some(assets) = parsed.get("assets").and_then(|a| a.as_array()) {
-                for a in assets {
-                    if let Some(url) = a.get("browser_download_url").and_then(|u| u.as_str()) {
-                        if url.ends_with(".zip") {
-                            download_url = url.to_string();
-                            break;
-                        }
-                    }
-                }
-            }
-            if download_url.ends_with("main.zip") {
-                if let Some(zip_url) = parsed.get("zipball_url").and_then(|u| u.as_str()) {
-                    download_url = zip_url.to_string();
-                }
-            }
+    #[derive(serde::Deserialize)]
+    struct GitHubAssetDto {
+        browser_download_url: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct GitHubReleaseDto {
+        zipball_url: Option<String>,
+        #[serde(default)]
+        assets: Vec<GitHubAssetDto>,
+    }
+
+    // Parse download URL from typed release DTO or fallback to main branch zipball.
+    let mut download_url =
+        "https://github.com/MiamiCenterPL/Simoder-Base/archive/refs/heads/main.zip".to_string();
+    if !release_info.is_empty()
+        && let Ok(parsed) = serde_json::from_str::<GitHubReleaseDto>(&release_info)
+    {
+        if let Some(asset_url) = parsed
+            .assets
+            .into_iter()
+            .filter_map(|a| a.browser_download_url)
+            .find(|u| u.ends_with(".zip"))
+        {
+            download_url = asset_url;
+        } else if let Some(zip_url) = parsed.zipball_url {
+            download_url = zip_url;
         }
     }
 
@@ -581,9 +589,11 @@ pub fn prompt_and_bootstrap_base(mods_root: &Path) -> Result<(), String> {
     let temp_zip = mods_root.join("simoder.base.bootstrap.zip");
     let dl_res = crate::net::download_file(&download_url, &temp_zip, |downloaded, total| {
         if let Some(tot) = total {
-            if tot > 0 {
-                let pct = (downloaded * 100) / tot;
-                write_str(&format!("\r [SIMODER BOOTSTRAP] Downloading: {}% ({}/{} bytes)", pct, downloaded, tot));
+            if let Some(pct) = downloaded.saturating_mul(100).checked_div(tot) {
+                write_str(&format!(
+                    "\r [SIMODER BOOTSTRAP] Downloading: {}% ({}/{} bytes)",
+                    pct, downloaded, tot
+                ));
             }
         } else {
             write_str(&format!("\r [SIMODER BOOTSTRAP] Downloading: {} bytes...", downloaded));

@@ -586,7 +586,7 @@ pub struct RawResourcesModData {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModPayload {
     /// Declarative Schema 2 authoring manifest payload (`simoder.authoring`).
-    Authoring(AuthoringModData),
+    Authoring(Box<AuthoringModData>),
     /// Privileged Schema 3 raw DBPF resource payload (`simoder.raw-resources`).
     RawResources(RawResourcesModData),
 }
@@ -604,7 +604,7 @@ pub struct ModDefinition {
 
 impl ModDefinition {
     /// Return the Schema 2 authoring payload when this mod uses `simoder.authoring`.
-    pub const fn authoring(&self) -> Option<&AuthoringModData> {
+    pub fn authoring(&self) -> Option<&AuthoringModData> {
         match &self.payload {
             ModPayload::Authoring(data) => Some(data),
             ModPayload::RawResources(_) => None,

@@ -146,9 +146,6 @@ fn probe_directory(
 ) -> Result<DiscoveredCandidate, FailedDirectory> {
     let (definition, fingerprint) = manifest::load_stable_candidate(directory)
         .map_err(|err| FailedDirectory::from_error(directory, err))?;
-    if let Some(diag) = manifest::raw_resource_runtime_diagnostic(&definition) {
-        return Err(FailedDirectory::from_manifest(&definition.manifest, diag));
-    }
     assets::validate_no_vanilla_copies(definition.new_assets(), known_vanilla_digests)
         .map_err(|err| FailedDirectory::from_manifest(&definition.manifest, err.to_string()))?;
     Ok(DiscoveredCandidate {

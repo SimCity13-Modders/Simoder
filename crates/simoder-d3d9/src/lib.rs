@@ -13,6 +13,7 @@ pub mod exports;
 pub mod net;
 pub mod pe;
 pub mod proxy_ffi;
+pub mod resource_bridge;
 pub mod runtime;
 pub mod ui_patch_host;
 pub mod vftable;
@@ -31,7 +32,7 @@ use std::path::Path;
 
 pub use {
     base_bridge::*, base_hot_reload::*, bootstrap::*, config::*, exports::*, pe::*, proxy_ffi::*,
-    runtime::*, ui_patch_host::*, vftable::*,
+    resource_bridge::*, runtime::*, ui_patch_host::*, vftable::*,
 };
 
 /// Errors returned by `simoder-d3d9` installation path checks, PE32 parsing, and bootstrap orchestration.

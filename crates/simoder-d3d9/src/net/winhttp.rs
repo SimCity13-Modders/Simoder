@@ -256,7 +256,7 @@ pub fn get_json(url: &str) -> Result<String, String> {
                 }
             }
 
-            if status_code < 200 || status_code >= 300 {
+            if !(200..300).contains(&status_code) {
                 return Err(format!("HTTP request failed with status {status_code}"));
             }
 
@@ -401,7 +401,7 @@ where
                 }
             }
 
-            if status_code < 200 || status_code >= 300 {
+            if !(200..300).contains(&status_code) {
                 return Err(format!("Download failed with HTTP status {status_code}"));
             }
 

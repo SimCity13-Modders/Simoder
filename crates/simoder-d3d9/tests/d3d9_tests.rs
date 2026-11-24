@@ -433,3 +433,42 @@ fn integrated_runtime_unites_all_subsystems_and_forwarding_table_dispatches_d3d9
     assert_eq!(forwarder.factory_call_count(), 2);
     assert_eq!(forwarder.last_sdk_version(), 32);
 }
+
+#[test]
+fn in_memory_dbpf_builder_deduplicates_overrides_and_bypasses_signature() {
+    use simoder_d3d9::build_in_memory_dbpf_bytes;
+    use simoder_mods::{
+        ActiveRawResource, PackageMetadataVerdict, RawResourceOperation,
+        inspect_package_bytes_metadata_policy,
+    };
+
+    let resources = vec![
+        ActiveRawResource {
+            owner: "mod.a".into(),
+            id: "00B1B104:09878A01:00000000F1447010".into(),
+            operation: RawResourceOperation::Add,
+            sha256: "0".repeat(64),
+            bytes: b"older".to_vec(),
+        },
+        ActiveRawResource {
+            owner: "mod.b".into(),
+            id: "00b1b104:09878a01:00000000f1447010".into(),
+            operation: RawResourceOperation::Replace,
+            sha256: "1".repeat(64),
+            bytes: b"newer-override".to_vec(),
+        },
+        ActiveRawResource {
+            owner: "mod.b".into(),
+            id: "2F7D0004:00000000:00000000F1447002".into(),
+            operation: RawResourceOperation::Add,
+            sha256: "2".repeat(64),
+            bytes: b"png-bytes".to_vec(),
+        },
+    ];
+
+    let dbpf_bytes = build_in_memory_dbpf_bytes(&resources).unwrap();
+    assert_eq!(
+        inspect_package_bytes_metadata_policy(&dbpf_bytes).unwrap(),
+        PackageMetadataVerdict::BypassSignature
+    );
+}

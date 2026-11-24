@@ -365,7 +365,7 @@ pub fn bind_game_window(hwnd_val: usize) -> bool {
         }
         SetLastError(0);
         let router_ptr: WndProcFn = router_wndproc;
-        let prev = set_wnd_long(hwnd, GWLP_WNDPROC, router_ptr as isize);
+        let prev = set_wnd_long(hwnd, GWLP_WNDPROC, (router_ptr as usize) as isize);
         if prev == 0 && GetLastError() != 0 {
             let _ = RemovePropW(hwnd, prop_name().as_ptr());
             return false;
@@ -413,7 +413,7 @@ pub fn shutdown_window_dispatch() {
         let _ = RemovePropW(hwnd, prop_name().as_ptr());
         if IsWindow(hwnd) != 0 {
             let router_ptr: WndProcFn = router_wndproc;
-            if get_wnd_long(hwnd, GWLP_WNDPROC) == (router_ptr as isize) && orig != 0 {
+            if get_wnd_long(hwnd, GWLP_WNDPROC) == ((router_ptr as usize) as isize) && orig != 0 {
                 let _ = set_wnd_long(hwnd, GWLP_WNDPROC, orig);
             }
         }

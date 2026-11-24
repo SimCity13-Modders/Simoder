@@ -29,6 +29,10 @@ use crate::exports::D3d9Export;
 use crate::proxy_ffi::{
     FnDirect3DCreate9, FnDirect3DCreate9Ex, global_d3d9_forwarder, global_simoder_runtime,
 };
+use crate::resource_bridge::{
+    initialize_resource_bridge, is_resource_bridge_ready, shutdown_in_memory_raw_resources,
+    sync_in_memory_raw_resources,
+};
 use crate::runtime::ModsUiSnapshot;
 use crate::ui_patch_host::{
     UI_PATCH_APPLICATOR_ES5, build_sync_packet_with_reload, parse_sync_reply,
@@ -108,7 +112,9 @@ impl ModsActionBackend for Win32ModsBackend {
         global_simoder_runtime().with_mod_manager_mut(|maybe| {
             let mgr = maybe.ok_or_else(|| "ModManager unavailable".to_string())?;
             mgr.set_enabled(mod_id, enabled).map_err(|e| e.to_string())
-        })
+        })?;
+        sync_raw_resources_on_game_thread();
+        Ok(())
     }
 
     fn get_region_mods(&self, region_id: &str) -> std::collections::BTreeMap<String, bool> {
@@ -125,10 +131,39 @@ impl ModsActionBackend for Win32ModsBackend {
     }
 }
 
+fn sync_raw_resources_on_game_thread() {
+    if !is_resource_bridge_ready() {
+        return;
+    }
+    let resources = global_simoder_runtime()
+        .with_mod_manager_mut(|maybe| {
+            Ok::<_, String>(maybe.map(|m| m.active_raw_resources()).unwrap_or_default())
+        })
+        .unwrap_or_default();
+    match sync_in_memory_raw_resources(&resources) {
+        Ok(Some(count)) => emit_log(
+            LogLevel::Info,
+            LogSourceType::Loader,
+            "simoder.resources",
+            &format!(
+                "Synchronized {count} in-memory raw resources with IResourceManager"
+            ),
+        ),
+        Ok(None) => {}
+        Err(err) => emit_log(
+            LogLevel::Warning,
+            LogSourceType::Loader,
+            "simoder.resources",
+            &format!("In-memory raw-resources sync deferred/failed: {err}"),
+        ),
+    }
+}
+
 fn on_ui_sync_tick(hwnd: usize) {
     if LOADER_STOPPING.load(Ordering::Acquire) || !is_eawebkit_bridge_ready() {
         return;
     }
+    sync_raw_resources_on_game_thread();
     let runtime = global_simoder_runtime();
     let now_ms = unix_time_ms();
     let last_poll = LAST_HOT_RELOAD_POLL_MS.load(Ordering::Acquire);
@@ -328,6 +363,7 @@ pub fn shutdown_loaded_native_modules() {
     if let Some(mut watcher) = base_hot_reload_slot().try_lock() {
         *watcher = None;
     }
+    shutdown_in_memory_raw_resources();
     shutdown_admitted_native_owners();
     stop_global_logger();
 }
@@ -445,6 +481,22 @@ fn run_bootstrap_worker() {
                         RESERVED_BASE_MOD_ID,
                         &format!("Failed booting Simoder-Base UI host: {err}"),
                     ),
+                }
+
+                if let Err(err) = initialize_resource_bridge(build_verified) {
+                    emit_log(
+                        LogLevel::Warning,
+                        LogSourceType::Loader,
+                        "simoder.resources",
+                        &format!("In-memory resource bridge unavailable: {err}"),
+                    );
+                } else {
+                    emit_log(
+                        LogLevel::Info,
+                        LogSourceType::Loader,
+                        "simoder.resources",
+                        "Initialized verified in-memory IResourceManager / DatabasePackedFile bridge",
+                    );
                 }
 
                 if let Err(err) = initialize_eawebkit_bridge(build_verified) {

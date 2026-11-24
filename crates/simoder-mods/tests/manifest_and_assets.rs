@@ -339,12 +339,14 @@ fn new_png_glb_material_and_vanilla_reference_validation_enforces_no_vanilla_cop
 }
 
 #[test]
-fn schema3_raw_resources_validates_format_and_is_blocked_from_activation() {
+fn schema3_raw_resources_validates_and_stages_in_memory_without_package_files() {
     let dir = tempfile::tempdir().unwrap();
     let mods_dir = dir.path().join("mods");
+    let simcity_data_dir = dir.path().join("SimCityData");
     let raw_mod_dir = mods_dir.join("RawOverlayMod");
     let assets_dir = raw_mod_dir.join("assets");
     fs::create_dir_all(&assets_dir).unwrap();
+    fs::create_dir_all(&simcity_data_dir).unwrap();
 
     let payload = b"raw-binary-resource-bytes";
     let sha = hex::encode(sha256_bytes(payload));
@@ -355,7 +357,7 @@ fn schema3_raw_resources_validates_format_and_is_blocked_from_activation() {
          requiredCapabilities = [\"resource.register\"]\n\n\
          [metadata]\nid = \"dawid.raw-mod\"\nname = \"Raw Mod\"\nversion = \"1.0.0\"\n\n\
          [[resources]]\n\
-         id = \"00b1b104:40404000:000000001234abcd\"\n\
+         id = \"00b1b104:09878a01:000000001234abcd\"\n\
          operation = \"add\"\n\
          sha256 = \"{sha}\"\n\
          size = {}\n\
@@ -369,7 +371,7 @@ fn schema3_raw_resources_validates_format_and_is_blocked_from_activation() {
     assert_eq!(raw_data.resources.len(), 1);
     assert_eq!(
         raw_data.resources[0].id,
-        "00B1B104:40404000:000000001234ABCD"
+        "00B1B104:09878A01:000000001234ABCD"
     );
     assert_eq!(
         raw_data.required_capabilities,
@@ -382,17 +384,36 @@ fn schema3_raw_resources_validates_format_and_is_blocked_from_activation() {
     let snap = manager.snapshot();
     assert_eq!(snap.len(), 1);
     assert_eq!(snap[0].id, "dawid.raw-mod");
-    assert_eq!(snap[0].state, ModState::Failed);
-    assert!(!snap[0].can_enable);
-    assert!(
-        snap[0]
-            .diagnostic
-            .as_deref()
+    assert_eq!(snap[0].state, ModState::Inactive);
+    assert!(snap[0].can_enable);
+    assert_eq!(snap[0].new_asset_count, 1);
+    assert!(snap[0].diagnostic.is_none());
+
+    manager.set_enabled("dawid.raw-mod", true).unwrap();
+    assert!(registry.is_active("dawid.raw-mod"));
+    let active_snap = manager.snapshot();
+    assert_eq!(active_snap[0].state, ModState::Active);
+    assert!(fs::read_dir(&simcity_data_dir).unwrap().next().is_none());
+    let staged = manager.active_raw_resources();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(
+        manager
+            .resolve_raw_resource("00b1b104:09878a01:000000001234abcd")
             .unwrap()
-            .contains("resource.register")
+            .bytes,
+        payload
     );
-    assert!(manager.set_enabled("dawid.raw-mod", true).is_err());
+
+    manager.set_enabled("dawid.raw-mod", false).unwrap();
     assert!(!registry.is_active("dawid.raw-mod"));
+    let inactive_snap = manager.snapshot();
+    assert_eq!(inactive_snap[0].state, ModState::Inactive);
+    assert!(manager.active_raw_resources().is_empty());
+    assert!(
+        manager
+            .resolve_raw_resource("00B1B104:09878A01:000000001234ABCD")
+            .is_none()
+    );
 
     let missing_cap = valid_raw.replace("operation = \"add\"", "operation = \"replace\"");
     fs::write(raw_mod_dir.join("mod.toml"), &missing_cap).unwrap();
@@ -401,7 +422,7 @@ fn schema3_raw_resources_validates_format_and_is_blocked_from_activation() {
         Err(ModError::ManifestValidation(_))
     ));
 
-    let bad_tgi = valid_raw.replace("00b1b104:40404000:000000001234abcd", "00b1b104:40404000:1234");
+    let bad_tgi = valid_raw.replace("00b1b104:09878a01:000000001234abcd", "00b1b104:09878a01:1234");
     fs::write(raw_mod_dir.join("mod.toml"), &bad_tgi).unwrap();
     assert!(matches!(
         load_mod_definition(&raw_mod_dir),
@@ -428,4 +449,79 @@ fn schema3_raw_resources_validates_format_and_is_blocked_from_activation() {
         load_stable_candidate(&dir_manifest_mod),
         Err(ModError::ManifestValidation(_))
     ));
+}
+
+#[test]
+fn converted_legacy_package_mod_loads_and_verifies_all_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods_dir = dir.path().join("mods");
+    let mod_dir = mods_dir.join("synthetic.raw-package");
+    for sub in ["assets/properties", "assets/scripts", "assets/images"] {
+        fs::create_dir_all(mod_dir.join(sub)).unwrap();
+    }
+
+    let entries = [
+        (
+            "00B1B104:09878A01:00000000F1447010",
+            "assets/properties/00B1B104_09878A01_00000000F1447010.prop",
+            b"prop-payload-1".as_slice(),
+        ),
+        (
+            "00B1B104:09878A01:00000000F1447011",
+            "assets/properties/00B1B104_09878A01_00000000F1447011.prop",
+            b"prop-payload-2".as_slice(),
+        ),
+        (
+            "0A98EAF0:02FABF01:00000000F1447000",
+            "assets/scripts/0A98EAF0_02FABF01_00000000F1447000.json",
+            br#"{"0x00000001":"Synthetic"}"#.as_slice(),
+        ),
+        (
+            "2F7D0004:00000000:00000000F1447002",
+            "assets/images/2F7D0004_00000000_00000000F1447002.png",
+            b"png-1".as_slice(),
+        ),
+        (
+            "2F7D0004:00000000:00000000F1447003",
+            "assets/images/2F7D0004_00000000_00000000F1447003.png",
+            b"png-2".as_slice(),
+        ),
+        (
+            "3F8662EA:00000000:00000000F1447004",
+            "assets/images/3F8662EA_00000000_00000000F1447004.jpg",
+            b"jpg-1".as_slice(),
+        ),
+    ];
+
+    let mut manifest = String::from(
+        "schemaVersion = 3\ncontract = \"simoder.raw-resources\"\n\
+         requiredCapabilities = [\"resource.register\"]\n\n\
+         [metadata]\nid = \"synthetic.raw-package\"\nname = \"Synthetic Raw Package\"\n\
+         author = \"Tester\"\nversion = \"1.2.3\"\n",
+    );
+    for (id, rel_path, bytes) in entries {
+        fs::write(mod_dir.join(rel_path), bytes).unwrap();
+        let sha = hex::encode(sha256_bytes(bytes));
+        manifest.push_str(&format!(
+            "\n[[resources]]\nid = \"{id}\"\noperation = \"add\"\n\
+             sha256 = \"{sha}\"\nsize = {}\npayload = \"{rel_path}\"\n",
+            bytes.len()
+        ));
+    }
+    fs::write(mod_dir.join("mod.toml"), manifest).unwrap();
+
+    let def = load_mod_definition(&mod_dir).expect("Synthetic 6-entry raw mod should parse cleanly");
+    assert_eq!(def.manifest.id, "synthetic.raw-package");
+    assert_eq!(def.manifest.name, "Synthetic Raw Package");
+    assert_eq!(def.manifest.version, "1.2.3");
+    let raw = def.raw_resources().expect("Should be raw-resources definition");
+    assert_eq!(raw.resources.len(), 6);
+    assert_eq!(raw.required_capabilities, vec![RuntimeCapability::ResourceRegister]);
+    assert!(raw.resources.iter().all(|r| r.operation == simoder_mods::RawResourceOperation::Add));
+
+    let registry = Arc::new(PatchRegistry::new());
+    let manager = ModManager::new(&mods_dir, dir.path().join("state.toon"), registry);
+    manager.initialize().unwrap();
+    manager.set_enabled("synthetic.raw-package", true).unwrap();
+    assert_eq!(manager.active_raw_resources().len(), 6);
 }

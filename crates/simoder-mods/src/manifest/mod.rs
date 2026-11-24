@@ -258,16 +258,6 @@ fn load_mod_definition_with_bytes(
     Ok((definition, manifest_bytes))
 }
 
-/// Produce a diagnostic blocking activation when a validated Schema 3 raw-resources mod requires runtime support.
-pub fn raw_resource_runtime_diagnostic(definition: &ModDefinition) -> Option<String> {
-    definition.raw_resources().map(|raw| {
-        format!(
-            "Validated raw-resources project ({} entries). Activation blocked: resource.register/resource.replace runtime is not enabled in loader.",
-            raw.resources.len()
-        )
-    })
-}
-
 /// Compute a deterministic SHA-256 fingerprint covering `mod.toml` bytes and all bundled asset digests.
 pub fn compute_definition_fingerprint(definition: &ModDefinition) -> Result<ModFingerprint, ModError> {
     let manifest_bytes = read_checked_manifest_bytes(&definition.directory)?;

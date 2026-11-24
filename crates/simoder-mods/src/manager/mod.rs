@@ -128,12 +128,28 @@ struct ModRecord {
     lifecycle: ModLifecycle,
 }
 
+/// In-memory verified binary payload for an active Schema 3 `simoder.raw-resources` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveRawResource {
+    /// Owning mod ID.
+    pub owner: String,
+    /// Canonical uppercase `TYPE:GROUP:16-HEX-INSTANCE` resource ID.
+    pub id: String,
+    /// Resource mutation operation (`add` or `replace`).
+    pub operation: RawResourceOperation,
+    /// Verified lowercase 64-character SHA-256 hex digest.
+    pub sha256: String,
+    /// Verified raw resource bytes held in memory (never written to `.package` on disk).
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Default)]
 struct InnerState {
     initialized: bool,
     records: BTreeMap<String, ModRecord>,
     failed_discoveries: Vec<ModUiEntry>,
     enabled_order: Vec<String>,
+    active_raw_resources: BTreeMap<String, Vec<ActiveRawResource>>,
 }
 
 /// Manages mod discovery under `mods/`, active persistence in `state.toon`, change staging,
@@ -383,7 +399,10 @@ impl ModManager {
                 },
                 pending_patches: pending
                     .map_or_else(Vec::new, |p| p.definition.patches().to_vec()),
-                new_asset_count: record.definition.new_assets().len(),
+                new_asset_count: record.definition.raw_resources().map_or_else(
+                    || record.definition.new_assets().len(),
+                    |r| r.resources.len(),
+                ),
                 vanilla_reference_count: record.definition.vanilla_references().len(),
             });
         }
@@ -409,6 +428,32 @@ impl ModManager {
     /// Borrow the underlying shared [`PatchRegistry`].
     pub const fn registry(&self) -> &Arc<PatchRegistry> {
         &self.registry
+    }
+
+    /// Return all active in-memory Schema 3 raw resources ordered by `enabled_order`.
+    pub fn active_raw_resources(&self) -> Vec<ActiveRawResource> {
+        let inner = self.lock_state();
+        let mut out = Vec::new();
+        for owner in &inner.enabled_order {
+            if let Some(entries) = inner.active_raw_resources.get(owner) {
+                out.extend(entries.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// Resolve the highest-priority (last-enabled) active in-memory raw resource matching `canonical_id`.
+    pub fn resolve_raw_resource(&self, canonical_id: &str) -> Option<ActiveRawResource> {
+        let target = canonical_id.to_ascii_uppercase();
+        let inner = self.lock_state();
+        for owner in inner.enabled_order.iter().rev() {
+            if let Some(entries) = inner.active_raw_resources.get(owner)
+                && let Some(found) = entries.iter().find(|entry| entry.id == target)
+            {
+                return Some(found.clone());
+            }
+        }
+        None
     }
 
     fn refresh_locked(&self, inner: &mut InnerState) -> Result<(), ModError> {
@@ -547,6 +592,42 @@ impl ModManager {
         }
     }
 
+    fn load_raw_resources_into_memory(
+        definition: &ModDefinition,
+        known_vanilla_digests: &HashSet<String>,
+    ) -> Result<Vec<ActiveRawResource>, ModError> {
+        let Some(raw) = definition.raw_resources() else {
+            return Ok(Vec::new());
+        };
+        let normalized_vanilla = assets::normalized_digest_set(known_vanilla_digests);
+        let mut loaded = Vec::with_capacity(raw.resources.len());
+        for res in &raw.resources {
+            assets::reject_reparse_or_symlink(&res.resolved_path)?;
+            let bytes = std::fs::read(&res.resolved_path)?;
+            let digest = simoder_core::hex::encode(assets::sha256_bytes(&bytes));
+            if digest != res.sha256 {
+                return Err(ModError::AssetValidation(format!(
+                    "raw resource '{}' modified on disk prior to activation",
+                    res.id
+                )));
+            }
+            if !normalized_vanilla.is_empty() && normalized_vanilla.contains(&digest) {
+                return Err(ModError::VanillaCopyViolation(format!(
+                    "refusing to activate vanilla asset digest {digest} from '{}'",
+                    res.relative_path
+                )));
+            }
+            loaded.push(ActiveRawResource {
+                owner: definition.manifest.id.clone(),
+                id: res.id.clone(),
+                operation: res.operation,
+                sha256: res.sha256.clone(),
+                bytes,
+            });
+        }
+        Ok(loaded)
+    }
+
     fn enable_locked(
         &self,
         inner: &mut InnerState,
@@ -556,7 +637,7 @@ impl ModManager {
         if self.is_stopping() {
             return Err(ModError::Lifecycle("Mod runtime is stopping".into()));
         }
-        let patches = {
+        let (patches, raw_def) = {
             let record = inner
                 .records
                 .get_mut(id)
@@ -567,7 +648,29 @@ impl ModManager {
                 ));
             }
             record.lifecycle = ModLifecycle::Loading;
-            record.definition.patches().to_vec()
+            let raw_def = if record.definition.raw_resources().is_some() {
+                Some(record.definition.clone())
+            } else {
+                None
+            };
+            (record.definition.patches().to_vec(), raw_def)
+        };
+
+        let raw_entries = if let Some(def) = raw_def.as_ref() {
+            match Self::load_raw_resources_into_memory(def, &self.known_vanilla_digests) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    let msg = err.to_string();
+                    if let Some(rec) = inner.records.get_mut(id) {
+                        rec.lifecycle = ModLifecycle::Failed {
+                            diagnostic: msg.clone(),
+                        };
+                    }
+                    return Err(err);
+                }
+            }
+        } else {
+            Vec::new()
         };
 
         let previous_order = inner.enabled_order.clone();
@@ -600,6 +703,9 @@ impl ModManager {
             }
         };
 
+        if !raw_entries.is_empty() {
+            inner.active_raw_resources.insert(id.to_string(), raw_entries);
+        }
         inner.enabled_order = candidate_order;
         if let Some(record) = inner.records.get_mut(id) {
             record.lifecycle = ModLifecycle::Active { diagnostic: None };
@@ -653,6 +759,8 @@ impl ModManager {
                 return Err(ModError::Lifecycle(msg));
             }
         };
+
+        inner.active_raw_resources.remove(id);
 
         inner.enabled_order = candidate_order;
         if let Some(record) = inner.records.get_mut(id) {
