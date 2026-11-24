@@ -11,8 +11,18 @@ jobs:
   windows-x86:
     runs-on: windows-2022
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Simoder
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          path: Simoder
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          repository: SimCity13-Modders/Simoder-Base
+          ref: main
+          path: Simoder-Base
       - name: Install i686-pc-windows-msvc target
         run: rustup target add i686-pc-windows-msvc
       - name: Run Clippy on x86_64 and i686-pc-windows-msvc
@@ -35,5 +45,5 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: simoder-windows-x86
-          path: build/staged
+          path: Simoder/build/staged
           if-no-files-found: error
