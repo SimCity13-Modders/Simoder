@@ -12,9 +12,7 @@ def verify(root):
     @return SHA-256 digest of the production DLL.
     """
     root = Path(root)
-    expected = {"d3d9.dll", "licenses/LICENSE", "licenses/THIRD_PARTY_NOTICES.md",
-                "licenses/luau-LICENSE.txt", "licenses/minhook-LICENSE.txt",
-                "licenses/imgui-LICENSE.txt", "licenses/tomlplusplus-LICENSE.txt"}
+    expected = {"d3d9.dll", "licenses/LICENSE.txt", "licenses/THIRD_PARTY_NOTICES.md"}
     files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
     files.discard("SHA256SUMS.txt")
     if files != expected:
@@ -35,8 +33,10 @@ def verify(root):
         raise ValueError("Runtime must be an x86 PE32 DLL")
     digest = hashlib.sha256(data).hexdigest()
     checksum = root / "SHA256SUMS.txt"
-    if checksum.exists() and checksum.read_text(encoding="ascii") != f"{digest}  d3d9.dll\n":
-        raise ValueError("Recorded checksum does not match the runtime DLL")
+    if checksum.exists():
+        recorded = checksum.read_text(encoding="ascii").strip()
+        if recorded not in (f"{digest} *d3d9.dll", f"{digest}  d3d9.dll"):
+            raise ValueError("Recorded checksum does not match the runtime DLL")
     return digest
 
 
